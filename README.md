@@ -17,15 +17,16 @@ Python rhs fn  ->  DiffSL string  ->  XLA FFI call
                                           |
                                     Rust (lib.rs)
                                           |
-                        diffsol BDF solver (forward: Cranelift JIT)
-                        diffsol discrete adjoint (backward: LLVM)
+                                    diffsol BDF solver
 ```
 
 The C++ shim decodes the XLA CallFrame and forwards to Rust via `extern "C"`. All solver logic
 lives in Rust.
 
-Forward solve uses the Cranelift JIT backend for fast compilation. The adjoint (VJP) uses the LLVM
-backend, which is required for sensitivity gradient code generation.
+Two backends are used internally:
+- **Forward solve**: Cranelift JIT (fast compilation, no LLVM overhead)
+- **Adjoint (VJP)**: LLVM (required for sensitivity gradient code generation; Cranelift does not
+  emit the `*_sgrad` symbols needed for discrete adjoint)
 
 ## Requirements
 
@@ -43,8 +44,8 @@ uv sync
 uv run maturin develop --release
 ```
 
-The `.cargo/config.toml` sets `LLVM_SYS_201_PREFIX` to `/opt/homebrew/opt/llvm`. If LLVM is
-installed elsewhere, update that path.
+LLVM 20 is required for the adjoint. `.cargo/config.toml` sets `LLVM_SYS_201_PREFIX` to
+`/opt/homebrew/opt/llvm`. If LLVM is installed elsewhere, update that path.
 
 ## Usage
 

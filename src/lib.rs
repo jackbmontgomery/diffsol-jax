@@ -207,6 +207,7 @@ fn adjoint_inner(
     n_times: usize,
     n_state: usize,
     g_ys: &[f64],
+    method: Method,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
     // VJP builds a fresh problem each call: the checkpointer returned by
     // solve_dense_with_checkpointing borrows from the problem, so caching the
@@ -223,14 +224,6 @@ fn adjoint_inner(
         .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
         .collect();
 
-    let mut solver = problem
-        .bdf::<NalgebraLU<f64>>()
-        .map_err(|e| format!("bdf: {e}"))?;
-
-    let (checkpointer, _fwd_mat) = solver
-        .solve_dense_with_checkpointing(ts.as_slice(), None)
-        .map_err(|e| format!("fwd checkpointing: {e}"))?;
-
     // g_mat: [n_state x n_times], column i = dg/du at time i
     // g_ys is row-major [n_times x n_state]: g_ys[i * n_state + j] = dg/dy[j] at time i
     let mut g_mat = NalgebraMat::<f64>::zeros(n_state, n_times, NalgebraContext);
@@ -240,28 +233,70 @@ fn adjoint_inner(
         }
     }
 
-    // nout_override=1: computing gradient of a single scalar loss
-    let adj_solver = problem
-        .bdf_solver_adjoint::<NalgebraLU<f64>, _>(checkpointer, Some(1))
-        .map_err(|e| format!("adj_bdf: {e}"))?;
-
-    let state = adj_solver
-        .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
-        .map_err(|e| format!("adj_pass: {e}"))?;
-
-    let common = state.into_common();
-
     let n_params = params.len();
-    let mut grad_p = Vec::with_capacity(n_params);
-    for i in 0..n_params {
-        grad_p.push(common.sg[0].get_index(i));
-    }
-    let mut grad_y0 = Vec::with_capacity(n_state);
-    for i in 0..n_state {
-        grad_y0.push(common.s[0].get_index(i));
-    }
 
-    Ok((grad_p, grad_y0))
+    // Each arm: forward re-run with checkpointing, then adjoint backward pass.
+    // StateCommon is not re-exported from diffsol's crate root, so extraction
+    // is inlined per arm rather than factored into a helper.
+    match method {
+        Method::Bdf => {
+            let mut solver = problem
+                .bdf::<NalgebraLU<f64>>()
+                .map_err(|e| format!("bdf: {e}"))?;
+            let (checkpointer, _) = solver
+                .solve_dense_with_checkpointing(ts.as_slice(), None)
+                .map_err(|e| format!("fwd checkpointing: {e}"))?;
+            let adj = problem
+                .bdf_solver_adjoint::<NalgebraLU<f64>, _>(checkpointer, Some(1))
+                .map_err(|e| format!("adj_bdf: {e}"))?;
+            let common = adj
+                .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
+                .map_err(|e| format!("adj_pass: {e}"))?
+                .into_common();
+            let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
+            let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
+            Ok((grad_p, grad_y0))
+        }
+        Method::Tsit45 => {
+            let mut solver = problem
+                .tsit45()
+                .map_err(|e| format!("tsit45: {e}"))?;
+            let (checkpointer, _) = solver
+                .solve_dense_with_checkpointing(ts.as_slice(), None)
+                .map_err(|e| format!("fwd checkpointing: {e}"))?;
+            let adj = problem
+                .tsit45_solver_adjoint::<_>(checkpointer, Some(1))
+                .map_err(|e| format!("adj_tsit45: {e}"))?;
+            let common = adj
+                .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
+                .map_err(|e| format!("adj_pass: {e}"))?
+                .into_common();
+            let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
+            let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
+            Ok((grad_p, grad_y0))
+        }
+        // ESDIRK34 and TR-BDF2 adjoint solvers diverge on non-trivial problems
+        // (implicit nonlinear solve fails backward in time). Fall back to BDF adjoint,
+        // which uses variable order and is more robust for the backward pass.
+        Method::Esdirk34 | Method::TrBdf2 => {
+            let mut solver = problem
+                .bdf::<NalgebraLU<f64>>()
+                .map_err(|e| format!("bdf (adjoint fallback): {e}"))?;
+            let (checkpointer, _) = solver
+                .solve_dense_with_checkpointing(ts.as_slice(), None)
+                .map_err(|e| format!("fwd checkpointing: {e}"))?;
+            let adj = problem
+                .bdf_solver_adjoint::<NalgebraLU<f64>, _>(checkpointer, Some(1))
+                .map_err(|e| format!("adj_bdf: {e}"))?;
+            let common = adj
+                .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
+                .map_err(|e| format!("adj_pass: {e}"))?
+                .into_common();
+            let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
+            let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
+            Ok((grad_p, grad_y0))
+        }
+    }
 }
 
 #[pyfunction]
@@ -281,8 +316,9 @@ F_i {
     let n_state = 2usize;
     let g_ys = vec![1.0f64; n_times * n_state];
 
-    let (grad_p, grad_y0) = adjoint_inner(src, &params, 0.0, 10.0, n_times, n_state, &g_ys)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    let (grad_p, grad_y0) =
+        adjoint_inner(src, &params, 0.0, 10.0, n_times, n_state, &g_ys, Method::Bdf)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
     let all: Vec<f64> = grad_p.into_iter().chain(grad_y0).collect();
     Ok(all.to_object(py))
@@ -301,6 +337,7 @@ pub unsafe extern "C" fn diffsol_vjp_rust(
     grad_y0_out: *mut f64,
     n_times: usize,
     n_state: usize,
+    method: i32,
     err_buf: *mut c_char,
     err_buf_len: usize,
 ) -> i32 {
@@ -309,9 +346,10 @@ pub unsafe extern "C" fn diffsol_vjp_rust(
         let src = std::str::from_utf8(src_bytes).map_err(|e| format!("utf8: {e}"))?;
         let params_slice = slice::from_raw_parts(params, n_params);
         let g_ys_slice = slice::from_raw_parts(g_ys, n_times * n_state);
+        let method = Method::from_i32(method)?;
 
         let (grad_p, grad_y0) =
-            adjoint_inner(src, params_slice, t0, t_final, n_times, n_state, g_ys_slice)?;
+            adjoint_inner(src, params_slice, t0, t_final, n_times, n_state, g_ys_slice, method)?;
 
         slice::from_raw_parts_mut(grad_p_out, n_params).copy_from_slice(&grad_p);
         slice::from_raw_parts_mut(grad_y0_out, n_state).copy_from_slice(&grad_y0);

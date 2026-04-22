@@ -48,7 +48,7 @@ def diffsol_solve(
     return ys, ts
 
 
-def _ffi_vjp(src, params, t_span, g_ys, n_times, n_state):
+def _ffi_vjp(src, params, t_span, g_ys, n_times, n_state, method: int = 0):
     _ensure_registered()
     n_params = params.shape[0]
     out_type = (
@@ -62,6 +62,7 @@ def _ffi_vjp(src, params, t_span, g_ys, n_times, n_state):
         diffsl_src=src,
         n_times=np.int64(n_times),
         n_state=np.int64(n_state),
+        method=np.int64(method),
     )
 
 
@@ -110,7 +111,8 @@ def make_diffsol_solver(
     def bwd(res, g):
         params, t_span = res
         g_ys, _ = g
-        grad_params, _grad_y0 = _ffi_vjp(src, params, t_span, g_ys, n_times, n_state)
+        grad_params, _grad_y0 = _ffi_vjp(src, params, t_span, g_ys, n_times, n_state,
+                                          method=fwd_code)
         return grad_params, jnp.zeros_like(t_span)
 
     solve.defvjp(fwd, bwd)

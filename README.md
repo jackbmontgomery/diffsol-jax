@@ -1,7 +1,7 @@
 # diffsol-jax
 
 JAX wrapper around [diffsol](https://github.com/martinjrobins/diffsol), a Rust ODE solver library.
-Exposes diffsol's BDF solver via `jax.ffi` so it can be called from inside `jax.jit` and
+Exposes diffsol's ODE solvers via `jax.ffi` so they can be called from inside `jax.jit` and
 differentiated with `jax.grad`.
 
 The user writes an RHS function in Python, which gets lowered to a
@@ -17,7 +17,7 @@ Python rhs fn  ->  DiffSL string  ->  XLA FFI call
                                           |
                                     Rust (lib.rs)
                                           |
-                                    diffsol BDF solver
+                                    diffsol solver (BDF / Tsit45 / ESDIRK34 / TR-BDF2)
 ```
 
 The C++ shim decodes the XLA CallFrame and forwards to Rust via `extern "C"`. All solver logic lives
@@ -88,6 +88,25 @@ The RHS must return a tuple of scalars (one per state component). It can use sta
 operations; the lowerer handles elementwise arithmetic, unary functions, and parameter/state
 indexing via Python-level unpacking.
 
+### Solver selection
+
+Four solvers are available via the `method=` argument:
+
+| `method=` | Type | Adjoint |
+|---|---|---|
+| `"bdf"` (default) | BDF (implicit, variable-order) | BDF |
+| `"tsit45"` | Tsitouras 4(5) (explicit) | Tsit45 |
+| `"esdirk34"` | ESDIRK3(4) (implicit) | BDF (fallback) |
+| `"tr_bdf2"` | TR-BDF2 (implicit) | BDF (fallback) |
+
+```python
+solver, _ = make_diffsol_solver(rhs, y0=y0, p_example=params, method="tsit45")
+```
+
+BDF and Tsit45 use their own solver for both forward and backward passes. ESDIRK34 and TR-BDF2
+fall back to BDF for the adjoint — their implicit adjoint solvers fail to converge on non-trivial
+problems (the adjoint ODEs are typically harder to integrate than the forward).
+
 ### Gradients
 
 `jax.grad` works out of the box:
@@ -157,4 +176,5 @@ uv run pytest tests/ -v
   with the adjoint checkpointer).
 - Gradient wrt `y0` is computed internally but not returned; `y0` is baked into the DiffSL source.
 - Gradient wrt `t_span` returns zeros.
-- Only BDF solver
+- ESDIRK34 and TR-BDF2 fall back to BDF for the adjoint; their own adjoint solvers fail to
+  converge on non-trivial problems.

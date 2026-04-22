@@ -1,16 +1,3 @@
-"""
-Stiff forward-solve benchmark: diffsol-jax (BDF) vs diffrax (Kvaerno5).
-
-Van der Pol oscillator with mu=1000 — a standard stiff ODE benchmark.
-  dy1/dt = y2
-  dy2/dt = mu * (1 - y1^2) * y2 - y1
-
-t in [0, 2*mu] (one full slow oscillation), 200 output times.
-
-Run with:
-    uv run python benchmarks/bench_stiff.py
-"""
-
 import time
 import jax
 import jax.numpy as jnp
@@ -22,11 +9,11 @@ jax.config.update("jax_enable_x64", True)
 MU = 1000.0
 PARAMS = jnp.array([MU])
 Y0 = jnp.array([2.0, 0.0])
-T_END = 2 * MU          # one slow oscillation
+T_END = 2 * MU
 T_SPAN = jnp.array([0.0, T_END])
 N_TIMES = 200
 N_WARMUP = 3
-N_REPEAT = 10            # fewer reps — stiff solve is slower
+N_REPEAT = 10
 
 
 def van_der_pol(t, y, p):
@@ -35,7 +22,7 @@ def van_der_pol(t, y, p):
     return (y2, mu * (1.0 - y1 * y1) * y2 - y1)
 
 
-# ── diffsol-jax (BDF) ─────────────────────────────────────────────────────────
+# diffsol-jax (BDF)
 
 solver_ds, _ = make_diffsol_solver(
     van_der_pol,
@@ -59,7 +46,7 @@ for _ in range(N_REPEAT):
 ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
 
-# ── diffrax (Kvaerno5 — 5th-order implicit Runge-Kutta) ──────────────────────
+# diffrax (Kvaerno5)
 
 ts_save = jnp.linspace(0.0, T_END, N_TIMES)
 
@@ -97,12 +84,12 @@ for _ in range(N_REPEAT):
 dx_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
 
-# ── results ───────────────────────────────────────────────────────────────────
+# results
 
 max_diff = float(jnp.max(jnp.abs(ys_ds - ys_dx)))
 
-print(f"\nVan der Pol  mu={MU:.0f}  t=[0, {T_END:.0f}]  n_times={N_TIMES}  n={N_REPEAT} runs")
-print(f"  diffsol-jax  (BDF):       {ds_ms:.1f} ms/call")
-print(f"  diffrax      (Kvaerno5):  {dx_ms:.1f} ms/call")
-print(f"  speedup (diffrax/diffsol): {dx_ms/ds_ms:.2f}x")
-print(f"  max |ys_diffsol - ys_diffrax|: {max_diff:.2e}")
+print(f"Van der Pol mu={MU:.0f} t=[0, {T_END:.0f}] (n_times={N_TIMES}, n={N_REPEAT})")
+print(f"  diffsol-jax (BDF):      {ds_ms:.1f} ms/call")
+print(f"  diffrax     (Kvaerno5): {dx_ms:.1f} ms/call")
+print(f"  speedup:                {dx_ms/ds_ms:.2f}x")
+print(f"  max |diff|:             {max_diff:.2e}")

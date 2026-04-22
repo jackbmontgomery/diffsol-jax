@@ -140,3 +140,4 @@ uv run pytest tests/ -v
   with the adjoint checkpointer).
 - Gradient wrt `y0` is computed internally but not returned; `y0` is baked into the DiffSL source.
 - Gradient wrt `t_span` returns zeros.
+- Only BDF solver

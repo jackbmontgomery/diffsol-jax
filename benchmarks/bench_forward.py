@@ -1,12 +1,3 @@
-"""
-Forward-solve benchmark: diffsol-jax vs diffrax (Dopri5 + SaveAt).
-
-Lotka-Volterra, t in [0, 10], 200 output times.
-
-Run with:
-    uv run python benchmarks/bench_forward.py
-"""
-
 import time
 import jax
 import jax.numpy as jnp
@@ -29,7 +20,7 @@ def lotka_volterra(t, y, p):
     return (alpha * x - beta * x * yy, delta * x * yy - gamma * yy)
 
 
-# ── diffsol-jax ──────────────────────────────────────────────────────────────
+# diffsol-jax
 
 solver_ds, _ = make_diffsol_solver(
     lotka_volterra,
@@ -42,7 +33,6 @@ solver_ds, _ = make_diffsol_solver(
 
 diffsol_jit = jax.jit(lambda p: solver_ds(p, T_SPAN))
 
-# warmup (includes first-call Cranelift compilation)
 for _ in range(N_WARMUP):
     ys_ds, _ = diffsol_jit(PARAMS)
     ys_ds.block_until_ready()
@@ -54,7 +44,7 @@ for _ in range(N_REPEAT):
 ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
 
-# ── diffrax (Dopri5, fixed SaveAt times) ─────────────────────────────────────
+# diffrax (Dopri5)
 
 ts_save = jnp.linspace(0.0, 10.0, N_TIMES)
 
@@ -75,7 +65,7 @@ def diffrax_solve(p):
         saveat=diffrax.SaveAt(ts=ts_save),
         stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-8),
     )
-    return sol.ys  # [N_TIMES, 2]
+    return sol.ys
 
 diffrax_jit = jax.jit(diffrax_solve)
 
@@ -90,12 +80,12 @@ for _ in range(N_REPEAT):
 dx_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
 
-# ── results ───────────────────────────────────────────────────────────────────
+# results
 
 max_diff = float(jnp.max(jnp.abs(ys_ds - ys_dx)))
 
-print(f"\nLotka-Volterra forward solve  (n_times={N_TIMES}, n={N_REPEAT} runs)")
-print(f"  diffsol-jax  (BDF, Cranelift):  {ds_ms:.2f} ms/call")
-print(f"  diffrax      (Dopri5, JIT):     {dx_ms:.2f} ms/call")
-print(f"  speedup (diffrax/diffsol):      {dx_ms/ds_ms:.2f}x")
-print(f"  max |ys_diffsol - ys_diffrax|:  {max_diff:.2e}")
+print(f"Lotka-Volterra forward solve (n_times={N_TIMES}, n={N_REPEAT})")
+print(f"  diffsol-jax (BDF, Cranelift): {ds_ms:.2f} ms/call")
+print(f"  diffrax     (Dopri5):         {dx_ms:.2f} ms/call")
+print(f"  speedup:                      {dx_ms/ds_ms:.2f}x")
+print(f"  max |diff|:                   {max_diff:.2e}")

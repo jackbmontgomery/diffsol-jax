@@ -2,10 +2,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from diffsol_jax import make_diffsol_solver
-from diffsol_jax.lowering import lotka_volterra
 from scipy.integrate import solve_ivp
 
 jax.config.update("jax_enable_x64", True)
+
+
+def lotka_volterra(t, y, p):
+    x, yy = y[0], y[1]
+    alpha, beta, delta, gamma = p[0], p[1], p[2], p[3]
+    return (alpha * x - beta * x * yy, delta * x * yy - gamma * yy)
 
 
 def test_lv_matches_scipy():
@@ -20,7 +25,7 @@ def test_lv_matches_scipy():
         n_times=200,
     )
     print(src)
-    ys, ts = solver(params, 10.0)
+    ys, ts = solver(params, jnp.array([0.0, 10.0]))
 
     def f(t, y):
         a, b, d, g = params
@@ -43,7 +48,7 @@ def test_lv_under_jit():
         param_names=["alpha", "beta", "delta", "gamma"],
         state_names=["x", "y"],
     )
-    jit_solver = jax.jit(lambda p: solver(p, 10.0))
+    jit_solver = jax.jit(lambda p: solver(p, jnp.array([0.0, 10.0])))
     ys1, _ = jit_solver(params)
     ys2, _ = jit_solver(params * 1.01)
     assert ys1.shape == (200, 2)

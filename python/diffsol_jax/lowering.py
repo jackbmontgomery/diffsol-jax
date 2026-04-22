@@ -240,13 +240,19 @@ def make_diffsl_tuple(
                 continue
         if pn == "squeeze":
             (a,) = eqn.invars
-            name, subs = env.get(a)
-            env.bind(eqn.outvars[0], name, "")
+            if a is env._p_var and n_param == 1:
+                env.bind(eqn.outvars[0], env._param_names_by_index[0], "")
+            elif a is env._y_var and n_state == 1:
+                env.bind(eqn.outvars[0], env._state_names_by_index[0], "")
+            else:
+                name, subs = env.get(a)
+                env.bind(eqn.outvars[0], name, "")
             continue
         _emit_eqn(eqn, env, lines)
 
     if n_state == 1:
-        u_line = f"u {{ {state_names[0]} = {_fmt_float(float(y0))} }}"
+        y0_scalar = float(y0[0]) if y0.ndim == 1 else float(y0)
+        u_line = f"u {{ {state_names[0]} = {_fmt_float(y0_scalar)} }}"
     else:
         inits = ", ".join(
             f"{state_names[i]} = {_fmt_float(float(y0[i]))}" for i in range(n_state)
@@ -267,37 +273,3 @@ def make_diffsl_tuple(
     header = lines[0]
     body = "\n".join(lines[1:])
     return f"{header}\n{u_line}\n{body}\n{f_line}\n"
-
-
-def lotka_volterra(t, y, p):
-    x, yy = y[0], y[1]
-    alpha, beta, delta, gamma = p[0], p[1], p[2], p[3]
-    return (alpha * x - beta * x * yy, delta * x * yy - gamma * yy)
-
-
-def lorenz(t, y, p):
-    x, yy, z = y[0], y[1], y[2]
-    sigma, rho, beta = p[0], p[1], p[2]
-    return (sigma * (yy - x), x * (rho - z) - yy, x * yy - beta * z)
-
-
-if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
-
-    lv_src = make_diffsl_tuple(
-        lotka_volterra,
-        y0=jnp.array([1.0, 0.5]),
-        p_example=jnp.array([1.5, 1.0, 0.75, 3.0]),
-        param_names=["alpha", "beta", "delta", "gamma"],
-        state_names=["x", "y"],
-    )
-    print(lv_src)
-
-    lz_src = make_diffsl_tuple(
-        lorenz,
-        y0=jnp.array([1.0, 0.0, 0.0]),
-        p_example=jnp.array([10.0, 28.0, 8.0 / 3.0]),
-        param_names=["sigma", "rho", "beta"],
-        state_names=["x", "y", "z"],
-    )
-    print(lz_src)

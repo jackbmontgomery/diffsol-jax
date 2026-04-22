@@ -1,11 +1,12 @@
 # diffsol-jax
 
 JAX wrapper around [diffsol](https://github.com/martinjrobins/diffsol), a Rust ODE solver library.
-Exposes diffsol's BDF solver via `jax.ffi` so it can be called from inside `jax.jit`.
+Exposes diffsol's BDF solver via `jax.ffi` so it can be called from inside `jax.jit` and
+differentiated with `jax.grad`.
 
 The user writes an RHS function in Python, which gets lowered to a
-[DiffSL](https://martinjrobins.github.io/diffsl/) source string and compiled by diffsol's Cranelift
-JIT backend at call time.
+[DiffSL](https://martinjrobins.github.io/diffsl/) source string and compiled at call time.
+Gradients are computed via diffsol's discrete adjoint, wrapped with `jax.custom_vjp`.
 
 ## Architecture
 
@@ -16,17 +17,24 @@ Python rhs fn  ->  DiffSL string  ->  XLA FFI call
                                           |
                                     Rust (lib.rs)
                                           |
-                                    diffsol BDF solver
+                        diffsol BDF solver (forward: Cranelift JIT)
+                        diffsol discrete adjoint (backward: LLVM)
 ```
 
-The C++ shim is a thin layer that decodes the XLA CallFrame and forwards to a Rust function via
-`extern "C"`. All solver logic lives in Rust.
+The C++ shim decodes the XLA CallFrame and forwards to Rust via `extern "C"`. All solver logic
+lives in Rust.
+
+Forward solve uses the Cranelift JIT backend for fast compilation. The adjoint (VJP) uses the LLVM
+backend, which is required for sensitivity gradient code generation.
 
 ## Requirements
 
 - Rust toolchain (stable)
 - Python >= 3.12
 - C++17 compiler
+- LLVM 20 (for adjoint support)
+
+On macOS with Homebrew: `brew install llvm`
 
 ## Install
 
@@ -35,7 +43,12 @@ uv sync
 uv run maturin develop --release
 ```
 
+The `.cargo/config.toml` sets `LLVM_SYS_201_PREFIX` to `/opt/homebrew/opt/llvm`. If LLVM is
+installed elsewhere, update that path.
+
 ## Usage
+
+### Forward solve
 
 ```python
 import jax
@@ -60,13 +73,47 @@ solver, src = make_diffsol_solver(
     state_names=["x", "y"],
 )
 
-ys, ts = jax.jit(lambda p: solver(p, 10.0))(params)
+t_span = jnp.array([0.0, 10.0])
+ys, ts = jax.jit(lambda p: solver(p, t_span))(params)
 # ys: float64[200, 2],  ts: float64[200]
 ```
 
 The RHS must return a tuple of scalars (one per state component). It can use standard JAX
 operations; the lowerer handles elementwise arithmetic, unary functions, and parameter/state
 indexing via Python-level unpacking.
+
+### Gradients
+
+`jax.grad` works out of the box:
+
+```python
+def loss(p):
+    ys, _ = solver(p, t_span)
+    return jnp.sum(ys ** 2)
+
+grad = jax.grad(loss)(params)
+```
+
+The gradient is computed via diffsol's discrete adjoint (stateless: the VJP re-runs the forward
+solve with checkpointing internally, costing ~2x a forward pass).
+
+### Parameter fitting
+
+```python
+import optax
+
+opt = optax.adam(1e-2)
+state = opt.init(params)
+
+@jax.jit
+def step(p, state):
+    loss_val, g = jax.value_and_grad(loss)(p)
+    updates, state = opt.update(g, state)
+    return optax.apply_updates(p, updates), state, loss_val
+
+for _ in range(500):
+    params, state, loss_val = step(params, state)
+```
 
 ## Tests
 
@@ -77,8 +124,10 @@ uv run pytest tests/ -v
 ## Limitations
 
 - CPU only, f64 only.
-- No gradients (diffsol has adjoint support but it is not wired up here yet).
 - No vmap batching rule; `vmap_method="sequential"` gives correct results via a Python loop.
 - The DiffSL lowerer handles elementwise ops and the common ODE patterns (Lotka-Volterra, Lorenz).
-  Operations like `dot_general`, `reduce_sum`, and `concatenate` are not supported.
-- DiffSL is compiled fresh on every call; there is no caching of compiled modules across calls.
+  Operations like `dot_general`, `reduce_sum`, and `concatenate` are not supported (needed for
+  neural ODE case).
+- DiffSL is compiled fresh on every call; no caching of compiled modules across calls.
+- Gradient wrt `y0` is computed internally but not returned; `y0` is baked into the DiffSL source.
+- Gradient wrt `t_span` returns zeros.

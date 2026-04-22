@@ -2,10 +2,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from diffsol_jax import make_diffsol_solver
-from diffsol_jax.lowering import lorenz
 from scipy.integrate import solve_ivp
 
 jax.config.update("jax_enable_x64", True)
+
+
+def lorenz(t, y, p):
+    x, yy, z = y[0], y[1], y[2]
+    sigma, rho, beta = p[0], p[1], p[2]
+    return (sigma * (yy - x), x * (rho - z) - yy, x * yy - beta * z)
 
 
 def test_lorenz_short_horizon():
@@ -20,7 +25,7 @@ def test_lorenz_short_horizon():
         n_times=200,
     )
     print(src)
-    ys, ts = solver(params, 2.0)
+    ys, ts = solver(params, jnp.array([0.0, 2.0]))
 
     def f(t, y):
         s, r, b = params
@@ -43,7 +48,7 @@ def test_lorenz_under_jit():
         param_names=["sigma", "rho", "beta"],
         state_names=["x", "y", "z"],
     )
-    jit_solver = jax.jit(lambda p: solver(p, 2.0))
+    jit_solver = jax.jit(lambda p: solver(p, jnp.array([0.0, 2.0])))
     ys1, _ = jit_solver(params)
     ys2, _ = jit_solver(params * 1.01)
     assert ys1.shape == (200, 3)

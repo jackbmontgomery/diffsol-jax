@@ -14,6 +14,7 @@ def _ensure_registered():
     if _REGISTERED:
         return
     ffi.register_ffi_target("diffsol_solve", _rust.get_ffi_capsule(), platform="cpu")
+    ffi.register_ffi_target("diffsol_vjp", _rust.get_vjp_ffi_capsule(), platform="cpu")
     _REGISTERED = True
 
 
@@ -36,13 +37,30 @@ def diffsol_solve(diffsl_src: str, params, t0, t_final, n_times: int, n_state: i
     return ys, ts
 
 
+def _ffi_vjp(src, params, t_span, g_ys, n_times, n_state):
+    _ensure_registered()
+    n_params = params.shape[0]
+    out_type = (
+        jax.ShapeDtypeStruct((n_params,), jnp.float64),
+        jax.ShapeDtypeStruct((n_state,), jnp.float64),
+    )
+    return ffi.ffi_call("diffsol_vjp", out_type, vmap_method="sequential")(
+        params,
+        t_span,
+        g_ys,
+        diffsl_src=src,
+        n_times=np.int64(n_times),
+        n_state=np.int64(n_state),
+    )
+
+
 def make_diffsol_solver(
     rhs_tuple, y0, p_example, *, param_names=None, state_names=None, n_times=200
 ):
     """Trace rhs_tuple, emit DiffSL, return (solver, src).
 
     rhs_tuple(t, y, p) must return a tuple of scalars, one per state component.
-    solver(params, t_final, t0=0.0) returns (ys, ts).
+    solver(params, t_span) returns (ys, ts); supports jax.grad wrt params.
     """
     y0 = jnp.asarray(y0, dtype=jnp.float64)
     src = make_diffsl_tuple(
@@ -54,7 +72,19 @@ def make_diffsol_solver(
     )
     n_state = int(y0.shape[0]) if y0.ndim == 1 else 1
 
-    def solver(params, t_final, t0=0.0):
-        return diffsol_solve(src, params, t0, t_final, n_times, n_state)
+    @jax.custom_vjp
+    def solve(params, t_span):
+        return diffsol_solve(src, params, t_span[0], t_span[1], n_times, n_state)
 
-    return solver, src
+    def fwd(params, t_span):
+        ys, ts = diffsol_solve(src, params, t_span[0], t_span[1], n_times, n_state)
+        return (ys, ts), (params, t_span)
+
+    def bwd(res, g):
+        params, t_span = res
+        g_ys, _ = g
+        grad_params, _grad_y0 = _ffi_vjp(src, params, t_span, g_ys, n_times, n_state)
+        return grad_params, jnp.zeros_like(t_span)
+
+    solve.defvjp(fwd, bwd)
+    return solve, src

@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
-diffsol = { version = "0.10", default-features = false, features = ["nalgebra", "diffsl-cranelift", "faer"] }
+diffsol = { version = "0.10", default-features = false, features = ["nalgebra", "diffsl-cranelift", "diffsl-llvm20", "faer"] }
 
 [build-dependencies]
 cc = "1.0"

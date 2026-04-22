@@ -1,0 +1,108 @@
+"""
+Stiff forward-solve benchmark: diffsol-jax (BDF) vs diffrax (Kvaerno5).
+
+Van der Pol oscillator with mu=1000 — a standard stiff ODE benchmark.
+  dy1/dt = y2
+  dy2/dt = mu * (1 - y1^2) * y2 - y1
+
+t in [0, 2*mu] (one full slow oscillation), 200 output times.
+
+Run with:
+    uv run python benchmarks/bench_stiff.py
+"""
+
+import time
+import jax
+import jax.numpy as jnp
+import diffrax
+from diffsol_jax import make_diffsol_solver
+
+jax.config.update("jax_enable_x64", True)
+
+MU = 1000.0
+PARAMS = jnp.array([MU])
+Y0 = jnp.array([2.0, 0.0])
+T_END = 2 * MU          # one slow oscillation
+T_SPAN = jnp.array([0.0, T_END])
+N_TIMES = 200
+N_WARMUP = 3
+N_REPEAT = 10            # fewer reps — stiff solve is slower
+
+
+def van_der_pol(t, y, p):
+    mu = p[0]
+    y1, y2 = y[0], y[1]
+    return (y2, mu * (1.0 - y1 * y1) * y2 - y1)
+
+
+# ── diffsol-jax (BDF) ─────────────────────────────────────────────────────────
+
+solver_ds, _ = make_diffsol_solver(
+    van_der_pol,
+    y0=Y0,
+    p_example=PARAMS,
+    param_names=["mu"],
+    state_names=["y1", "y2"],
+    n_times=N_TIMES,
+)
+
+diffsol_jit = jax.jit(lambda p: solver_ds(p, T_SPAN))
+
+for _ in range(N_WARMUP):
+    ys_ds, _ = diffsol_jit(PARAMS)
+    ys_ds.block_until_ready()
+
+t0 = time.perf_counter()
+for _ in range(N_REPEAT):
+    ys_ds, _ = diffsol_jit(PARAMS)
+    ys_ds.block_until_ready()
+ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
+
+
+# ── diffrax (Kvaerno5 — 5th-order implicit Runge-Kutta) ──────────────────────
+
+ts_save = jnp.linspace(0.0, T_END, N_TIMES)
+
+def diffrax_solve(p):
+    mu = p[0]
+
+    def rhs(t, y, args):
+        y1, y2 = y[0], y[1]
+        return jnp.array([y2, args * (1.0 - y1 * y1) * y2 - y1])
+
+    sol = diffrax.diffeqsolve(
+        diffrax.ODETerm(rhs),
+        diffrax.Kvaerno5(),
+        t0=0.0,
+        t1=T_END,
+        dt0=1.0,
+        y0=Y0,
+        args=mu,
+        saveat=diffrax.SaveAt(ts=ts_save),
+        stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-8),
+        max_steps=500_000,
+    )
+    return sol.ys
+
+diffrax_jit = jax.jit(diffrax_solve)
+
+for _ in range(N_WARMUP):
+    ys_dx = diffrax_jit(PARAMS)
+    ys_dx.block_until_ready()
+
+t0 = time.perf_counter()
+for _ in range(N_REPEAT):
+    ys_dx = diffrax_jit(PARAMS)
+    ys_dx.block_until_ready()
+dx_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
+
+
+# ── results ───────────────────────────────────────────────────────────────────
+
+max_diff = float(jnp.max(jnp.abs(ys_ds - ys_dx)))
+
+print(f"\nVan der Pol  mu={MU:.0f}  t=[0, {T_END:.0f}]  n_times={N_TIMES}  n={N_REPEAT} runs")
+print(f"  diffsol-jax  (BDF):       {ds_ms:.1f} ms/call")
+print(f"  diffrax      (Kvaerno5):  {dx_ms:.1f} ms/call")
+print(f"  speedup (diffrax/diffsol): {dx_ms/ds_ms:.2f}x")
+print(f"  max |ys_diffsol - ys_diffrax|: {max_diff:.2e}")

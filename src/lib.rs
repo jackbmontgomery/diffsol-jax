@@ -1,11 +1,20 @@
 use diffsol::{
-    AdjointOdeSolverMethod, CraneliftJitModule, DenseMatrix, LlvmModule, Matrix, MatrixCommon,
-    NalgebraContext, NalgebraLU, NalgebraMat, OdeBuilder, OdeSolverMethod, OdeSolverState, Vector,
+    AdjointOdeSolverMethod, CraneliftJitModule, DenseMatrix, DiffSl, LlvmModule, Matrix,
+    MatrixCommon, NalgebraContext, NalgebraLU, NalgebraMat, NalgebraVec, OdeBuilder, OdeEquations,
+    OdeSolverMethod, OdeSolverProblem, OdeSolverState, Vector,
 };
 use pyo3::prelude::*;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
+
+type SolveProblem = OdeSolverProblem<DiffSl<NalgebraMat<f64>, CraneliftJitModule>>;
+
+thread_local! {
+    static SOLVE_CACHE: RefCell<HashMap<String, SolveProblem>> = RefCell::new(HashMap::new());
+}
 
 fn solve_inner(
     diffsl_src: &str,
@@ -15,49 +24,64 @@ fn solve_inner(
     n_times: usize,
     n_state: usize,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
-    let problem = OdeBuilder::<NalgebraMat<f64>>::new()
-        .p(params.iter().copied())
-        .t0(t0)
-        .rtol(1e-8)
-        .atol([1e-8])
-        .build_from_diffsl::<CraneliftJitModule>(diffsl_src)
-        .map_err(|e| format!("build_from_diffsl: {e}"))?;
-
-    let mut solver = problem
-        .bdf::<NalgebraLU<f64>>()
-        .map_err(|e| format!("bdf: {e}"))?;
-
     let ts: Vec<f64> = (0..n_times)
         .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
         .collect();
 
-    // solve_dense returns [n_state x n_times], one column per output time
-    let mat = solver
-        .solve_dense(ts.as_slice())
-        .map_err(|e| format!("solve_dense: {e}"))?;
+    SOLVE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let problem = match cache.entry(diffsl_src.to_string()) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let problem = e.into_mut();
+                let p_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
+                problem.eqn.set_params(&p_vec);
+                problem.t0 = t0;
+                problem
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let problem = OdeBuilder::<NalgebraMat<f64>>::new()
+                    .p(params.iter().copied())
+                    .t0(t0)
+                    .rtol(1e-8)
+                    .atol([1e-8])
+                    .build_from_diffsl::<CraneliftJitModule>(diffsl_src)
+                    .map_err(|e| format!("build_from_diffsl: {e}"))?;
+                Ok::<_, String>(e.insert(problem))
+            }?,
+        };
 
-    let got_rows = mat.nrows();
-    let got_cols = mat.ncols();
-    if got_rows != n_state {
-        return Err(format!(
-            "state size mismatch: got {got_rows} rows, expected {n_state}"
-        ));
-    }
-    if got_cols != n_times {
-        return Err(format!(
-            "time size mismatch: got {got_cols} cols, expected {n_times}"
-        ));
-    }
+        let mut solver = problem
+            .bdf::<NalgebraLU<f64>>()
+            .map_err(|e| format!("bdf: {e}"))?;
 
-    // flatten to row-major: ys[i * n_state + j] = state j at time i
-    let mut ys = Vec::with_capacity(n_times * n_state);
-    for col in 0..n_times {
-        for row in 0..n_state {
-            ys.push(mat[(row, col)]);
+        // solve_dense returns [n_state x n_times], one column per output time
+        let mat = solver
+            .solve_dense(ts.as_slice())
+            .map_err(|e| format!("solve_dense: {e}"))?;
+
+        let got_rows = mat.nrows();
+        let got_cols = mat.ncols();
+        if got_rows != n_state {
+            return Err(format!(
+                "state size mismatch: got {got_rows} rows, expected {n_state}"
+            ));
         }
-    }
+        if got_cols != n_times {
+            return Err(format!(
+                "time size mismatch: got {got_cols} cols, expected {n_times}"
+            ));
+        }
 
-    Ok((ys, ts))
+        // flatten to row-major: ys[i * n_state + j] = state j at time i
+        let mut ys = Vec::with_capacity(n_times * n_state);
+        for col in 0..n_times {
+            for row in 0..n_state {
+                ys.push(mat[(row, col)]);
+            }
+        }
+
+        Ok((ys, ts))
+    })
 }
 
 unsafe fn write_err(buf: *mut c_char, len: usize, msg: &str) {
@@ -130,6 +154,9 @@ fn adjoint_inner(
     n_state: usize,
     g_ys: &[f64],
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
+    // VJP builds a fresh problem each call: the checkpointer returned by
+    // solve_dense_with_checkpointing borrows from the problem, so caching the
+    // problem across calls introduces lifetime/state conflicts with the adjoint solver.
     let problem = OdeBuilder::<NalgebraMat<f64>>::new()
         .p(params.iter().copied())
         .t0(t0)

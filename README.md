@@ -5,7 +5,7 @@ Exposes diffsol's BDF solver via `jax.ffi` so it can be called from inside `jax.
 differentiated with `jax.grad`.
 
 The user writes an RHS function in Python, which gets lowered to a
-[DiffSL](https://martinjrobins.github.io/diffsl/) source string and compiled at call time.
+[DiffSL](https://martinjrobins.github.io/diffsl/) source string and compiled on first call.
 Gradients are computed via diffsol's discrete adjoint, wrapped with `jax.custom_vjp`.
 
 ## Architecture
@@ -20,13 +20,18 @@ Python rhs fn  ->  DiffSL string  ->  XLA FFI call
                                     diffsol BDF solver
 ```
 
-The C++ shim decodes the XLA CallFrame and forwards to Rust via `extern "C"`. All solver logic
-lives in Rust.
+The C++ shim decodes the XLA CallFrame and forwards to Rust via `extern "C"`. All solver logic lives
+in Rust.
 
 Two backends are used internally:
-- **Forward solve**: Cranelift JIT (fast compilation, no LLVM overhead)
+
+- **Forward solve**: Cranelift JIT (fast compilation, no LLVM overhead). The compiled module is
+  cached per DiffSL source string (thread-local), so repeated calls with different parameters skip
+  recompilation.
 - **Adjoint (VJP)**: LLVM (required for sensitivity gradient code generation; Cranelift does not
-  emit the `*_sgrad` symbols needed for discrete adjoint)
+  emit the `*_sgrad` symbols needed for discrete adjoint). Compiled fresh each VJP call — caching is
+  not safe because the checkpointer returned by the forward pass is tied to the problem object's
+  mutable state.
 
 ## Requirements
 
@@ -95,8 +100,9 @@ def loss(p):
 grad = jax.grad(loss)(params)
 ```
 
-The gradient is computed via diffsol's discrete adjoint (stateless: the VJP re-runs the forward
-solve with checkpointing internally, costing ~2x a forward pass).
+The gradient is computed via diffsol's discrete adjoint. The VJP re-runs the forward solve with
+checkpointing internally (costs ~2x a forward pass) and recompiles the LLVM-backed DiffSL module
+each call.
 
 ### Parameter fitting
 
@@ -129,6 +135,8 @@ uv run pytest tests/ -v
 - The DiffSL lowerer handles elementwise ops and the common ODE patterns (Lotka-Volterra, Lorenz).
   Operations like `dot_general`, `reduce_sum`, and `concatenate` are not supported (needed for
   neural ODE case).
-- DiffSL is compiled fresh on every call; no caching of compiled modules across calls.
+- Forward DiffSL is cached per source string (thread-local); first call compiles, subsequent calls
+  reuse the compiled Cranelift module. VJP recompiles LLVM each call (caching interacts unsafely
+  with the adjoint checkpointer).
 - Gradient wrt `y0` is computed internally but not returned; `y0` is baked into the DiffSL source.
 - Gradient wrt `t_span` returns zeros.

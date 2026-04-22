@@ -1,0 +1,26 @@
+# Rust
+target/
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[oc]
+*.egg-info/
+dist/
+build/
+wheels/
+.venv/
+.python-version
+
+# C++
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+
+# maturin / mixed builds
+*.whl
+
+# editor
+.DS_Store

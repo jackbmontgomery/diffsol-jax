@@ -1,7 +1,8 @@
 import time
+
+import diffrax
 import jax
 import jax.numpy as jnp
-import diffrax
 from diffsol_jax import make_diffsol_solver
 
 jax.config.update("jax_enable_x64", True)
@@ -50,6 +51,7 @@ ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
 ts_save = jnp.linspace(0.0, T_END, N_TIMES)
 
+
 def diffrax_solve(p):
     mu = p[0]
 
@@ -71,6 +73,7 @@ def diffrax_solve(p):
     )
     return sol.ys
 
+
 diffrax_jit = jax.jit(diffrax_solve)
 
 for _ in range(N_WARMUP):
@@ -91,5 +94,5 @@ max_diff = float(jnp.max(jnp.abs(ys_ds - ys_dx)))
 print(f"Van der Pol mu={MU:.0f} t=[0, {T_END:.0f}] (n_times={N_TIMES}, n={N_REPEAT})")
 print(f"  diffsol-jax (BDF):      {ds_ms:.1f} ms/call")
 print(f"  diffrax     (Kvaerno5): {dx_ms:.1f} ms/call")
-print(f"  speedup:                {dx_ms/ds_ms:.2f}x")
+print(f"  speedup:                {dx_ms / ds_ms:.2f}x")
 print(f"  max |diff|:             {max_diff:.2e}")

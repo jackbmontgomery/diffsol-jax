@@ -1,7 +1,8 @@
 import time
+
+import diffrax
 import jax
 import jax.numpy as jnp
-import diffrax
 from diffsol_jax import make_diffsol_solver
 
 jax.config.update("jax_enable_x64", True)
@@ -26,6 +27,7 @@ solver_ds, _ = make_diffsol_solver(
     lotka_volterra,
     y0=Y0,
     p_example=PARAMS,
+    method="tsit45",
     param_names=["alpha", "beta", "delta", "gamma"],
     state_names=["x", "y"],
     n_times=N_TIMES,
@@ -48,6 +50,7 @@ ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
 ts_save = jnp.linspace(0.0, 10.0, N_TIMES)
 
+
 def diffrax_solve(p):
     def rhs(t, y, args):
         x, yy = y[0], y[1]
@@ -56,7 +59,7 @@ def diffrax_solve(p):
 
     sol = diffrax.diffeqsolve(
         diffrax.ODETerm(rhs),
-        diffrax.Dopri5(),
+        diffrax.Tsit5(),
         t0=0.0,
         t1=10.0,
         dt0=0.05,
@@ -66,6 +69,7 @@ def diffrax_solve(p):
         stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-8),
     )
     return sol.ys
+
 
 diffrax_jit = jax.jit(diffrax_solve)
 
@@ -87,5 +91,5 @@ max_diff = float(jnp.max(jnp.abs(ys_ds - ys_dx)))
 print(f"Lotka-Volterra forward solve (n_times={N_TIMES}, n={N_REPEAT})")
 print(f"  diffsol-jax (BDF, Cranelift): {ds_ms:.2f} ms/call")
 print(f"  diffrax     (Dopri5):         {dx_ms:.2f} ms/call")
-print(f"  speedup:                      {dx_ms/ds_ms:.2f}x")
+print(f"  speedup:                      {dx_ms / ds_ms:.2f}x")
 print(f"  max |diff|:                   {max_diff:.2e}")

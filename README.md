@@ -126,10 +126,10 @@ for _ in range(500):
 
 Forward solve vs diffrax, Apple M-series, `rtol=atol=1e-8`, 200 output times.
 
-| System | diffsol-jax | diffrax | Speedup |
-|---|---|---|---|
-| Lotka-Volterra (non-stiff) | 0.22 ms | 0.23 ms (Dopri5) | 1.1x |
-| Van der Pol μ=1000 (stiff) | 0.5 ms | 65 ms (Kvaerno5) | ~120x |
+| System                     | diffsol-jax | diffrax          | Speedup |
+| -------------------------- | ----------- | ---------------- | ------- |
+| Lotka-Volterra (non-stiff) | 0.08 ms     | 0.23 ms (Dopri5) | 2.92x   |
+| Van der Pol μ=1000 (stiff) | 0.5 ms      | 65 ms (Kvaerno5) | ~120x   |
 
 BDF's variable-order stepping gives a large advantage on stiff problems. On non-stiff systems
 explicit methods like Dopri5 are competitive.

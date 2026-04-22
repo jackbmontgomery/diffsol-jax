@@ -16,6 +16,49 @@ thread_local! {
     static SOLVE_CACHE: RefCell<HashMap<String, SolveProblem>> = RefCell::new(HashMap::new());
 }
 
+#[repr(i32)]
+#[derive(Copy, Clone)]
+enum Method {
+    Bdf = 0,
+    Tsit45 = 1,
+    Esdirk34 = 2,
+    TrBdf2 = 3,
+}
+
+impl Method {
+    fn from_i32(x: i32) -> Result<Self, String> {
+        match x {
+            0 => Ok(Self::Bdf),
+            1 => Ok(Self::Tsit45),
+            2 => Ok(Self::Esdirk34),
+            3 => Ok(Self::TrBdf2),
+            _ => Err(format!("unknown method code {x}")),
+        }
+    }
+}
+
+fn flatten_mat(mat: &NalgebraMat<f64>, n_state: usize, n_times: usize) -> Result<Vec<f64>, String> {
+    if mat.nrows() != n_state {
+        return Err(format!(
+            "state size mismatch: got {} rows, expected {n_state}",
+            mat.nrows()
+        ));
+    }
+    if mat.ncols() != n_times {
+        return Err(format!(
+            "time size mismatch: got {} cols, expected {n_times}",
+            mat.ncols()
+        ));
+    }
+    let mut ys = Vec::with_capacity(n_times * n_state);
+    for col in 0..n_times {
+        for row in 0..n_state {
+            ys.push(mat[(row, col)]);
+        }
+    }
+    Ok(ys)
+}
+
 fn solve_inner(
     diffsl_src: &str,
     params: &[f64],
@@ -23,6 +66,7 @@ fn solve_inner(
     t_final: f64,
     n_times: usize,
     n_state: usize,
+    method: Method,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
     let ts: Vec<f64> = (0..n_times)
         .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
@@ -50,35 +94,43 @@ fn solve_inner(
             }?,
         };
 
-        let mut solver = problem
-            .bdf::<NalgebraLU<f64>>()
-            .map_err(|e| format!("bdf: {e}"))?;
-
         // solve_dense returns [n_state x n_times], one column per output time
-        let mat = solver
-            .solve_dense(ts.as_slice())
-            .map_err(|e| format!("solve_dense: {e}"))?;
-
-        let got_rows = mat.nrows();
-        let got_cols = mat.ncols();
-        if got_rows != n_state {
-            return Err(format!(
-                "state size mismatch: got {got_rows} rows, expected {n_state}"
-            ));
-        }
-        if got_cols != n_times {
-            return Err(format!(
-                "time size mismatch: got {got_cols} cols, expected {n_times}"
-            ));
-        }
-
-        // flatten to row-major: ys[i * n_state + j] = state j at time i
-        let mut ys = Vec::with_capacity(n_times * n_state);
-        for col in 0..n_times {
-            for row in 0..n_state {
-                ys.push(mat[(row, col)]);
+        let ys = match method {
+            Method::Bdf => {
+                let mut solver = problem
+                    .bdf::<NalgebraLU<f64>>()
+                    .map_err(|e| format!("bdf: {e}"))?;
+                let mat = solver
+                    .solve_dense(ts.as_slice())
+                    .map_err(|e| format!("solve_dense: {e}"))?;
+                flatten_mat(&mat, n_state, n_times)?
             }
-        }
+            Method::Tsit45 => {
+                let mut solver = problem.tsit45().map_err(|e| format!("tsit45: {e}"))?;
+                let mat = solver
+                    .solve_dense(ts.as_slice())
+                    .map_err(|e| format!("solve_dense: {e}"))?;
+                flatten_mat(&mat, n_state, n_times)?
+            }
+            Method::Esdirk34 => {
+                let mut solver = problem
+                    .esdirk34::<NalgebraLU<f64>>()
+                    .map_err(|e| format!("esdirk34: {e}"))?;
+                let mat = solver
+                    .solve_dense(ts.as_slice())
+                    .map_err(|e| format!("solve_dense: {e}"))?;
+                flatten_mat(&mat, n_state, n_times)?
+            }
+            Method::TrBdf2 => {
+                let mut solver = problem
+                    .tr_bdf2::<NalgebraLU<f64>>()
+                    .map_err(|e| format!("tr_bdf2: {e}"))?;
+                let mat = solver
+                    .solve_dense(ts.as_slice())
+                    .map_err(|e| format!("solve_dense: {e}"))?;
+                flatten_mat(&mat, n_state, n_times)?
+            }
+        };
 
         Ok((ys, ts))
     })
@@ -106,6 +158,7 @@ pub unsafe extern "C" fn diffsol_solve_rust(
     ts_out: *mut f64,
     n_times: usize,
     n_state: usize,
+    method: i32,
     err_buf: *mut c_char,
     err_buf_len: usize,
 ) -> i32 {
@@ -113,8 +166,9 @@ pub unsafe extern "C" fn diffsol_solve_rust(
         let src_bytes = slice::from_raw_parts(diffsl_src as *const u8, diffsl_src_len);
         let src = std::str::from_utf8(src_bytes).map_err(|e| format!("utf8: {e}"))?;
         let params_slice = slice::from_raw_parts(params, n_params);
+        let method = Method::from_i32(method)?;
 
-        let (ys, ts) = solve_inner(src, params_slice, t0, t_final, n_times, n_state)?;
+        let (ys, ts) = solve_inner(src, params_slice, t0, t_final, n_times, n_state, method)?;
 
         if ys.len() != n_times * n_state {
             return Err(format!(

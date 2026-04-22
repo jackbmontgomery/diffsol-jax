@@ -8,6 +8,14 @@ from .lowering import make_diffsl_tuple
 
 _REGISTERED = False
 
+_METHOD_CODES = {"bdf": 0, "tsit45": 1, "esdirk34": 2, "tr_bdf2": 3}
+
+
+def _method_code(name: str) -> int:
+    if name not in _METHOD_CODES:
+        raise ValueError(f"unknown method {name!r}; available: {sorted(_METHOD_CODES)}")
+    return _METHOD_CODES[name]
+
 
 def _ensure_registered():
     global _REGISTERED
@@ -18,7 +26,9 @@ def _ensure_registered():
     _REGISTERED = True
 
 
-def diffsol_solve(diffsl_src: str, params, t0, t_final, n_times: int, n_state: int):
+def diffsol_solve(
+    diffsl_src: str, params, t0, t_final, n_times: int, n_state: int, method: int = 0
+):
     _ensure_registered()
     params = jnp.asarray(params, dtype=jnp.float64)
     t_span = jnp.array([t0, t_final], dtype=jnp.float64)
@@ -33,6 +43,7 @@ def diffsol_solve(diffsl_src: str, params, t0, t_final, n_times: int, n_state: i
         diffsl_src=diffsl_src,
         n_times=np.int64(n_times),
         n_state=np.int64(n_state),
+        method=np.int64(method),
     )
     return ys, ts
 
@@ -55,13 +66,25 @@ def _ffi_vjp(src, params, t_span, g_ys, n_times, n_state):
 
 
 def make_diffsol_solver(
-    rhs_tuple, y0, p_example, *, param_names=None, state_names=None, n_times=200
+    rhs_tuple,
+    y0,
+    p_example,
+    *,
+    method="bdf",
+    param_names=None,
+    state_names=None,
+    n_times=200,
 ):
     """Trace rhs_tuple, emit DiffSL, return (solver, src).
 
     rhs_tuple(t, y, p) must return a tuple of scalars, one per state component.
     solver(params, t_span) returns (ys, ts); supports jax.grad wrt params.
+
+    method: one of "bdf" (default), "tsit45", "esdirk34", "tr_bdf2".
+    Adjoint always uses BDF regardless of forward method.
     """
+    fwd_code = _method_code(method)
+
     y0 = jnp.asarray(y0, dtype=jnp.float64)
     src = make_diffsl_tuple(
         rhs_tuple,
@@ -74,10 +97,14 @@ def make_diffsol_solver(
 
     @jax.custom_vjp
     def solve(params, t_span):
-        return diffsol_solve(src, params, t_span[0], t_span[1], n_times, n_state)
+        return diffsol_solve(
+            src, params, t_span[0], t_span[1], n_times, n_state, method=fwd_code
+        )
 
     def fwd(params, t_span):
-        ys, ts = diffsol_solve(src, params, t_span[0], t_span[1], n_times, n_state)
+        ys, ts = diffsol_solve(
+            src, params, t_span[0], t_span[1], n_times, n_state, method=fwd_code
+        )
         return (ys, ts), (params, t_span)
 
     def bwd(res, g):

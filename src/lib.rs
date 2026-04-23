@@ -1,7 +1,7 @@
 use diffsol::{
     AdjointOdeSolverMethod, CraneliftJitModule, DenseMatrix, DiffSl, LlvmModule, Matrix,
-    MatrixCommon, NalgebraContext, NalgebraLU, NalgebraMat, NalgebraVec, OdeBuilder, OdeEquations,
-    OdeSolverMethod, OdeSolverProblem, OdeSolverState, Vector,
+    MatrixCommon, NalgebraContext, NalgebraLU, NalgebraMat, NalgebraVec, NonLinearOpAdjoint, Op,
+    OdeBuilder, OdeEquations, OdeSolverMethod, OdeSolverProblem, OdeSolverState, Vector,
 };
 use pyo3::prelude::*;
 use std::cell::RefCell;
@@ -23,6 +23,8 @@ thread_local! {
 enum Method {
     Bdf = 0,
     Tsit45 = 1,
+    Esdirk34 = 2,
+    TrBdf2 = 3,
 }
 
 impl Method {
@@ -30,6 +32,8 @@ impl Method {
         match x {
             0 => Ok(Self::Bdf),
             1 => Ok(Self::Tsit45),
+            2 => Ok(Self::Esdirk34),
+            3 => Ok(Self::TrBdf2),
             _ => Err(format!("unknown method code {x}")),
         }
     }
@@ -105,6 +109,24 @@ fn solve_inner(
             }
             Method::Tsit45 => {
                 let mut solver = problem.tsit45().map_err(|e| format!("tsit45: {e}"))?;
+                let mat = solver
+                    .solve_dense(ts.as_slice())
+                    .map_err(|e| format!("solve_dense: {e}"))?;
+                flatten_mat(&mat, n_state, n_times)?
+            }
+            Method::Esdirk34 => {
+                let mut solver = problem
+                    .esdirk34::<NalgebraLU<f64>>()
+                    .map_err(|e| format!("esdirk34: {e}"))?;
+                let mat = solver
+                    .solve_dense(ts.as_slice())
+                    .map_err(|e| format!("solve_dense: {e}"))?;
+                flatten_mat(&mat, n_state, n_times)?
+            }
+            Method::TrBdf2 => {
+                let mut solver = problem
+                    .tr_bdf2::<NalgebraLU<f64>>()
+                    .map_err(|e| format!("tr_bdf2: {e}"))?;
                 let mat = solver
                     .solve_dense(ts.as_slice())
                     .map_err(|e| format!("solve_dense: {e}"))?;
@@ -216,6 +238,20 @@ fn adjoint_inner(
                 let p_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
                 problem.eqn.set_params(&p_vec);
                 problem.t0 = t0;
+                // Workaround for diffsol bug: DiffSlRhs::jac_mul_inplace passes ddata to
+                // rhs_grad WITHOUT zeroing it first (unlike jac_transpose_mul_inplace which
+                // does ddata.fill(0) before its call). After any adjoint backward pass ddata
+                // holds non-zero adjoint values; those corrupt the next BDF forward
+                // Jacobian-vector product, causing Newton divergence.
+                // Calling jac_transpose_mul_inplace with a zero cotangent triggers the
+                // ddata.fill(0) side-effect; zero cotangent → zero gradient output from
+                // rhs_rgrad, so ddata is left zeroed. Reported upstream.
+                {
+                    let n = problem.eqn.nstates();
+                    let zero = NalgebraVec::zeros(n, NalgebraContext);
+                    let mut out = NalgebraVec::zeros(n, NalgebraContext);
+                    problem.eqn.rhs().jac_transpose_mul_inplace(&zero, t0, &zero, &mut out);
+                }
                 problem
             }
             std::collections::hash_map::Entry::Vacant(e) => {
@@ -262,6 +298,27 @@ fn adjoint_inner(
                 let adj = problem
                     .tsit45_solver_adjoint::<_>(checkpointer, Some(1))
                     .map_err(|e| format!("adj_tsit45: {e}"))?;
+                let common = adj
+                    .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
+                    .map_err(|e| format!("adj_pass: {e}"))?
+                    .into_common();
+                let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
+                let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
+                Ok((grad_p, grad_y0))
+            }
+            // ESDIRK34 and TR-BDF2 adjoint solvers diverge on non-trivial problems
+            // (implicit nonlinear solve fails backward in time). Fall back to BDF adjoint,
+            // which uses variable order and is more robust for the backward pass.
+            Method::Esdirk34 | Method::TrBdf2 => {
+                let mut solver = problem
+                    .bdf::<NalgebraLU<f64>>()
+                    .map_err(|e| format!("bdf (adjoint fallback): {e}"))?;
+                let (checkpointer, _) = solver
+                    .solve_dense_with_checkpointing(ts.as_slice(), None)
+                    .map_err(|e| format!("fwd checkpointing: {e}"))?;
+                let adj = problem
+                    .bdf_solver_adjoint::<NalgebraLU<f64>, _>(checkpointer, Some(1))
+                    .map_err(|e| format!("adj_bdf: {e}"))?;
                 let common = adj
                     .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
                     .map_err(|e| format!("adj_pass: {e}"))?

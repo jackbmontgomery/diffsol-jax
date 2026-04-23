@@ -111,8 +111,9 @@ def make_diffsol_solver(
     def bwd(res, g):
         params, t_span = res
         g_ys, _ = g
-        grad_params, _grad_y0 = _ffi_vjp(src, params, t_span, g_ys, n_times, n_state,
-                                          method=fwd_code)
+        grad_params, _grad_y0 = _ffi_vjp(
+            src, params, t_span, g_ys, n_times, n_state, method=fwd_code
+        )
         return grad_params, jnp.zeros_like(t_span)
 
     solve.defvjp(fwd, bwd)

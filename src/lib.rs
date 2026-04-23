@@ -11,9 +11,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 
 type SolveProblem = OdeSolverProblem<DiffSl<NalgebraMat<f64>, CraneliftJitModule>>;
+type AdjointProblem = OdeSolverProblem<DiffSl<NalgebraMat<f64>, LlvmModule>>;
 
 thread_local! {
     static SOLVE_CACHE: RefCell<HashMap<String, SolveProblem>> = RefCell::new(HashMap::new());
+    static ADJOINT_CACHE: RefCell<HashMap<String, AdjointProblem>> = RefCell::new(HashMap::new());
 }
 
 #[repr(i32)]
@@ -209,17 +211,6 @@ fn adjoint_inner(
     g_ys: &[f64],
     method: Method,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
-    // VJP builds a fresh problem each call: the checkpointer returned by
-    // solve_dense_with_checkpointing borrows from the problem, so caching the
-    // problem across calls introduces lifetime/state conflicts with the adjoint solver.
-    let problem = OdeBuilder::<NalgebraMat<f64>>::new()
-        .p(params.iter().copied())
-        .t0(t0)
-        .rtol(1e-8)
-        .atol([1e-8])
-        .build_from_diffsl::<LlvmModule>(diffsl_src)
-        .map_err(|e| format!("build: {e}"))?;
-
     let ts: Vec<f64> = (0..n_times)
         .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
         .collect();
@@ -235,68 +226,95 @@ fn adjoint_inner(
 
     let n_params = params.len();
 
-    // Each arm: forward re-run with checkpointing, then adjoint backward pass.
-    // StateCommon is not re-exported from diffsol's crate root, so extraction
-    // is inlined per arm rather than factored into a helper.
-    match method {
-        Method::Bdf => {
-            let mut solver = problem
-                .bdf::<NalgebraLU<f64>>()
-                .map_err(|e| format!("bdf: {e}"))?;
-            let (checkpointer, _) = solver
-                .solve_dense_with_checkpointing(ts.as_slice(), None)
-                .map_err(|e| format!("fwd checkpointing: {e}"))?;
-            let adj = problem
-                .bdf_solver_adjoint::<NalgebraLU<f64>, _>(checkpointer, Some(1))
-                .map_err(|e| format!("adj_bdf: {e}"))?;
-            let common = adj
-                .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
-                .map_err(|e| format!("adj_pass: {e}"))?
-                .into_common();
-            let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
-            let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
-            Ok((grad_p, grad_y0))
+    // Cache the compiled problem across calls (same pattern as SOLVE_CACHE for the forward pass).
+    // Each call borrows the cached problem, updates params, runs the full forward+adjoint pass,
+    // then releases the borrow. All solver/checkpointer/adjoint lifetimes are scoped to the
+    // closure so there are no cross-call lifetime conflicts.
+    ADJOINT_CACHE.with(|cache| -> Result<(Vec<f64>, Vec<f64>), String> {
+        let mut cache = cache.borrow_mut();
+        let problem = match cache.entry(diffsl_src.to_string()) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let problem = e.into_mut();
+                let p_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
+                problem.eqn.set_params(&p_vec);
+                problem.t0 = t0;
+                problem
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let problem = OdeBuilder::<NalgebraMat<f64>>::new()
+                    .p(params.iter().copied())
+                    .t0(t0)
+                    .rtol(1e-8)
+                    .atol([1e-8])
+                    .build_from_diffsl::<LlvmModule>(diffsl_src)
+                    .map_err(|e| format!("build: {e}"))?;
+                Ok::<_, String>(e.insert(problem))
+            }?,
+        };
+
+        // Each arm: forward re-run with checkpointing, then adjoint backward pass.
+        // StateCommon is not re-exported from diffsol's crate root, so extraction
+        // is inlined per arm rather than factored into a helper.
+        match method {
+            Method::Bdf => {
+                let mut solver = problem
+                    .bdf::<NalgebraLU<f64>>()
+                    .map_err(|e| format!("bdf: {e}"))?;
+                let (checkpointer, _) = solver
+                    .solve_dense_with_checkpointing(ts.as_slice(), None)
+                    .map_err(|e| format!("fwd checkpointing: {e}"))?;
+                let adj = problem
+                    .bdf_solver_adjoint::<NalgebraLU<f64>, _>(checkpointer, Some(1))
+                    .map_err(|e| format!("adj_bdf: {e}"))?;
+                let common = adj
+                    .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
+                    .map_err(|e| format!("adj_pass: {e}"))?
+                    .into_common();
+                let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
+                let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
+                Ok((grad_p, grad_y0))
+            }
+            Method::Tsit45 => {
+                let mut solver = problem
+                    .tsit45()
+                    .map_err(|e| format!("tsit45: {e}"))?;
+                let (checkpointer, _) = solver
+                    .solve_dense_with_checkpointing(ts.as_slice(), None)
+                    .map_err(|e| format!("fwd checkpointing: {e}"))?;
+                let adj = problem
+                    .tsit45_solver_adjoint::<_>(checkpointer, Some(1))
+                    .map_err(|e| format!("adj_tsit45: {e}"))?;
+                let common = adj
+                    .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
+                    .map_err(|e| format!("adj_pass: {e}"))?
+                    .into_common();
+                let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
+                let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
+                Ok((grad_p, grad_y0))
+            }
+            // ESDIRK34 and TR-BDF2 adjoint solvers diverge on non-trivial problems
+            // (implicit nonlinear solve fails backward in time). Fall back to BDF adjoint,
+            // which uses variable order and is more robust for the backward pass.
+            Method::Esdirk34 | Method::TrBdf2 => {
+                let mut solver = problem
+                    .bdf::<NalgebraLU<f64>>()
+                    .map_err(|e| format!("bdf (adjoint fallback): {e}"))?;
+                let (checkpointer, _) = solver
+                    .solve_dense_with_checkpointing(ts.as_slice(), None)
+                    .map_err(|e| format!("fwd checkpointing: {e}"))?;
+                let adj = problem
+                    .bdf_solver_adjoint::<NalgebraLU<f64>, _>(checkpointer, Some(1))
+                    .map_err(|e| format!("adj_bdf: {e}"))?;
+                let common = adj
+                    .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
+                    .map_err(|e| format!("adj_pass: {e}"))?
+                    .into_common();
+                let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
+                let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
+                Ok((grad_p, grad_y0))
+            }
         }
-        Method::Tsit45 => {
-            let mut solver = problem
-                .tsit45()
-                .map_err(|e| format!("tsit45: {e}"))?;
-            let (checkpointer, _) = solver
-                .solve_dense_with_checkpointing(ts.as_slice(), None)
-                .map_err(|e| format!("fwd checkpointing: {e}"))?;
-            let adj = problem
-                .tsit45_solver_adjoint::<_>(checkpointer, Some(1))
-                .map_err(|e| format!("adj_tsit45: {e}"))?;
-            let common = adj
-                .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
-                .map_err(|e| format!("adj_pass: {e}"))?
-                .into_common();
-            let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
-            let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
-            Ok((grad_p, grad_y0))
-        }
-        // ESDIRK34 and TR-BDF2 adjoint solvers diverge on non-trivial problems
-        // (implicit nonlinear solve fails backward in time). Fall back to BDF adjoint,
-        // which uses variable order and is more robust for the backward pass.
-        Method::Esdirk34 | Method::TrBdf2 => {
-            let mut solver = problem
-                .bdf::<NalgebraLU<f64>>()
-                .map_err(|e| format!("bdf (adjoint fallback): {e}"))?;
-            let (checkpointer, _) = solver
-                .solve_dense_with_checkpointing(ts.as_slice(), None)
-                .map_err(|e| format!("fwd checkpointing: {e}"))?;
-            let adj = problem
-                .bdf_solver_adjoint::<NalgebraLU<f64>, _>(checkpointer, Some(1))
-                .map_err(|e| format!("adj_bdf: {e}"))?;
-            let common = adj
-                .solve_adjoint_backwards_pass(ts.as_slice(), &[&g_mat])
-                .map_err(|e| format!("adj_pass: {e}"))?
-                .into_common();
-            let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
-            let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
-            Ok((grad_p, grad_y0))
-        }
-    }
+    })
 }
 
 #[pyfunction]

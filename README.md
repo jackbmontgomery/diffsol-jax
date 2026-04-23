@@ -29,9 +29,9 @@ Two backends are used internally:
   cached per DiffSL source string (thread-local), so repeated calls with different parameters skip
   recompilation.
 - **Adjoint (VJP)**: LLVM (required for sensitivity gradient code generation; Cranelift does not
-  emit the `*_sgrad` symbols needed for discrete adjoint). Compiled fresh each VJP call — caching is
-  not safe because the checkpointer returned by the forward pass is tied to the problem object's
-  mutable state.
+  emit the `*_sgrad` symbols needed for discrete adjoint). The compiled module is cached per DiffSL
+  source string (thread-local), same pattern as the forward pass. Parameters are updated via
+  `set_params` each call; the LLVM JIT compilation only happens once.
 
 ## Requirements
 
@@ -92,19 +92,19 @@ indexing via Python-level unpacking.
 
 Four solvers are available via the `method=` argument:
 
-| `method=` | Type | Adjoint |
-|---|---|---|
-| `"bdf"` (default) | BDF (implicit, variable-order) | BDF |
-| `"tsit45"` | Tsitouras 4(5) (explicit) | Tsit45 |
-| `"esdirk34"` | ESDIRK3(4) (implicit) | BDF (fallback) |
-| `"tr_bdf2"` | TR-BDF2 (implicit) | BDF (fallback) |
+| `method=`         | Type                           | Adjoint        |
+| ----------------- | ------------------------------ | -------------- |
+| `"bdf"` (default) | BDF (implicit, variable-order) | BDF            |
+| `"tsit45"`        | Tsitouras 4(5) (explicit)      | Tsit45         |
+| `"esdirk34"`      | ESDIRK3(4) (implicit)          | BDF (fallback) |
+| `"tr_bdf2"`       | TR-BDF2 (implicit)             | BDF (fallback) |
 
 ```python
 solver, _ = make_diffsol_solver(rhs, y0=y0, p_example=params, method="tsit45")
 ```
 
-BDF and Tsit45 use their own solver for both forward and backward passes. ESDIRK34 and TR-BDF2
-fall back to BDF for the adjoint — their implicit adjoint solvers fail to converge on non-trivial
+BDF and Tsit45 use their own solver for both forward and backward passes. ESDIRK34 and TR-BDF2 fall
+back to BDF for the adjoint — their implicit adjoint solvers fail to converge on non-trivial
 problems (the adjoint ODEs are typically harder to integrate than the forward).
 
 ### Gradients
@@ -120,8 +120,8 @@ grad = jax.grad(loss)(params)
 ```
 
 The gradient is computed via diffsol's discrete adjoint. The VJP re-runs the forward solve with
-checkpointing internally (costs ~2x a forward pass) and recompiles the LLVM-backed DiffSL module
-each call.
+checkpointing internally (costs ~2x a forward pass). The compiled LLVM module is cached across
+calls, so only the first gradient step pays compilation cost.
 
 ### Parameter fitting
 
@@ -145,6 +145,8 @@ for _ in range(500):
 
 Forward solve vs diffrax, Apple M-series, `rtol=atol=1e-8`, 200 output times.
 
+**Forward solve** vs diffrax, Apple M-series, `rtol=atol=1e-8`, 200 output times.
+
 | System                     | diffsol-jax | diffrax          | Speedup |
 | -------------------------- | ----------- | ---------------- | ------- |
 | Lotka-Volterra (non-stiff) | 0.08 ms     | 0.23 ms (Dopri5) | 2.92x   |
@@ -153,9 +155,20 @@ Forward solve vs diffrax, Apple M-series, `rtol=atol=1e-8`, 200 output times.
 BDF's variable-order stepping gives a large advantage on stiff problems. On non-stiff systems
 explicit methods like Dopri5 are competitive.
 
+**Gradient / parameter fitting** vs diffrax, 500 adam steps, `n_times=50`.
+
+| System                     | diffsol-jax       | diffrax           | Speedup |
+| -------------------------- | ----------------- | ----------------- | ------- |
+| Lotka-Volterra (Tsit45+AD) | 184.9 ms / 500 steps | 2882.4 ms / 500 steps | 15.59x |
+
+Both solvers converge to the same parameters (`max |p_err| = 0.0175`). The speedup comes from
+diffsol running entirely in compiled Rust/LLVM — gradients avoid JAX's tracing overhead on the
+inner solver loop.
+
 ```bash
 uv run python benchmarks/bench_forward.py
 uv run python benchmarks/bench_stiff.py
+uv run python benchmarks/bench_grad.py
 ```
 
 ## Tests
@@ -171,10 +184,9 @@ uv run pytest tests/ -v
 - The DiffSL lowerer handles elementwise ops and the common ODE patterns (Lotka-Volterra, Lorenz).
   Operations like `dot_general`, `reduce_sum`, and `concatenate` are not supported (needed for
   neural ODE case).
-- Forward DiffSL is cached per source string (thread-local); first call compiles, subsequent calls
-  reuse the compiled Cranelift module. VJP recompiles LLVM each call (caching interacts unsafely
-  with the adjoint checkpointer).
+- Forward and adjoint DiffSL modules are cached per source string (thread-local); first call
+  compiles, subsequent calls reuse the compiled module and update parameters via `set_params`.
 - Gradient wrt `y0` is computed internally but not returned; `y0` is baked into the DiffSL source.
 - Gradient wrt `t_span` returns zeros.
-- ESDIRK34 and TR-BDF2 fall back to BDF for the adjoint; their own adjoint solvers fail to
-  converge on non-trivial problems.
+- ESDIRK34 and TR-BDF2 fall back to BDF for the adjoint; their own adjoint solvers fail to converge
+  on non-trivial problems.

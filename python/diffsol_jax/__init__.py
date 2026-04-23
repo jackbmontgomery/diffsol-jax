@@ -8,7 +8,7 @@ from .lowering import make_diffsl_tuple
 
 _REGISTERED = False
 
-_METHOD_CODES = {"bdf": 0, "tsit45": 1, "esdirk34": 2, "tr_bdf2": 3}
+_METHOD_CODES = {"bdf": 0, "tsit45": 1}
 
 
 def _method_code(name: str) -> int:
@@ -81,8 +81,7 @@ def make_diffsol_solver(
     rhs_tuple(t, y, p) must return a tuple of scalars, one per state component.
     solver(params, t_span) returns (ys, ts); supports jax.grad wrt params.
 
-    method: one of "bdf" (default), "tsit45", "esdirk34", "tr_bdf2".
-    Adjoint always uses BDF regardless of forward method.
+    method: one of "bdf" (default), "tsit45".
     """
     fwd_code = _method_code(method)
 

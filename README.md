@@ -17,7 +17,7 @@ Python rhs fn  ->  DiffSL string  ->  XLA FFI call
                                           |
                                     Rust (lib.rs)
                                           |
-                                    diffsol solver (BDF / Tsit45 / ESDIRK34 / TR-BDF2)
+                                    diffsol solver (BDF / Tsit45)
 ```
 
 The C++ shim decodes the XLA CallFrame and forwards to Rust via `extern "C"`. All solver logic lives
@@ -90,22 +90,16 @@ indexing via Python-level unpacking.
 
 ### Solver selection
 
-Four solvers are available via the `method=` argument:
+Two solvers are available via the `method=` argument:
 
-| `method=`         | Type                           | Adjoint        |
-| ----------------- | ------------------------------ | -------------- |
-| `"bdf"` (default) | BDF (implicit, variable-order) | BDF            |
-| `"tsit45"`        | Tsitouras 4(5) (explicit)      | Tsit45         |
-| `"esdirk34"`      | ESDIRK3(4) (implicit)          | BDF (fallback) |
-| `"tr_bdf2"`       | TR-BDF2 (implicit)             | BDF (fallback) |
+| `method=`         | Type                           | Adjoint |
+| ----------------- | ------------------------------ | ------- |
+| `"bdf"` (default) | BDF (implicit, variable-order) | BDF     |
+| `"tsit45"`        | Tsitouras 4(5) (explicit)      | Tsit45  |
 
 ```python
 solver, _ = make_diffsol_solver(rhs, y0=y0, p_example=params, method="tsit45")
 ```
-
-BDF and Tsit45 use their own solver for both forward and backward passes. ESDIRK34 and TR-BDF2 fall
-back to BDF for the adjoint — their implicit adjoint solvers fail to converge on non-trivial
-problems (the adjoint ODEs are typically harder to integrate than the forward).
 
 ### Gradients
 
@@ -157,13 +151,13 @@ explicit methods like Dopri5 are competitive.
 
 **Gradient / parameter fitting** vs diffrax, 500 adam steps, `n_times=50`.
 
-| System                     | diffsol-jax       | diffrax           | Speedup |
-| -------------------------- | ----------------- | ----------------- | ------- |
-| Lotka-Volterra (Tsit45+AD) | 184.9 ms / 500 steps | 2882.4 ms / 500 steps | 15.59x |
+| System                     | diffsol-jax          | diffrax               | Speedup |
+| -------------------------- | -------------------- | --------------------- | ------- |
+| Lotka-Volterra (Tsit45+AD) | 184.9 ms / 500 steps | 2882.4 ms / 500 steps | 15.59x  |
 
 Both solvers converge to the same parameters (`max |p_err| = 0.0175`). The speedup comes from
-diffsol running entirely in compiled Rust/LLVM — gradients avoid JAX's tracing overhead on the
-inner solver loop.
+diffsol running entirely in compiled Rust/LLVM — gradients avoid JAX's tracing overhead on the inner
+solver loop.
 
 ```bash
 uv run python benchmarks/bench_forward.py
@@ -177,6 +171,27 @@ uv run python benchmarks/bench_grad.py
 uv run pytest tests/ -v
 ```
 
+## Known upstream bugs
+
+### diffsol: `jac_mul_inplace` does not zero `ddata` before calling `rhs_grad`
+
+`DiffSlRhs::jac_mul_inplace` (the forward-mode Jacobian-vector product used during BDF Newton
+iterations) passes the `ddata` buffer directly to the Enzyme-generated `rhs_grad` function without
+zeroing it first. `jac_transpose_mul_inplace` (the adjoint version) correctly calls `ddata.fill(0)`
+before its equivalent call.
+
+After any adjoint backward pass, `ddata` contains non-zero adjoint state. If the same cached
+`OdeSolverProblem` is then used for a forward BDF solve, `jac_mul_inplace` passes stale adjoint
+values into `rhs_grad`, corrupting the Jacobian-vector product. Newton iterations receive wrong
+search directions and diverge with `Exceeded maximum number of nonlinear solver failures`.
+
+Because `ddata` is a private field on `DiffSlContext` with no public reset API, there is no clean
+workaround from outside diffsol. Tsit45 is unaffected — it is an explicit solver and never calls
+`jac_mul_inplace`. ESDIRK34 and TR-BDF2 have been removed from the API until this is resolved (they
+fall back to BDF for the adjoint, hitting this bug on repeated calls through the LLVM module cache).
+
+Reported upstream: https://github.com/martinjrobins/diffsol
+
 ## Limitations
 
 - CPU only, f64 only.
@@ -188,5 +203,27 @@ uv run pytest tests/ -v
   compiles, subsequent calls reuse the compiled module and update parameters via `set_params`.
 - Gradient wrt `y0` is computed internally but not returned; `y0` is baked into the DiffSL source.
 - Gradient wrt `t_span` returns zeros.
-- ESDIRK34 and TR-BDF2 fall back to BDF for the adjoint; their own adjoint solvers fail to converge
-  on non-trivial problems.
+- ESDIRK34 and TR-BDF2 are not exposed; see Known upstream bugs above.
+
+## Dependency notes
+
+### Why diffsol 0.10, not 0.12
+
+The Rust layer pins to `diffsol = "0.10"`. diffsol 0.12 introduced a breaking change in the adjoint
+checkpointing machinery: when `solve_dense_with_checkpointing` is followed by `bdf_solver_adjoint` +
+`solve_adjoint_backwards_pass`, the checkpointer re-integrates the forward solution between stored
+checkpoints during the backward pass. On non-trivial problems (e.g. Lotka-Volterra over t=[0,10] at
+rtol=atol=1e-8) this re-integration fails with `TooManyNonlinearSolverFailures` at t≈6.79 — a
+regression not present in 0.10. All existing tests pass on 0.10. Until the upstream regression is
+fixed or a workaround is found, the pin stays.
+
+### Why not diffsol-c
+
+[`diffsol-c`](https://github.com/martinjrobins/diffsol/tree/main/diffsol-c) is a runtime-polymorphic
+C API wrapper over diffsol that avoids hand-rolled generic dispatch. It would simplify the
+forward-solve path. However, diffsol-c 0.3 exposes **no general adjoint API** — only
+`solve_sum_squares_adj`, which is hardcoded to a sum-of-squares loss. diffsol-jax's VJP must handle
+arbitrary JAX cotangents, so diffsol-c cannot replace the direct-diffsol adjoint path. Adopting
+diffsol-c would still require a direct diffsol dependency for gradients, giving all the complexity
+of two deps for a partial forward-only benefit. The migration is deferred until diffsol-c exposes a
+general `solve_adj` interface.

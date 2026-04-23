@@ -10,7 +10,7 @@ jax.config.update("jax_enable_x64", True)
 PARAMS = jnp.array([1.5, 1.0, 0.75, 3.0])
 Y0 = jnp.array([1.0, 0.5])
 T_SPAN = jnp.array([0.0, 10.0])
-METHODS = ["bdf", "tsit45", "esdirk34", "tr_bdf2"]
+METHODS = ["bdf", "tsit45"]
 
 
 def lotka_volterra(t, y, p):

@@ -90,9 +90,9 @@ indexing via Python-level unpacking.
 
 ### Solver selection
 
-Four solvers are available via the `method=` argument:
+Four solvers are available via the `ode_solver=` argument:
 
-| `method=`         | Type                           | Adjoint        |
+| `ode_solver=`     | Type                           | Adjoint        |
 | ----------------- | ------------------------------ | -------------- |
 | `"bdf"` (default) | BDF (implicit, variable-order) | BDF            |
 | `"tsit45"`        | Tsitouras 4(5) (explicit)      | Tsit45         |
@@ -100,7 +100,7 @@ Four solvers are available via the `method=` argument:
 | `"tr_bdf2"`       | TR-BDF2 (implicit)             | BDF (fallback) |
 
 ```python
-solver, _ = make_diffsol_solver(rhs, y0=y0, p_example=params, method="tsit45")
+solver, _ = make_diffsol_solver(rhs, y0=y0, p_example=params, ode_solver="tsit45")
 ```
 
 BDF and Tsit45 use their own solver for both forward and backward passes. ESDIRK34 and TR-BDF2 fall

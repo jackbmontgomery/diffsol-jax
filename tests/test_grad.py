@@ -76,7 +76,7 @@ def test_lv_param_fitting():
         lotka_volterra,
         y0=jnp.array([1.0, 0.5]),
         p_example=true_p,
-        method="tsit45",
+        ode_solver="tsit45",
         param_names=["alpha", "beta", "delta", "gamma"],
         state_names=["x", "y"],
         n_times=50,

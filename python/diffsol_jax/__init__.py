@@ -13,7 +13,7 @@ _METHOD_CODES = {"bdf": 0, "tsit45": 1, "esdirk34": 2, "tr_bdf2": 3}
 
 def _method_code(name: str) -> int:
     if name not in _METHOD_CODES:
-        raise ValueError(f"unknown method {name!r}; available: {sorted(_METHOD_CODES)}")
+        raise ValueError(f"unknown solver {name!r}; available: {sorted(_METHOD_CODES)}")
     return _METHOD_CODES[name]
 
 
@@ -71,7 +71,7 @@ def make_diffsol_solver(
     y0,
     p_example,
     *,
-    method="bdf",
+    ode_solver="bdf",
     param_names=None,
     state_names=None,
     n_times=200,
@@ -84,7 +84,7 @@ def make_diffsol_solver(
     method: one of "bdf" (default), "tsit45", "esdirk34", "tr_bdf2".
     Adjoint always uses BDF for esdirk34/tr_bdf2 (their own adjoint solvers diverge).
     """
-    fwd_code = _method_code(method)
+    fwd_code = _method_code(ode_solver)
 
     y0 = jnp.asarray(y0, dtype=jnp.float64)
     src = make_diffsl_tuple(

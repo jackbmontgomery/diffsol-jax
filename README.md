@@ -175,26 +175,6 @@ uv run python benchmarks/bench_grad.py
 uv run pytest tests/ -v
 ```
 
-## Known upstream bugs
-
-### diffsol: `jac_mul_inplace` does not zero `ddata` before calling `rhs_grad`
-
-`DiffSlRhs::jac_mul_inplace` (the forward-mode Jacobian-vector product used during BDF Newton
-iterations) passes the `ddata` buffer directly to the Enzyme-generated `rhs_grad` function without
-zeroing it first. `jac_transpose_mul_inplace` (the adjoint version) correctly calls `ddata.fill(0)`
-before its equivalent call.
-
-After any adjoint backward pass, `ddata` contains non-zero adjoint state. If the same cached
-`OdeSolverProblem` is then used for a forward BDF solve, `jac_mul_inplace` passes stale adjoint
-values into `rhs_grad`, corrupting the Jacobian-vector product. Newton iterations receive wrong
-search directions and diverge with `Exceeded maximum number of nonlinear solver failures`.
-
-Because `ddata` is a private field on `DiffSlContext` with no public reset API, there is no clean
-workaround from outside diffsol. Tsit45 is unaffected — it is an explicit solver and never calls
-`jac_mul_inplace`.
-
-Reported upstream: https://github.com/martinjrobins/diffsol
-
 ## Limitations
 
 - CPU only, f64 only.
@@ -210,16 +190,6 @@ Reported upstream: https://github.com/martinjrobins/diffsol
   on non-trivial problems.
 
 ## Dependency notes
-
-### Why diffsol 0.10, not 0.12
-
-The Rust layer pins to `diffsol = "0.10"`. diffsol 0.12 introduced a breaking change in the adjoint
-checkpointing machinery: when `solve_dense_with_checkpointing` is followed by `bdf_solver_adjoint` +
-`solve_adjoint_backwards_pass`, the checkpointer re-integrates the forward solution between stored
-checkpoints during the backward pass. On non-trivial problems (e.g. Lotka-Volterra over t=[0,10] at
-rtol=atol=1e-8) this re-integration fails with `TooManyNonlinearSolverFailures` at t≈6.79 — a
-regression not present in 0.10. All existing tests pass on 0.10. Until the upstream regression is
-fixed or a workaround is found, the pin stays.
 
 ### Why not diffsol-c
 

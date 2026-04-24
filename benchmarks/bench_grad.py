@@ -35,7 +35,7 @@ solver_ds, _ = make_diffsol_solver(
     lotka_volterra_ds,
     y0=Y0,
     p_example=TRUE_P,
-    method="tsit45",
+    ode_solver="tsit45",
     param_names=["alpha", "beta", "delta", "gamma"],
     state_names=["x", "y"],
     n_times=N_TIMES,

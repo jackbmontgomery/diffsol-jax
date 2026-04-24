@@ -143,8 +143,6 @@ for _ in range(500):
 
 ## Benchmarks
 
-Forward solve vs diffrax, Apple M-series, `rtol=atol=1e-8`, 200 output times.
-
 **Forward solve** vs diffrax, Apple M-series, `rtol=atol=1e-8`, 200 output times.
 
 | System                     | diffsol-jax | diffrax          | Speedup |
@@ -193,8 +191,7 @@ search directions and diverge with `Exceeded maximum number of nonlinear solver 
 
 Because `ddata` is a private field on `DiffSlContext` with no public reset API, there is no clean
 workaround from outside diffsol. Tsit45 is unaffected — it is an explicit solver and never calls
-`jac_mul_inplace`. ESDIRK34 and TR-BDF2 have been removed from the API until this is resolved (they
-fall back to BDF for the adjoint, hitting this bug on repeated calls through the LLVM module cache).
+`jac_mul_inplace`.
 
 Reported upstream: https://github.com/martinjrobins/diffsol
 

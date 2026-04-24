@@ -65,31 +65,33 @@ name = "diffsol-jax"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
-    { name = "diffrax" },
+    { name = "equinox" },
     { name = "jax" },
-    { name = "numpy" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "diffrax" },
+    { name = "ipython" },
     { name = "optax" },
     { name = "pytest" },
     { name = "scipy" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "ipython" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "diffrax", specifier = ">=0.7.2" },
+    { name = "equinox", specifier = ">=0.13.7" },
     { name = "jax", specifier = ">=0.4.31" },
-    { name = "numpy" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "diffrax", specifier = ">=0.7.2" },
+    { name = "ipython", specifier = ">=9.12.0" },
     { name = "optax", specifier = ">=0.2.8" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "scipy", specifier = ">=1.17.1" },
 ]
-
-[package.metadata.requires-dev]
-dev = [{ name = "ipython", specifier = ">=9.12.0" }]
 
 [[package]]
 name = "equinox"

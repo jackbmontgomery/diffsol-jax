@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from diffsol_jax import make_diffsol_solver
+from diffsol_jax import ODEProblem
 from scipy.integrate import solve_ivp
 
 jax.config.update("jax_enable_x64", True)
@@ -16,16 +16,8 @@ def lotka_volterra(t, y, p):
 def test_lv_matches_scipy():
     params = jnp.array([1.5, 1.0, 0.75, 3.0])
     y0 = jnp.array([1.0, 0.5])
-    solver, src = make_diffsol_solver(
-        lotka_volterra,
-        y0=y0,
-        p_example=params,
-        param_names=["alpha", "beta", "delta", "gamma"],
-        state_names=["x", "y"],
-        n_times=200,
-    )
-    print(src)
-    ys, ts = solver(params, jnp.array([0.0, 10.0]))
+    ode_problem = ODEProblem(lotka_volterra, y0, params, n_times=200)
+    ts, ys = ode_problem.solve(params, jnp.array([0.0, 10.0]))
 
     def f(t, y):
         a, b, d, g = params
@@ -41,15 +33,9 @@ def test_lv_matches_scipy():
 def test_lv_under_jit():
     params = jnp.array([1.5, 1.0, 0.75, 3.0])
     y0 = jnp.array([1.0, 0.5])
-    solver, _ = make_diffsol_solver(
-        lotka_volterra,
-        y0=y0,
-        p_example=params,
-        param_names=["alpha", "beta", "delta", "gamma"],
-        state_names=["x", "y"],
-    )
-    jit_solver = jax.jit(lambda p: solver(p, jnp.array([0.0, 10.0])))
-    ys1, _ = jit_solver(params)
-    ys2, _ = jit_solver(params * 1.01)
+    ode_problem = ODEProblem(lotka_volterra, y0, params, n_times=200)
+    jit_solver = jax.jit(lambda p: ode_problem.solve(p, jnp.array([0.0, 10.0])))
+    _, ys1 = jit_solver(params)
+    _, ys2 = jit_solver(params * 1.01)
     assert ys1.shape == (200, 2)
     assert not jnp.allclose(ys1, ys2)

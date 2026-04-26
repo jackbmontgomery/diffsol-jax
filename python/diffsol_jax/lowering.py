@@ -77,6 +77,56 @@ def _bind_const(var, val, env: Env, lines: list[str]):
         )
 
 
+def _find_concat_only_bcasts(jaxpr) -> set:
+    """Return the set of vars produced by `broadcast_in_dim` to a length-1
+    rank-1 vector that are *only* consumed by `concatenate` (recursively
+    descending into pjit / closed_call). Such wrappers can be elided: their
+    underlying scalar can be spliced directly into the concatenation body.
+    """
+    bcast_outs: set = set()
+    use_count: dict = {}
+    concat_use_count: dict = {}
+
+    def visit(jp):
+        for eqn in jp.eqns:
+            pn = eqn.primitive.name
+            if pn in ("pjit", "closed_call"):
+                inner = eqn.params["jaxpr"]
+                inner_jp = inner.jaxpr if hasattr(inner, "jaxpr") else inner
+                visit(inner_jp)
+                # Tally outer-side uses too.
+                for iv in eqn.invars:
+                    if not isinstance(iv, jex_core.Literal):
+                        use_count[iv] = use_count.get(iv, 0) + 1
+                continue
+            if pn == "broadcast_in_dim":
+                (in_var,) = eqn.invars
+                out_var = eqn.outvars[0]
+                out_shape = eqn.params["shape"]
+                in_shape = (
+                    in_var.aval.shape
+                    if not isinstance(in_var, jex_core.Literal)
+                    else ()
+                )
+                # Only scalar -> length-1 vector wrappers qualify.
+                if in_shape == () and out_shape == (1,):
+                    bcast_outs.add(out_var)
+            for iv in eqn.invars:
+                if isinstance(iv, jex_core.Literal):
+                    continue
+                use_count[iv] = use_count.get(iv, 0) + 1
+                if pn == "concatenate":
+                    concat_use_count[iv] = concat_use_count.get(iv, 0) + 1
+
+    visit(jaxpr)
+
+    return {
+        v
+        for v in bcast_outs
+        if use_count.get(v, 0) == concat_use_count.get(v, 0) and use_count.get(v, 0) > 0
+    }
+
+
 def _emit_eqn(eqn, env: Env, lines: list[str]):
     prim_name = eqn.primitive.name
 
@@ -89,6 +139,13 @@ def _emit_eqn(eqn, env: Env, lines: list[str]):
         out_rank = len(out_shape)
         out_subs_full = _subs_for_rank(out_rank)[1:] if out_rank else ""
         if in_subs == "" and out_rank >= 1:
+            scalar_wraps = getattr(env, "_scalar_wraps", None)
+            if scalar_wraps is not None:
+                scalar_wraps[out_var] = in_name
+            concat_only = getattr(env, "_concat_only_bcasts", None)
+            if concat_only is not None and out_var in concat_only:
+                env.bind(out_var, in_name, "")
+                return
             out_name = env.fresh_name("b")
             env.bind(out_var, out_name, out_subs_full)
             if out_rank == 0:
@@ -102,6 +159,61 @@ def _emit_eqn(eqn, env: Env, lines: list[str]):
         raise NotImplementedError(
             f"broadcast_in_dim shape={out_shape} bcast_dims={bcast_dims} not handled"
         )
+
+    if prim_name == "concatenate":
+        out_var = eqn.outvars[0]
+        out_shape = out_var.aval.shape
+        out_rank = len(out_shape)
+        axis = eqn.params["dimension"]
+        if out_rank == 0:
+            raise NotImplementedError("concatenate of rank-0 inputs is malformed")
+        if axis != 0:
+            raise NotImplementedError(
+                f"concatenate along axis {axis} not supported (only axis 0)"
+            )
+
+        out_subs_letters = _INDEX_LETTERS[:out_rank]
+        out_subs_suffix = f"_{out_subs_letters}"
+        out_name = env.fresh_name("cat")
+
+        scalar_wraps = getattr(env, "_scalar_wraps", {})
+        all_scalar_wrapped = out_rank == 1 and all(
+            len(iv.aval.shape) == 1 and iv.aval.shape[0] == 1 and iv in scalar_wraps
+            for iv in eqn.invars
+        )
+        if all_scalar_wrapped:
+            elements = [scalar_wraps[iv] for iv in eqn.invars]
+            env.bind(out_var, out_name, out_subs_letters)
+            body = ", ".join(elements)
+            lines.append(f"{out_name}{out_subs_suffix} {{ {body} }}")
+            return
+
+        elements = []
+        offset = 0
+        for iv in eqn.invars:
+            in_shape = iv.aval.shape
+            if len(in_shape) != out_rank:
+                raise NotImplementedError(
+                    f"concatenate input rank {len(in_shape)} != output rank {out_rank}"
+                )
+            n = in_shape[0]
+            in_name, in_subs = env.get(iv)
+            if iv in scalar_wraps and in_subs == "":
+                rhs_ref = in_name
+            elif in_subs == "":
+                rhs_ref = in_name
+            else:
+                rhs_ref = f"{in_name}_{in_subs}"
+            if n == 1:
+                elements.append(f"({offset}): {rhs_ref}")
+            else:
+                elements.append(f"({offset}:{offset + n}): {rhs_ref}")
+            offset += n
+
+        env.bind(out_var, out_name, out_subs_letters)
+        body = ",\n  ".join(elements)
+        lines.append(f"{out_name}{out_subs_suffix} {{\n  {body},\n}}")
+        return
 
     if prim_name == "convert_element_type":
         (in_var,) = eqn.invars
@@ -174,7 +286,7 @@ def _emit_eqn(eqn, env: Env, lines: list[str]):
 
 
 def make_diffsl_tuple(
-    rhs_tuple,
+    rhs,
     y0,
     p_example,
     t_example: float = 0.0,
@@ -199,7 +311,7 @@ def make_diffsl_tuple(
     if param_names is None:
         param_names = [f"p{i}" for i in range(n_param)]
 
-    closed = jax.make_jaxpr(rhs_tuple)(t_example, y0, p_example)
+    closed = jax.make_jaxpr(rhs)(t_example, y0, p_example)
     jaxpr = closed.jaxpr
     consts = closed.literals
 
@@ -220,6 +332,9 @@ def make_diffsl_tuple(
     env._state_names_by_index = {i: state_names[i] for i in range(n_state)}
     env._p_var = p_var
     env._y_var = y_var
+    env._scalar_wraps = {}
+
+    env._concat_only_bcasts = _find_concat_only_bcasts(jaxpr)
 
     for cv, cval in zip(jaxpr.constvars, consts):
         _bind_const(cv, cval, env, lines)
@@ -233,8 +348,6 @@ def make_diffsl_tuple(
                 if eqn.invars[0] is env._p_var:
                     sym = env._param_names_by_index[start]
                 else:
-                    # diffsl 0.9.4 cranelift rejects u_i[k] in expressions;
-                    # use the declared state label name directly.
                     sym = env._state_names_by_index[start]
                 env.bind(eqn.outvars[0], sym, "")
                 continue
@@ -259,16 +372,37 @@ def make_diffsl_tuple(
         )
         u_line = f"u_i {{ {inits} }}"
 
-    if len(jaxpr.outvars) != n_state:
+    n_outvars = len(jaxpr.outvars)
+    single_vec_output = (
+        n_outvars == 1
+        and len(jaxpr.outvars[0].aval.shape) == 1
+        and jaxpr.outvars[0].aval.shape[0] == n_state
+    )
+    if not single_vec_output and n_outvars != n_state:
         raise ValueError(
-            f"rhs_tuple returned {len(jaxpr.outvars)} outputs, state has {n_state}"
+            f"rhs returned {n_outvars} outputs of shapes "
+            f"{[o.aval.shape for o in jaxpr.outvars]}; expected either "
+            f"{n_state} scalars or a single length-{n_state} vector"
         )
     if n_state == 1:
-        name, _ = env.get(jaxpr.outvars[0])
-        f_line = f"F {{ {name} }}"
+        if single_vec_output:
+            name, subs = env.get(jaxpr.outvars[0])
+            ref = name if subs == "" else f"{name}_{subs}"
+            f_line = f"F {{ {ref} }}"
+        else:
+            name, _ = env.get(jaxpr.outvars[0])
+            f_line = f"F {{ {name} }}"
     else:
-        comps = [env.get(out)[0] for out in jaxpr.outvars]
-        f_line = "F_i {\n  " + ",\n  ".join(comps) + ",\n}"
+        if single_vec_output:
+            name, subs = env.get(jaxpr.outvars[0])
+            if subs == "":
+                ref = name
+            else:
+                ref = f"{name}_i"
+            f_line = f"F_i {{ {ref} }}"
+        else:
+            comps = [env.get(out)[0] for out in jaxpr.outvars]
+            f_line = "F_i {\n  " + ",\n  ".join(comps) + ",\n}"
 
     header = lines[0]
     body = "\n".join(lines[1:])

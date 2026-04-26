@@ -4,7 +4,7 @@ import diffrax
 import jax
 import jax.numpy as jnp
 import optax
-from diffsol_jax import make_diffsol_solver
+from diffsol_jax import ODEProblem
 
 jax.config.update("jax_enable_x64", True)
 
@@ -17,7 +17,7 @@ LR = 1e-2
 N_WARMUP = 2
 N_REPEAT = 10
 
-PERTURB = 0.2 * jax.random.normal(jax.random.PRNGKey(0), (4,))
+PERTURB = 0.2 * jax.random.normal(jax.random.key(0), (4,))
 INIT_P = TRUE_P + PERTURB
 
 ts_save = jnp.linspace(0.0, 10.0, N_TIMES)
@@ -31,21 +31,13 @@ def lotka_volterra_ds(t, y, p):
 
 # --- diffsol-jax setup ---
 
-solver_ds, _ = make_diffsol_solver(
-    lotka_volterra_ds,
-    y0=Y0,
-    p_example=TRUE_P,
-    ode_solver="tsit45",
-    param_names=["alpha", "beta", "delta", "gamma"],
-    state_names=["x", "y"],
-    n_times=N_TIMES,
-)
+ode_problem = ODEProblem(lotka_volterra_ds, Y0, TRUE_P, N_TIMES, ode_solver="tsit45")
 
-target_ys, _ = solver_ds(TRUE_P, T_SPAN)
+_, target_ys = ode_problem.solve(TRUE_P, T_SPAN)
 
 
 def loss_ds(p):
-    ys, _ = solver_ds(p, T_SPAN)
+    _, ys = ode_problem.solve(p, T_SPAN)
     return jnp.mean((ys - target_ys) ** 2)
 
 

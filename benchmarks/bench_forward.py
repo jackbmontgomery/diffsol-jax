@@ -3,7 +3,7 @@ import time
 import diffrax
 import jax
 import jax.numpy as jnp
-from diffsol_jax import make_diffsol_solver
+from diffsol_jax import ODEProblem
 
 jax.config.update("jax_enable_x64", True)
 
@@ -23,25 +23,18 @@ def lotka_volterra(t, y, p):
 
 # diffsol-jax
 
-solver_ds, _ = make_diffsol_solver(
-    lotka_volterra,
-    y0=Y0,
-    p_example=PARAMS,
-    ode_solver="tsit45",
-    param_names=["alpha", "beta", "delta", "gamma"],
-    state_names=["x", "y"],
-    n_times=N_TIMES,
-)
 
-diffsol_jit = jax.jit(lambda p: solver_ds(p, T_SPAN))
+ode_problem = ODEProblem(lotka_volterra, Y0, PARAMS, N_TIMES, ode_solver="tsit45")
+
+diffsol_jit = jax.jit(lambda p: ode_problem.solve(p, T_SPAN))
 
 for _ in range(N_WARMUP):
-    ys_ds, _ = diffsol_jit(PARAMS)
+    _, ys_ds = diffsol_jit(PARAMS)
     ys_ds.block_until_ready()
 
 t0 = time.perf_counter()
 for _ in range(N_REPEAT):
-    ys_ds, _ = diffsol_jit(PARAMS)
+    _, ys_ds = diffsol_jit(PARAMS)
     ys_ds.block_until_ready()
 ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
@@ -89,7 +82,7 @@ dx_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 max_diff = float(jnp.max(jnp.abs(ys_ds - ys_dx)))
 
 print(f"Lotka-Volterra forward solve (n_times={N_TIMES}, n={N_REPEAT})")
-print(f"  diffsol-jax (BDF, Cranelift): {ds_ms:.2f} ms/call")
-print(f"  diffrax     (Dopri5):         {dx_ms:.2f} ms/call")
+print(f"  diffsol-jax (Tsit45):            {ds_ms:.2f} ms/call")
+print(f"  diffrax     (Tsit5):         {dx_ms:.2f} ms/call")
 print(f"  speedup:                      {dx_ms / ds_ms:.2f}x")
 print(f"  max |diff|:                   {max_diff:.2e}")

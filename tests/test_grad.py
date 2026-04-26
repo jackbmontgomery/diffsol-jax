@@ -36,7 +36,7 @@ def test_lv_grad_matches_fd():
         ]
     )
     rel = jnp.linalg.norm(grad_ad - grad_fd) / jnp.linalg.norm(grad_fd)
-    assert rel < 1e-2, f"rel err {rel}, ad={grad_ad}, fd={grad_fd}"
+    assert rel < 1e-3, f"rel err {rel}, ad={grad_ad}, fd={grad_fd}"
 
 
 def test_decay_closed_form():

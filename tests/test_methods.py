@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from diffsol_jax import make_diffsol_solver
+from diffsol_jax import ODEProblem
 from scipy.integrate import solve_ivp
 
 jax.config.update("jax_enable_x64", True)
@@ -31,16 +31,11 @@ def scipy_reference(ts):
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_lv_matches_scipy(ode_solver):
-    solver, _ = make_diffsol_solver(
-        lotka_volterra,
-        y0=Y0,
-        p_example=PARAMS,
-        param_names=["alpha", "beta", "delta", "gamma"],
-        state_names=["x", "y"],
-        ode_solver=ode_solver,
-        n_times=100,
+
+    ode_problem = ODEProblem(
+        lotka_volterra, Y0, PARAMS, n_times=100, ode_solver=ode_solver
     )
-    ys, ts = solver(PARAMS, T_SPAN)
+    ts, ys = ode_problem.solve(PARAMS, T_SPAN)
     ref = scipy_reference(ts)
     diff = np.max(np.abs(np.asarray(ys) - ref.y.T))
     assert diff < 1e-3, f"{ode_solver}: max diff {diff:.2e}"
@@ -48,18 +43,13 @@ def test_lv_matches_scipy(ode_solver):
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_lv_grad_matches_fd(ode_solver):
-    solver, _ = make_diffsol_solver(
-        lotka_volterra,
-        y0=Y0,
-        p_example=PARAMS,
-        param_names=["alpha", "beta", "delta", "gamma"],
-        state_names=["x", "y"],
-        ode_solver=ode_solver,
-        n_times=50,
+    ode_problem = ODEProblem(
+        lotka_volterra, Y0, PARAMS, n_times=100, ode_solver=ode_solver
     )
+    ts, ys = ode_problem.solve(PARAMS, T_SPAN)
 
     def loss(p):
-        ys, _ = solver(p, T_SPAN)
+        ts, ys = ode_problem.solve(p, T_SPAN)
         return jnp.sum(ys**2)
 
     grad = jax.grad(loss)(PARAMS)
@@ -81,6 +71,4 @@ def test_lv_grad_matches_fd(ode_solver):
 
 def test_unknown_solver_raises():
     with pytest.raises(ValueError, match="unknown solver"):
-        make_diffsol_solver(
-            lotka_volterra, y0=Y0, p_example=PARAMS, ode_solver="rk4_custom"
-        )
+        ODEProblem(lotka_volterra, y0=Y0, params=PARAMS, ode_solver="rk4_custom")

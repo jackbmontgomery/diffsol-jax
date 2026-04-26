@@ -188,6 +188,7 @@ uv run pytest tests/ -v
 - Gradient wrt `t_span` returns zeros.
 - ESDIRK34 and TR-BDF2 fall back to BDF for the adjoint; their own adjoint solvers fail to converge
   on non-trivial problems.
+- Does not work with `jax.pmap`
 
 ## Dependency notes
 

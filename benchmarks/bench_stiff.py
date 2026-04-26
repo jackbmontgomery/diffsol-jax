@@ -3,7 +3,7 @@ import time
 import diffrax
 import jax
 import jax.numpy as jnp
-from diffsol_jax import make_diffsol_solver
+from diffsol_jax import ODEProblem
 
 jax.config.update("jax_enable_x64", True)
 
@@ -25,24 +25,17 @@ def van_der_pol(t, y, p):
 
 # diffsol-jax (BDF)
 
-solver_ds, _ = make_diffsol_solver(
-    van_der_pol,
-    y0=Y0,
-    p_example=PARAMS,
-    param_names=["mu"],
-    state_names=["y1", "y2"],
-    n_times=N_TIMES,
-)
+ode_problem = ODEProblem(van_der_pol, Y0, PARAMS, N_TIMES)
 
-diffsol_jit = jax.jit(lambda p: solver_ds(p, T_SPAN))
+diffsol_jit = jax.jit(lambda p: ode_problem.solve(p, T_SPAN))
 
 for _ in range(N_WARMUP):
-    ys_ds, _ = diffsol_jit(PARAMS)
+    _, ys_ds = diffsol_jit(PARAMS)
     ys_ds.block_until_ready()
 
 t0 = time.perf_counter()
 for _ in range(N_REPEAT):
-    ys_ds, _ = diffsol_jit(PARAMS)
+    _, ys_ds = diffsol_jit(PARAMS)
     ys_ds.block_until_ready()
 ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 

@@ -1,20 +1,22 @@
+from functools import partial
+from typing import Callable, Literal, Tuple
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import ffi
+from jaxtyping import Array, Float
 
 from . import _rust
 from .lowering import make_diffsl_tuple
 
+jax.config.update("jax_enable_x64", True)
+
 _REGISTERED = False
 
 _METHOD_CODES = {"bdf": 0, "tsit45": 1, "esdirk34": 2, "tr_bdf2": 3}
-
-
-def _method_code(name: str) -> int:
-    if name not in _METHOD_CODES:
-        raise ValueError(f"unknown solver {name!r}; available: {sorted(_METHOD_CODES)}")
-    return _METHOD_CODES[name]
+ODE_RHS = Callable
+ODE_SOLVER = Literal["bdf", "tsit45", "esdirk34", "tr_bdf2"]
 
 
 def _ensure_registered():
@@ -26,8 +28,14 @@ def _ensure_registered():
     _REGISTERED = True
 
 
-def diffsol_solve(
-    diffsl_src: str, params, t0, t_final, n_times: int, n_state: int, method: int = 0
+def _method_code(name: str) -> int:
+    if name not in _METHOD_CODES:
+        raise ValueError(f"unknown solver {name!r}; available: {sorted(_METHOD_CODES)}")
+    return _METHOD_CODES[name]
+
+
+def _solve_forward(
+    handle: int, params, t0, t_final, n_times: int, n_state: int, method: int = 0
 ):
     _ensure_registered()
     params = jnp.asarray(params, dtype=jnp.float64)
@@ -40,7 +48,7 @@ def diffsol_solve(
     ys, ts = ffi.ffi_call("diffsol_solve", out_type, vmap_method="sequential")(
         params,
         t_span,
-        diffsl_src=diffsl_src,
+        handle=np.int64(handle),
         n_times=np.int64(n_times),
         n_state=np.int64(n_state),
         method=np.int64(method),
@@ -48,7 +56,9 @@ def diffsol_solve(
     return ys, ts
 
 
-def _ffi_vjp(src, params, t_span, g_ys, n_times, n_state, method: int = 0):
+def _solve_adjoint(
+    handle: int, params, t_span, g_ys, n_times, n_state, method: int = 0
+):
     _ensure_registered()
     n_params = params.shape[0]
     out_type = (
@@ -59,62 +69,73 @@ def _ffi_vjp(src, params, t_span, g_ys, n_times, n_state, method: int = 0):
         params,
         t_span,
         g_ys,
-        diffsl_src=src,
+        handle=np.int64(handle),
         n_times=np.int64(n_times),
         n_state=np.int64(n_state),
         method=np.int64(method),
     )
 
 
-def make_diffsol_solver(
-    rhs_tuple,
-    y0,
-    p_example,
-    *,
-    ode_solver="bdf",
-    param_names=None,
-    state_names=None,
-    n_times=200,
-):
-    """Trace rhs_tuple, emit DiffSL, return (solver, src).
+class ODEProblem:
+    solver: _rust.OdeSolver
+    _handle: int
+    n_times: int
+    solve: Callable[
+        [Float[Array, " params"], Float[Array, " 2"]],
+        Tuple[Float[Array, "{n_times}"], Float[Array, "{n_times} params"]],
+    ]
 
-    rhs_tuple(t, y, p) must return a tuple of scalars, one per state component.
-    solver(params, t_span) returns (ys, ts); supports jax.grad wrt params.
+    def __init__(
+        self,
+        rhs: Callable[
+            [Float[Array, ""], Float[Array, " state"], Float[Array, " params"]],
+            Float[Array, " state"],
+        ],
+        y0: Float[Array, " state"],
+        params: Float[Array, " params"],
+        n_times: int = 200,
+        ode_solver: ODE_SOLVER = "bdf",
+    ):
 
-    method: one of "bdf" (default), "tsit45", "esdirk34", "tr_bdf2".
-    Adjoint always uses BDF for esdirk34/tr_bdf2 (their own adjoint solvers diverge).
-    """
-    fwd_code = _method_code(ode_solver)
+        diffsl_src = make_diffsl_tuple(rhs, y0, params)
+        solver = _rust.OdeSolver(diffsl_src)
 
-    y0 = jnp.asarray(y0, dtype=jnp.float64)
-    src = make_diffsl_tuple(
-        rhs_tuple,
-        y0=y0,
-        p_example=p_example,
-        param_names=param_names,
-        state_names=state_names,
-    )
-    n_state = int(y0.shape[0]) if y0.ndim == 1 else 1
+        self.solver = solver
+        self._handle = solver.handle()
+        self.n_times = n_times
+        solver_code = _method_code(ode_solver)
 
-    @jax.custom_vjp
-    def solve(params, t_span):
-        return diffsol_solve(
-            src, params, t_span[0], t_span[1], n_times, n_state, method=fwd_code
-        )
+        n_state = len(y0)
 
-    def fwd(params, t_span):
-        ys, ts = diffsol_solve(
-            src, params, t_span[0], t_span[1], n_times, n_state, method=fwd_code
-        )
-        return (ys, ts), (params, t_span)
+        @jax.custom_vjp
+        def solve(
+            params: Float[Array, " params"],
+            t_span: Float[Array, " 2"],
+        ) -> Tuple[Float[Array, "{n_times}"], Float[Array, "{n_times} params"]]:
 
-    def bwd(res, g):
-        params, t_span = res
-        g_ys, _ = g
-        grad_params, _grad_y0 = _ffi_vjp(
-            src, params, t_span, g_ys, n_times, n_state, method=fwd_code
-        )
-        return grad_params, jnp.zeros_like(t_span)
+            (ts, ys), _ = fwd(params, t_span)
 
-    solve.defvjp(fwd, bwd)
-    return solve, src
+            return ts, ys
+
+        def fwd(params, t_span):
+            ys, ts = _solve_forward(
+                solver.handle(),
+                params,
+                t_span[0],
+                t_span[1],
+                n_times,
+                n_state,
+                solver_code,
+            )
+            return (ts, ys), (params, t_span)
+
+        def bwd(res, g):
+            params, t_span = res
+            _, g_ys = g
+            grad_params, _grad_y0 = _solve_adjoint(
+                solver.handle(), params, t_span, g_ys, n_times, n_state, solver_code
+            )
+            return grad_params, jnp.zeros_like(t_span)
+
+        solve.defvjp(fwd, bwd)
+        self.solve = solve

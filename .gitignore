@@ -11,6 +11,7 @@ build/
 wheels/
 .venv/
 .python-version
+.cache/
 
 # C++
 *.o
@@ -18,6 +19,7 @@ wheels/
 *.so
 *.dylib
 *.dSYM/
+compile_commands.json
 
 # maturin / mixed builds
 *.whl

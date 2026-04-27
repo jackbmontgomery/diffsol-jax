@@ -12,6 +12,7 @@ pyo3 = { version = "0.22", features = ["extension-module"] }
 diffsol = { git = "https://github.com/jackbmontgomery/diffsol", branch = "fix-ddata-zeroing-in-rhs-jac-mul", default-features = false, features = ["nalgebra", "faer"] }
 
 [features]
+default = ["diffsol-llvm20"]
 diffsol-llvm20 = ["diffsol/diffsl-llvm20"]
 suitesparse = ["diffsol/suitesparse"]
 

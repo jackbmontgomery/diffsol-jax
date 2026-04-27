@@ -1,2 +1,5 @@
 [env]
 LLVM_SYS_201_PREFIX = "/opt/homebrew/opt/llvm"
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

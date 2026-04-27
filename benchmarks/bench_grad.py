@@ -20,7 +20,7 @@ N_REPEAT = 10
 PERTURB = 0.2 * jax.random.normal(jax.random.key(0), (4,))
 INIT_P = TRUE_P + PERTURB
 
-ts_save = jnp.linspace(0.0, 10.0, N_TIMES)
+ts_save = jnp.linspace(T_SPAN[0], T_SPAN[1], N_TIMES)
 
 
 def lotka_volterra_ds(t, y, p):
@@ -31,13 +31,13 @@ def lotka_volterra_ds(t, y, p):
 
 # --- diffsol-jax setup ---
 
-ode_problem = ODEProblem(lotka_volterra_ds, Y0, TRUE_P, N_TIMES, ode_solver="tsit45")
+ode_problem = ODEProblem(lotka_volterra_ds, Y0, TRUE_P, N_TIMES)
 
-_, target_ys = ode_problem.solve(TRUE_P, T_SPAN)
+_, target_ys = ode_problem.solve(TRUE_P, T_SPAN, ode_solver="tsit45")
 
 
 def loss_ds(p):
-    _, ys = ode_problem.solve(p, T_SPAN)
+    _, ys = ode_problem.solve(p, T_SPAN, ode_solver="tsit45")
     return jnp.mean((ys - target_ys) ** 2)
 
 

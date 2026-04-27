@@ -23,8 +23,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install Zensical
-        run: pip install zensical
+      - name: Install docs dependencies
+        run: pip install ".[docs]"
       - name: Build site
         run: zensical build
       - name: Upload Pages artifact

@@ -32,10 +32,8 @@ def scipy_reference(ts):
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_lv_matches_scipy(ode_solver):
 
-    ode_problem = ODEProblem(
-        lotka_volterra, Y0, PARAMS, n_times=100, ode_solver=ode_solver
-    )
-    ts, ys = ode_problem.solve(PARAMS, T_SPAN)
+    ode_problem = ODEProblem(lotka_volterra, Y0, PARAMS, n_times=100)
+    ts, ys = ode_problem.solve(Y0, PARAMS, T_SPAN, ode_solver=ode_solver)
     ref = scipy_reference(ts)
     diff = np.max(np.abs(np.asarray(ys) - ref.y.T))
     assert diff < 1e-3, f"{ode_solver}: max diff {diff:.2e}"
@@ -43,13 +41,11 @@ def test_lv_matches_scipy(ode_solver):
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_lv_grad_matches_fd(ode_solver):
-    ode_problem = ODEProblem(
-        lotka_volterra, Y0, PARAMS, n_times=100, ode_solver=ode_solver
-    )
-    ts, ys = ode_problem.solve(PARAMS, T_SPAN)
+    ode_problem = ODEProblem(lotka_volterra, Y0, PARAMS, n_times=100)
+    ts, ys = ode_problem.solve(Y0, PARAMS, T_SPAN, ode_solver=ode_solver)
 
     def loss(p):
-        ts, ys = ode_problem.solve(p, T_SPAN)
+        ts, ys = ode_problem.solve(Y0, p, T_SPAN, ode_solver=ode_solver)
         return jnp.sum(ys**2)
 
     grad = jax.grad(loss)(PARAMS)
@@ -70,5 +66,6 @@ def test_lv_grad_matches_fd(ode_solver):
 
 
 def test_unknown_solver_raises():
+    prob = ODEProblem(lotka_volterra, y0=Y0, params=PARAMS)
     with pytest.raises(ValueError, match="unknown solver"):
-        ODEProblem(lotka_volterra, y0=Y0, params=PARAMS, ode_solver="rk4_custom")
+        prob.solve(Y0, PARAMS, T_SPAN, ode_solver="rk4_custom")

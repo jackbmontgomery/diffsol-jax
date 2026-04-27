@@ -26,7 +26,7 @@ def lotka_volterra(t, y, p):
 
 ode_problem = ODEProblem(lotka_volterra, Y0, PARAMS, N_TIMES, ode_solver="tsit45")
 
-diffsol_jit = jax.jit(lambda p: ode_problem.solve(p, T_SPAN))
+diffsol_jit = jax.jit(lambda p: ode_problem.solve(Y0, p, T_SPAN))
 
 for _ in range(N_WARMUP):
     _, ys_ds = diffsol_jit(PARAMS)

@@ -8,9 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-from diffsol_jax import ODEProblem
-from diffsol_jax import _solve_forward, _solve_adjoint
+from diffsol_jax import ODEProblem, _solve_forward, _solve_vjp
 
 jax.config.update("jax_enable_x64", True)
 
@@ -28,9 +26,7 @@ def lotka_volterra(t, y, p):
 
 
 def make_problem(ode_solver="bdf"):
-    return ODEProblem(
-        lotka_volterra, Y0, PARAMS, n_times=N_TIMES, ode_solver=ode_solver
-    )
+    return ODEProblem(lotka_volterra, Y0, PARAMS, n_times=N_TIMES)
 
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
@@ -45,23 +41,29 @@ def test_grad_params_matches_fd(ode_solver):
 
     def loss_ys(p):
         ys, _ = _solve_forward(handle, p, t0, t_final, N_TIMES, n_state, method_code)
-        return jnp.sum(ys ** 2)
+        return jnp.sum(ys**2)
 
     ys, _ = _solve_forward(handle, PARAMS, t0, t_final, N_TIMES, n_state, method_code)
     g_ys = 2.0 * ys  # gradient of sum(ys**2) w.r.t. ys
 
-    grad_p, _ = _solve_adjoint(
-        handle, PARAMS, T_SPAN, g_ys, N_TIMES, n_state, method_code
-    )
+    grad_p, _ = _solve_vjp(handle, PARAMS, T_SPAN, g_ys, N_TIMES, n_state, method_code)
 
     eps = 1e-4
-    fd = jnp.array([
-        (loss_ys(PARAMS.at[i].set(PARAMS[i] + eps)) - loss_ys(PARAMS.at[i].set(PARAMS[i] - eps))) / (2 * eps)
-        for i in range(n_params)
-    ])
+    fd = jnp.array(
+        [
+            (
+                loss_ys(PARAMS.at[i].set(PARAMS[i] + eps))
+                - loss_ys(PARAMS.at[i].set(PARAMS[i] - eps))
+            )
+            / (2 * eps)
+            for i in range(n_params)
+        ]
+    )
 
     rel = jnp.max(jnp.abs(grad_p - fd) / (jnp.abs(fd) + 1e-6))
-    assert rel < 2e-2, f"{ode_solver}: grad_params rel err {rel:.2e}\n  adj={np.asarray(grad_p)}\n  fd ={np.asarray(fd)}"
+    assert rel < 2e-2, (
+        f"{ode_solver}: grad_params rel err {rel:.2e}\n  adj={np.asarray(grad_p)}\n  fd ={np.asarray(fd)}"
+    )
 
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
@@ -73,12 +75,17 @@ def test_grad_params_nonzero(ode_solver):
     method_code = {"bdf": 0, "tsit45": 1, "esdirk34": 2, "tr_bdf2": 3}[ode_solver]
 
     ys, _ = _solve_forward(
-        handle, PARAMS, float(T_SPAN[0]), float(T_SPAN[1]), N_TIMES, n_state, method_code
+        handle,
+        PARAMS,
+        float(T_SPAN[0]),
+        float(T_SPAN[1]),
+        N_TIMES,
+        n_state,
+        method_code,
     )
     g_ys = jnp.ones_like(ys)
 
-    grad_p, _ = _solve_adjoint(
-        handle, PARAMS, T_SPAN, g_ys, N_TIMES, n_state, method_code
-    )
-    assert jnp.max(jnp.abs(grad_p)) > 1e-6, \
+    grad_p, _ = _solve_vjp(handle, PARAMS, T_SPAN, g_ys, N_TIMES, n_state, method_code)
+    assert jnp.max(jnp.abs(grad_p)) > 1e-6, (
         f"{ode_solver}: grad_params suspiciously zero: {np.asarray(grad_p)}"
+    )

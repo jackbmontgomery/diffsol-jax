@@ -10,9 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-from diffsol_jax import ODEProblem
-from diffsol_jax import _solve_forward, _solve_jvp
+from diffsol_jax import ODEProblem, _solve_forward, _solve_jvp
 
 jax.config.update("jax_enable_x64", True)
 
@@ -31,9 +29,7 @@ def lotka_volterra(t, y, p):
 
 
 def make_problem(ode_solver="bdf"):
-    return ODEProblem(
-        lotka_volterra, Y0, PARAMS, n_times=N_TIMES, ode_solver=ode_solver
-    )
+    return ODEProblem(lotka_volterra, Y0, PARAMS, n_times=N_TIMES)
 
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)

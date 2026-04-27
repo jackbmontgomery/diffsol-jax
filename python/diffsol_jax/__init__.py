@@ -37,7 +37,9 @@ def _method_code(name: str) -> int:
     return _METHOD_CODES[name]
 
 
-def _solve_forward(handle: int, params, t0, t_final, n_times: int, n_state: int, method: int = 0):
+def _solve_forward(
+    handle: int, params, t0, t_final, n_times: int, n_state: int, method: int = 0
+):
     _ensure_registered()
     params = jnp.asarray(params, dtype=jnp.float64)
     t_span = jnp.array([t0, t_final], dtype=jnp.float64)
@@ -76,11 +78,9 @@ def _solve_vjp(handle: int, params, t_span, g_ys, n_times, n_state, method: int 
     )
 
 
-# Alias kept for test compatibility
-_solve_adjoint = _solve_vjp
-
-
-def _solve_jvp(handle: int, params, t0, t_final, dp, n_times: int, n_state: int, method: int = 0):
+def _solve_jvp(
+    handle: int, params, t0, t_final, dp, n_times: int, n_state: int, method: int = 0
+):
     _ensure_registered()
     params = jnp.asarray(params, dtype=jnp.float64)
     dp = jnp.asarray(dp, dtype=jnp.float64)
@@ -119,7 +119,7 @@ def _make_primitive(handle: int, n_state: int, n_times: int, method: int):
     """
     _ensure_registered()
 
-    prim = core.Primitive(f"diffsol_fwd_{handle}_{method}")
+    prim = core.Primitive(f"diffsol_{handle}_{method}")
     prim.multiple_results = True
 
     def abstract_eval(params, t_span):
@@ -187,14 +187,11 @@ def _make_primitive(handle: int, n_state: int, n_times: int, method: int):
         platform="cpu",
     )
 
-    # Transpose: given output cotangent ct_dys, compute ct_dp via VJP.
-    # params, t_span are concrete residuals; dp is UndefinedPrimal.
     def sens_transpose(ct, params, t_span, dp):
         ct_dys = ad.instantiate_zeros(ct)
         grad_p, _grad_y0 = _solve_vjp(
             handle, params, t_span, ct_dys, n_times, n_state, method
         )
-        # None for the constant residual inputs (params, t_span)
         return (
             None,
             None,
@@ -203,10 +200,9 @@ def _make_primitive(handle: int, n_state: int, n_times: int, method: int):
 
     ad.primitive_transposes[sens_prim] = sens_transpose
 
-    # JVP rule for primal primitive; tangent order matches (params, t_span)
     def jvp_rule(vals, tans):
         params, t_span = vals
-        dp, _dt_span = tans  # t_span tangent zeroed (out of scope)
+        dp, _dt_span = tans
         primal_out = prim.bind(params, t_span)
         _ys, ts = primal_out
         dp = ad.instantiate_zeros(dp)
@@ -215,7 +211,6 @@ def _make_primitive(handle: int, n_state: int, n_times: int, method: int):
 
     ad.primitive_jvps[prim] = jvp_rule
 
-    # Batch rules (sequential via lax.map)
     def _batch(vals, dims, *, bind_fn, n_out):
         """Move batched axes to front, broadcast non-batched, map."""
         moved = [
@@ -294,7 +289,6 @@ class ODEProblem:
         y0: Float[Array, " state"],
         params: Float[Array, " params"],
         n_times: int = 200,
-        ode_solver: ODE_SOLVER = "bdf",
     ):
         """Compile an ODE problem from a Python RHS function.
 
@@ -302,8 +296,6 @@ class ODEProblem:
         :param y0: Initial state vector (shape determines ``n_state``). Fixed.
         :param params: Example parameter vector (shape determines ``n_params``).
         :param n_times: Number of output time points. Defaults to ``200``.
-        :param ode_solver: Default solver name for :meth:`solve`. Can be
-            overridden per-call.
         """
         diffsl_src = make_diffsl_tuple(rhs, y0, params)
         solver = _rust.OdeSolver(diffsl_src)
@@ -312,7 +304,6 @@ class ODEProblem:
         self._handle = solver.handle()
         self.n_times = n_times
         self.n_state = len(y0)
-        self._default_method = _method_code(ode_solver)
         self._prims: dict = {}
 
     def solve(
@@ -325,17 +316,18 @@ class ODEProblem:
 
         :param params: Parameter vector, shape ``(n_params,)``, dtype ``float64``.
         :param t_span: ``[t0, t_final]``, shape ``(2,)``, dtype ``float64``.
-        :param ode_solver: Solver name — ``"bdf"`` (default), ``"tsit45"``,
-            ``"esdirk34"``, or ``"tr_bdf2"``.
+        :param ode_solver: Solver name — ``"bdf"``, ``"tsit45"``,
+            ``"esdirk34"``, or ``"tr_bdf2"``.  Defaults to the solver
+            passed at construction time.
         :returns: ``(ts, ys)`` where ``ts`` has shape ``(n_times,)`` and
             ``ys`` has shape ``(n_times, n_state)``.
         """
-        method = _method_code(ode_solver)
-        if method not in self._prims:
-            self._prims[method] = _make_primitive(
-                self._handle, self.n_state, self.n_times, method
+        ode_solver_code = _method_code(ode_solver)
+        if ode_solver_code not in self._prims:
+            self._prims[ode_solver_code] = _make_primitive(
+                self._handle, self.n_state, self.n_times, ode_solver_code
             )
-        prim = self._prims[method]
+        prim = self._prims[ode_solver_code]
 
         params = jnp.asarray(params, dtype=jnp.float64)
         t_span = jnp.asarray(t_span, dtype=jnp.float64)

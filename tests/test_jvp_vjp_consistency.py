@@ -4,7 +4,7 @@ JVP/VJP consistency — dot-product / adjoint test.
 For random dp and g:
     <g, J·dp>  ==  <grad_p, dp>
 
-LHS uses _solve_jvp; RHS uses _solve_adjoint.
+LHS uses _solve_jvp; RHS uses _solve_vjp.
 These are independent Rust paths, so agreement at near-machine-precision
 confirms forward and reverse modes are mathematically consistent.
 """
@@ -13,9 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-from diffsol_jax import ODEProblem
-from diffsol_jax import _solve_jvp, _solve_adjoint
+from diffsol_jax import ODEProblem, _solve_jvp, _solve_vjp
 
 jax.config.update("jax_enable_x64", True)
 
@@ -23,7 +21,6 @@ PARAMS = jnp.array([1.5, 1.0, 0.75, 3.0])
 Y0 = jnp.array([1.0, 0.5])
 T_SPAN = jnp.array([0.0, 5.0])
 N_TIMES = 50
-# JVP only implemented with BDF internally; matches adjoint BDF path
 ODE_SOLVERS = ["bdf"]
 
 
@@ -34,9 +31,7 @@ def lotka_volterra(t, y, p):
 
 
 def make_problem(ode_solver="bdf"):
-    return ODEProblem(
-        lotka_volterra, Y0, PARAMS, n_times=N_TIMES, ode_solver=ode_solver
-    )
+    return ODEProblem(lotka_volterra, Y0, PARAMS, n_times=N_TIMES)
 
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
@@ -59,7 +54,7 @@ def test_jvp_vjp_dotproduct(ode_solver, seed):
     lhs = float(jnp.sum(g * dys))
 
     # RHS: <grad_p, dp>
-    grad_p, _grad_y0 = _solve_adjoint(
+    grad_p, _grad_y0 = _solve_vjp(
         handle, PARAMS, T_SPAN, g, N_TIMES, n_state, method_code
     )
     rhs = float(jnp.dot(grad_p, dp))

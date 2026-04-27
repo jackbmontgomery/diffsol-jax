@@ -6,10 +6,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from diffsol_jax import ODEProblem, _solve_forward
 from scipy.integrate import solve_ivp
-
-from diffsol_jax import ODEProblem
-from diffsol_jax import _solve_forward
 
 jax.config.update("jax_enable_x64", True)
 
@@ -32,31 +30,37 @@ def scipy_solve(params=PARAMS):
         return [a * y[0] - b * y[0] * y[1], d * y[0] * y[1] - g * y[1]]
 
     ts = np.linspace(float(T_SPAN[0]), float(T_SPAN[1]), N_TIMES)
-    sol = solve_ivp(f, (float(T_SPAN[0]), float(T_SPAN[1])), list(Y0),
-                    t_eval=ts, rtol=1e-8, atol=1e-10)
+    sol = solve_ivp(
+        f,
+        (float(T_SPAN[0]), float(T_SPAN[1])),
+        list(Y0),
+        t_eval=ts,
+        rtol=1e-8,
+        atol=1e-10,
+    )
     return sol.y.T  # shape (N_TIMES, n_state)
 
 
 def make_problem(ode_solver="bdf"):
-    return ODEProblem(
-        lotka_volterra, Y0, PARAMS, n_times=N_TIMES, ode_solver=ode_solver
-    )
+    return ODEProblem(lotka_volterra, Y0, PARAMS, n_times=N_TIMES)
 
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_forward_matches_scipy(ode_solver):
     """_solve_forward trajectory matches scipy reference."""
-    prob = ODEProblem(
-        lotka_volterra, Y0, PARAMS, n_times=N_TIMES, ode_solver=ode_solver
-    )
+    prob = ODEProblem(lotka_volterra, Y0, PARAMS, n_times=N_TIMES)
     handle = prob._handle
     n_state = len(Y0)
     method_code = {"bdf": 0, "tsit45": 1, "esdirk34": 2, "tr_bdf2": 3}[ode_solver]
 
     ys, _ = _solve_forward(
-        handle, PARAMS,
-        float(T_SPAN[0]), float(T_SPAN[1]),
-        N_TIMES, n_state, method_code,
+        handle,
+        PARAMS,
+        float(T_SPAN[0]),
+        float(T_SPAN[1]),
+        N_TIMES,
+        n_state,
+        method_code,
     )
 
     ref = scipy_solve()
@@ -71,14 +75,20 @@ def test_forward_matches_solve():
     n_state = len(Y0)
 
     ys_ffi, _ = _solve_forward(
-        handle, PARAMS,
-        float(T_SPAN[0]), float(T_SPAN[1]),
-        N_TIMES, n_state, 0,  # bdf
+        handle,
+        PARAMS,
+        float(T_SPAN[0]),
+        float(T_SPAN[1]),
+        N_TIMES,
+        n_state,
+        0,  # bdf
     )
 
     _, ys_solve = prob.solve(PARAMS, T_SPAN)
 
     np.testing.assert_allclose(
-        np.asarray(ys_ffi), np.asarray(ys_solve), rtol=1e-10,
+        np.asarray(ys_ffi),
+        np.asarray(ys_solve),
+        rtol=1e-10,
         err_msg="_solve_forward and solve() should give identical trajectories",
     )

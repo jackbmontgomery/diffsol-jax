@@ -1,7 +1,7 @@
 use diffsol::{
     AdjointOdeSolverMethod, DenseMatrix, DiffSl, LlvmModule, Matrix, MatrixCommon, NalgebraContext,
     NalgebraLU, NalgebraMat, NalgebraVec, OdeBuilder, OdeEquations, OdeSolverMethod,
-    OdeSolverProblem, OdeSolverState, Vector,
+    OdeSolverProblem, OdeSolverState, SensitivitiesOdeSolverMethod, Vector,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -79,6 +79,12 @@ fn flatten_mat(mat: &NalgebraMat<f64>, n_state: usize, n_times: usize) -> Result
     Ok(ys)
 }
 
+fn make_ts(n_times: usize, t0: f64, t_final: f64) -> Vec<f64> {
+    (0..n_times)
+        .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
+        .collect()
+}
+
 fn solve_inner(
     handle: u64,
     params: &[f64],
@@ -88,9 +94,7 @@ fn solve_inner(
     n_state: usize,
     method: Method,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
-    let ts: Vec<f64> = (0..n_times)
-        .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
-        .collect();
+    let ts = make_ts(n_times, t0, t_final);
 
     let mutex = unsafe { &*(handle as *const Mutex<SolveProblem>) };
     let mut problem = mutex.lock().unwrap();
@@ -197,7 +201,7 @@ pub unsafe extern "C" fn diffsol_solve_rust(
     }
 }
 
-fn adjoint_inner(
+fn vjp_inner(
     handle: u64,
     params: &[f64],
     t0: f64,
@@ -207,9 +211,7 @@ fn adjoint_inner(
     g_ys: &[f64],
     method: Method,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
-    let ts: Vec<f64> = (0..n_times)
-        .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
-        .collect();
+    let ts = make_ts(n_times, t0, t_final);
 
     let mut g_mat = NalgebraMat::<f64>::zeros(n_state, n_times, NalgebraContext);
     for col in 0..n_times {
@@ -303,7 +305,7 @@ pub unsafe extern "C" fn diffsol_vjp_rust(
         let g_ys_slice = slice::from_raw_parts(g_ys, n_times * n_state);
         let method = Method::from_i32(method)?;
 
-        let (grad_p, grad_y0) = adjoint_inner(
+        let (grad_p, grad_y0) = vjp_inner(
             handle,
             params_slice,
             t0,
@@ -332,9 +334,107 @@ pub unsafe extern "C" fn diffsol_vjp_rust(
     }
 }
 
+fn jvp_inner(
+    handle: u64,
+    params: &[f64],
+    t0: f64,
+    t_final: f64,
+    dp: &[f64],
+    n_times: usize,
+    n_state: usize,
+    _method: Method,
+) -> Result<Vec<f64>, String> {
+    let ts = make_ts(n_times, t0, t_final);
+
+    let mutex = unsafe { &*(handle as *const Mutex<SolveProblem>) };
+    let mut problem = mutex.lock().unwrap();
+
+    let params_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
+    problem.eqn_mut().set_params(&params_vec);
+
+    let state = problem
+        .bdf_state_sens::<NalgebraLU<f64>>()
+        .map_err(|e| format!("jvp bdf_state_sens: {e}"))?;
+    let mut solver = problem
+        .bdf_solver_sens::<NalgebraLU<f64>>(state)
+        .map_err(|e| format!("jvp bdf_solver_sens: {e}"))?;
+    let (_, sens, _) = solver
+        .solve_dense_sensitivities(ts.as_slice())
+        .map_err(|e| format!("jvp solve_dense_sensitivities: {e}"))?;
+
+    let n_params = params.len();
+    let mut dys = vec![0.0f64; n_times * n_state];
+    for col in 0..n_times {
+        for row in 0..n_state {
+            let mut v = 0.0f64;
+            for i in 0..n_params {
+                v += dp[i] * sens[i][(row, col)];
+            }
+            dys[col * n_state + row] = v;
+        }
+    }
+    Ok(dys)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn diffsol_jvp_rust(
+    handle: u64,
+    params: *const f64,
+    n_params: usize,
+    t0: f64,
+    t_final: f64,
+    dp: *const f64,
+    dys_out: *mut f64,
+    n_times: usize,
+    n_state: usize,
+    method: i32,
+    err_buf: *mut c_char,
+    err_buf_len: usize,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let params_slice = slice::from_raw_parts(params, n_params);
+        let dp_slice = slice::from_raw_parts(dp, n_params);
+        let method = Method::from_i32(method)?;
+
+        let dys = jvp_inner(
+            handle,
+            params_slice,
+            t0,
+            t_final,
+            dp_slice,
+            n_times,
+            n_state,
+            method,
+        )?;
+
+        if dys.len() != n_times * n_state {
+            return Err(format!(
+                "dys length {} != n_times*n_state {}",
+                dys.len(),
+                n_times * n_state
+            ));
+        }
+        slice::from_raw_parts_mut(dys_out, n_times * n_state).copy_from_slice(&dys);
+        Ok(())
+    }));
+
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(msg)) => {
+            write_err(err_buf, err_buf_len, &msg);
+            1
+        }
+        Err(_) => {
+            write_err(err_buf, err_buf_len, "rust panic in diffsol_jvp_rust");
+            2
+        }
+    }
+}
+
 extern "C" {
     fn DiffsolSolve();
     fn DiffsolVjp();
+    fn DiffsolJvp();
 }
 
 #[pyfunction]
@@ -367,10 +467,26 @@ fn get_vjp_ffi_capsule(py: Python<'_>) -> PyResult<PyObject> {
     }
 }
 
+#[pyfunction]
+fn get_jvp_ffi_capsule(py: Python<'_>) -> PyResult<PyObject> {
+    static CAPSULE_NAME: &[u8] = b"xla._CUSTOM_CALL_TARGET\0";
+    let ptr = DiffsolJvp as *mut std::ffi::c_void;
+    unsafe {
+        let cap = pyo3::ffi::PyCapsule_New(ptr, CAPSULE_NAME.as_ptr() as *const c_char, None);
+        if cap.is_null() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "PyCapsule_New failed",
+            ));
+        }
+        Ok(PyObject::from_owned_ptr(py, cap))
+    }
+}
+
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_ffi_capsule, m)?)?;
     m.add_function(wrap_pyfunction!(get_vjp_ffi_capsule, m)?)?;
+    m.add_function(wrap_pyfunction!(get_jvp_ffi_capsule, m)?)?;
     m.add_class::<OdeSolver>()?;
     Ok(())
 }

@@ -9,7 +9,7 @@ jax.config.update("jax_enable_x64", True)
 
 PARAMS = jnp.array([1.5, 1.0, 0.75, 3.0])
 Y0 = jnp.array([1.0, 0.5])
-T_SPAN = jnp.array([0.0, 10.0])
+T_SPAN = jnp.array([0.0, 100.0])
 N_TIMES = 200
 N_WARMUP = 3
 N_REPEAT = 20
@@ -41,7 +41,7 @@ ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
 # diffrax (Dopri5)
 
-ts_save = jnp.linspace(0.0, 10.0, N_TIMES)
+ts_save = jnp.linspace(T_SPAN[0], T_SPAN[1], N_TIMES)
 
 
 def diffrax_solve(p):
@@ -53,8 +53,8 @@ def diffrax_solve(p):
     sol = diffrax.diffeqsolve(
         diffrax.ODETerm(rhs),
         diffrax.Tsit5(),
-        t0=0.0,
-        t1=10.0,
+        t0=T_SPAN[0],
+        t1=T_SPAN[1],
         dt0=0.05,
         y0=Y0,
         args=p,

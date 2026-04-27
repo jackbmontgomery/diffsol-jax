@@ -46,7 +46,7 @@ def test_decay_closed_form():
     t_span = jnp.array([0.0, T])
 
     def loss(p):
-        _, ys = ode_problem.solve(p, t_span)
+        _, ys = ode_problem.solve(p, t_span, ode_solver="tsit45")
         return ys[-1, 0] ** 2
 
     g = jax.grad(loss)(jnp.array([k]))[0]

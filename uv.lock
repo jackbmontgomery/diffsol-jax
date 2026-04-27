@@ -91,6 +91,9 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+bench = [
+    { name = "diffrax" },
+]
 dev = [
     { name = "diffrax" },
     { name = "ipython" },
@@ -110,6 +113,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+bench = [{ name = "diffrax", specifier = ">=0.7.2" }]
 dev = [
     { name = "diffrax", specifier = ">=0.7.2" },
     { name = "ipython", specifier = ">=9.12.0" },

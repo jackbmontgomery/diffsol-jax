@@ -20,9 +20,8 @@ uv sync
 uv run maturin develop --release
 ```
 
-!!! note
-    `.cargo/config.toml` sets `LLVM_SYS_201_PREFIX` to `/opt/homebrew/opt/llvm`.
-    If LLVM 20 is installed elsewhere, update that path before running `maturin develop`.
+!!! note `.cargo/config.toml` sets `LLVM_SYS_201_PREFIX` to `/opt/homebrew/opt/llvm`. If LLVM 20 is
+installed elsewhere, update that path before running `maturin develop`.
 
 ## First forward solve
 
@@ -45,9 +44,9 @@ def lotka_volterra(t, y, p):
     return (alpha * x - beta * x * yy, delta * x * yy - gamma * yy)
 ```
 
-Create example arrays for the initial state and parameters, then build the solver.
-The values in `y0` are baked into the compiled DiffSL source; `params` is used only to
-trace the RHS and set default parameter values:
+Create example arrays for the initial state and parameters, then build the solver. The values in
+`y0` are baked into the compiled DiffSL source; `params` is used only to trace the RHS and set
+default parameter values:
 
 ```python
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
@@ -56,20 +55,20 @@ y0     = jnp.array([1.0, 0.5])
 problem = ODEProblem(lotka_volterra, y0=y0, params=params)
 ```
 
-Call `problem.solve` under `jax.jit`. The first call compiles; subsequent calls reuse
-the cached module and update parameters via `set_params`:
+Call `problem.solve` under `jax.jit`. The first call compiles; subsequent calls reuse the cached
+module and update parameters via `set_params`:
 
 ```python
 t_span = jnp.array([0.0, 10.0])
 ts, ys = jax.jit(lambda p: problem.solve(p, t_span))(params)
-# ts: float64[200]    — uniformly spaced output times
-# ys: float64[200, 2] — solution at each time
+# ts: float64[200]    - uniformly spaced output times
+# ys: float64[200, 2] - solution at each time
 ```
 
 ## Computing gradients
 
-`jax.grad` works out of the box. The VJP uses diffsol's discrete adjoint; the compiled
-LLVM module is cached, so only the first gradient step pays compilation cost:
+`jax.grad` works out of the box. The VJP uses diffsol's discrete adjoint; the compiled LLVM module
+is cached, so only the first gradient step pays compilation cost:
 
 ```python
 def loss(p):
@@ -79,8 +78,8 @@ def loss(p):
 grad = jax.grad(loss)(params)
 ```
 
-Gradients w.r.t. `t_span` return zeros. Gradient w.r.t. `y0` is computed internally
-but not returned — `y0` is baked into the DiffSL source at construction time.
+Gradients w.r.t. `t_span` return zeros. Gradient w.r.t. `y0` is computed internally but not returned
+— `y0` is baked into the DiffSL source at construction time.
 
 ## Where to go next
 

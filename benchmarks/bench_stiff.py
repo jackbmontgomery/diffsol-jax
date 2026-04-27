@@ -27,7 +27,7 @@ def van_der_pol(t, y, p):
 
 ode_problem = ODEProblem(van_der_pol, Y0, PARAMS, N_TIMES)
 
-diffsol_jit = jax.jit(lambda p: ode_problem.solve(Y0, p, T_SPAN))
+diffsol_jit = jax.jit(lambda p: ode_problem.solve(p, T_SPAN))
 
 for _ in range(N_WARMUP):
     _, ys_ds = diffsol_jit(PARAMS)

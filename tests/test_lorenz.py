@@ -17,7 +17,7 @@ def test_lorenz_short_horizon():
     params = jnp.array([10.0, 28.0, 8.0 / 3.0])
     y0 = jnp.array([1.0, 0.0, 0.0])
     ode_problem = ODEProblem(lorenz, y0, params)
-    ts, ys = ode_problem.solve(y0, params, jnp.array([0.0, 2.0]))
+    ts, ys = ode_problem.solve(params, jnp.array([0.0, 2.0]))
 
     def f(t, y):
         s, r, b = params
@@ -34,7 +34,7 @@ def test_lorenz_under_jit():
     params = jnp.array([10.0, 28.0, 8.0 / 3.0])
     y0 = jnp.array([1.0, 0.0, 0.0])
     ode_problem = ODEProblem(lorenz, y0, params)
-    jit_solver = jax.jit(lambda p: ode_problem.solve(y0, p, jnp.array([0.0, 2.0])))
+    jit_solver = jax.jit(lambda p: ode_problem.solve(p, jnp.array([0.0, 2.0])))
     _, ys1 = jit_solver(params)
     _, ys2 = jit_solver(params * 1.01)
     assert ys1.shape == (200, 3)

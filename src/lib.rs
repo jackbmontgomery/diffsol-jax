@@ -1,7 +1,7 @@
 use diffsol::{
     AdjointOdeSolverMethod, DenseMatrix, DiffSl, LlvmModule, Matrix, MatrixCommon, NalgebraContext,
-    NalgebraLU, NalgebraMat, NalgebraVec, NonLinearOp, OdeBuilder, OdeEquations, OdeSolverMethod,
-    OdeSolverProblem, OdeSolverState, SensitivitiesOdeSolverMethod, Tableau, Vector,
+    NalgebraLU, NalgebraMat, NalgebraVec, OdeBuilder, OdeEquations, OdeSolverMethod,
+    OdeSolverProblem, OdeSolverState, SensitivitiesOdeSolverMethod, Vector,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -79,9 +79,15 @@ fn flatten_mat(mat: &NalgebraMat<f64>, n_state: usize, n_times: usize) -> Result
     Ok(ys)
 }
 
+fn make_ts(n_times: usize, t0: f64, t_final: f64) -> Vec<f64> {
+    (0..n_times)
+        .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
+        .collect()
+}
+
+/// Forward solve using the stored initial condition.
 fn solve_inner(
     handle: u64,
-    y0: &[f64],
     params: &[f64],
     t0: f64,
     t_final: f64,
@@ -89,9 +95,7 @@ fn solve_inner(
     n_state: usize,
     method: Method,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
-    let ts: Vec<f64> = (0..n_times)
-        .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
-        .collect();
+    let ts = make_ts(n_times, t0, t_final);
 
     let mutex = unsafe { &*(handle as *const Mutex<SolveProblem>) };
     let mut problem = mutex.lock().unwrap();
@@ -99,21 +103,10 @@ fn solve_inner(
     let params_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
     problem.eqn_mut().set_params(&params_vec);
 
-    let y0_vec = NalgebraVec::from_vec(y0.to_vec(), NalgebraContext);
-
     let ys = match method {
         Method::Bdf => {
-            let mut state = problem
-                .bdf_state::<NalgebraLU<f64>>()
-                .map_err(|e| format!("bdf_state: {e}"))?;
-            let new_dy = problem.eqn.rhs().call(&y0_vec, problem.t0);
-            {
-                let s = state.as_mut();
-                s.y.copy_from(&y0_vec);
-                s.dy.copy_from(&new_dy);
-            }
             let mut solver = problem
-                .bdf_solver::<NalgebraLU<f64>>(state)
+                .bdf::<NalgebraLU<f64>>()
                 .map_err(|e| format!("bdf: {e}"))?;
             let (mat, _) = solver
                 .solve_dense(ts.as_slice())
@@ -121,37 +114,15 @@ fn solve_inner(
             flatten_mat(&mat, n_state, n_times)?
         }
         Method::Tsit45 => {
-            let tableau = Tableau::<NalgebraMat<f64>>::tsit45(NalgebraContext);
-            let mut state = problem
-                .rk_state(&tableau)
-                .map_err(|e| format!("rk_state: {e}"))?;
-            let new_dy = problem.eqn.rhs().call(&y0_vec, problem.t0);
-            {
-                let s = state.as_mut();
-                s.y.copy_from(&y0_vec);
-                s.dy.copy_from(&new_dy);
-            }
-            let mut solver = problem
-                .tsit45_solver(state)
-                .map_err(|e| format!("tsit45: {e}"))?;
+            let mut solver = problem.tsit45().map_err(|e| format!("tsit45: {e}"))?;
             let (mat, _) = solver
                 .solve_dense(ts.as_slice())
                 .map_err(|e| format!("solve_dense: {e}"))?;
             flatten_mat(&mat, n_state, n_times)?
         }
         Method::Esdirk34 => {
-            let tableau = Tableau::<NalgebraMat<f64>>::esdirk34(NalgebraContext);
-            let mut state = problem
-                .rk_state_and_consistent::<NalgebraLU<f64>, _>(&tableau)
-                .map_err(|e| format!("rk_state: {e}"))?;
-            let new_dy = problem.eqn.rhs().call(&y0_vec, problem.t0);
-            {
-                let s = state.as_mut();
-                s.y.copy_from(&y0_vec);
-                s.dy.copy_from(&new_dy);
-            }
             let mut solver = problem
-                .esdirk34_solver::<NalgebraLU<f64>>(state)
+                .esdirk34::<NalgebraLU<f64>>()
                 .map_err(|e| format!("esdirk34: {e}"))?;
             let (mat, _) = solver
                 .solve_dense(ts.as_slice())
@@ -159,18 +130,8 @@ fn solve_inner(
             flatten_mat(&mat, n_state, n_times)?
         }
         Method::TrBdf2 => {
-            let tableau = Tableau::<NalgebraMat<f64>>::tr_bdf2(NalgebraContext);
-            let mut state = problem
-                .rk_state_and_consistent::<NalgebraLU<f64>, _>(&tableau)
-                .map_err(|e| format!("rk_state: {e}"))?;
-            let new_dy = problem.eqn.rhs().call(&y0_vec, problem.t0);
-            {
-                let s = state.as_mut();
-                s.y.copy_from(&y0_vec);
-                s.dy.copy_from(&new_dy);
-            }
             let mut solver = problem
-                .tr_bdf2_solver::<NalgebraLU<f64>>(state)
+                .tr_bdf2::<NalgebraLU<f64>>()
                 .map_err(|e| format!("tr_bdf2: {e}"))?;
             let (mat, _) = solver
                 .solve_dense(ts.as_slice())
@@ -196,8 +157,6 @@ pub unsafe extern "C" fn diffsol_solve_rust(
     handle: u64,
     params: *const f64,
     n_params: usize,
-    y0: *const f64,
-    n_y0: usize,
     t0: f64,
     t_final: f64,
     ys_out: *mut f64,
@@ -210,10 +169,9 @@ pub unsafe extern "C" fn diffsol_solve_rust(
 ) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
         let params_slice = slice::from_raw_parts(params, n_params);
-        let y0_slice = slice::from_raw_parts(y0, n_y0);
         let method = Method::from_i32(method)?;
 
-        let (ys, ts) = solve_inner(handle, y0_slice, params_slice, t0, t_final, n_times, n_state, method)?;
+        let (ys, ts) = solve_inner(handle, params_slice, t0, t_final, n_times, n_state, method)?;
 
         if ys.len() != n_times * n_state {
             return Err(format!(
@@ -244,9 +202,9 @@ pub unsafe extern "C" fn diffsol_solve_rust(
     }
 }
 
+/// Adjoint (reverse-mode) pass using the stored initial condition.
 fn adjoint_inner(
     handle: u64,
-    y0: &[f64],
     params: &[f64],
     t0: f64,
     t_final: f64,
@@ -255,9 +213,7 @@ fn adjoint_inner(
     g_ys: &[f64],
     method: Method,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
-    let ts: Vec<f64> = (0..n_times)
-        .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
-        .collect();
+    let ts = make_ts(n_times, t0, t_final);
 
     let mut g_mat = NalgebraMat::<f64>::zeros(n_state, n_times, NalgebraContext);
     for col in 0..n_times {
@@ -274,21 +230,10 @@ fn adjoint_inner(
     let params_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
     problem.eqn_mut().set_params(&params_vec);
 
-    let y0_vec = NalgebraVec::from_vec(y0.to_vec(), NalgebraContext);
-
     match method {
         Method::Bdf => {
-            let mut state = problem
-                .bdf_state::<NalgebraLU<f64>>()
-                .map_err(|e| format!("bdf_state: {e}"))?;
-            let new_dy = problem.eqn.rhs().call(&y0_vec, problem.t0);
-            {
-                let s = state.as_mut();
-                s.y.copy_from(&y0_vec);
-                s.dy.copy_from(&new_dy);
-            }
             let mut solver = problem
-                .bdf_solver::<NalgebraLU<f64>>(state)
+                .bdf::<NalgebraLU<f64>>()
                 .map_err(|e| format!("bdf: {e}"))?;
             let (checkpointer, _, _) = solver
                 .solve_dense_with_checkpointing(ts.as_slice(), None)
@@ -305,19 +250,7 @@ fn adjoint_inner(
             Ok((grad_p, grad_y0))
         }
         Method::Tsit45 => {
-            let tableau = Tableau::<NalgebraMat<f64>>::tsit45(NalgebraContext);
-            let mut state = problem
-                .rk_state(&tableau)
-                .map_err(|e| format!("rk_state: {e}"))?;
-            let new_dy = problem.eqn.rhs().call(&y0_vec, problem.t0);
-            {
-                let s = state.as_mut();
-                s.y.copy_from(&y0_vec);
-                s.dy.copy_from(&new_dy);
-            }
-            let mut solver = problem
-                .tsit45_solver(state)
-                .map_err(|e| format!("tsit45: {e}"))?;
+            let mut solver = problem.tsit45().map_err(|e| format!("tsit45: {e}"))?;
             let (checkpointer, _, _) = solver
                 .solve_dense_with_checkpointing(ts.as_slice(), None)
                 .map_err(|e| format!("fwd checkpointing: {e}"))?;
@@ -333,17 +266,8 @@ fn adjoint_inner(
             Ok((grad_p, grad_y0))
         }
         Method::Esdirk34 | Method::TrBdf2 => {
-            let mut state = problem
-                .bdf_state::<NalgebraLU<f64>>()
-                .map_err(|e| format!("bdf_state (adjoint fallback): {e}"))?;
-            let new_dy = problem.eqn.rhs().call(&y0_vec, problem.t0);
-            {
-                let s = state.as_mut();
-                s.y.copy_from(&y0_vec);
-                s.dy.copy_from(&new_dy);
-            }
             let mut solver = problem
-                .bdf_solver::<NalgebraLU<f64>>(state)
+                .bdf::<NalgebraLU<f64>>()
                 .map_err(|e| format!("bdf (adjoint fallback): {e}"))?;
             let (checkpointer, _, _) = solver
                 .solve_dense_with_checkpointing(ts.as_slice(), None)
@@ -367,8 +291,6 @@ pub unsafe extern "C" fn diffsol_vjp_rust(
     handle: u64,
     params: *const f64,
     n_params: usize,
-    y0: *const f64,
-    n_y0: usize,
     t0: f64,
     t_final: f64,
     g_ys: *const f64,
@@ -382,13 +304,11 @@ pub unsafe extern "C" fn diffsol_vjp_rust(
 ) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
         let params_slice = slice::from_raw_parts(params, n_params);
-        let y0_slice = slice::from_raw_parts(y0, n_y0);
         let g_ys_slice = slice::from_raw_parts(g_ys, n_times * n_state);
         let method = Method::from_i32(method)?;
 
         let (grad_p, grad_y0) = adjoint_inner(
             handle,
-            y0_slice,
             params_slice,
             t0,
             t_final,
@@ -416,26 +336,22 @@ pub unsafe extern "C" fn diffsol_vjp_rust(
     }
 }
 
-/// Compute `dys = J·(dp, dy0)` — the directional JVP of `solve` w.r.t. both params and y0.
+/// Forward-mode sensitivity: dys = J_params * dp.
 ///
-/// Uses a two-run forward sensitivity approach:
-/// - Run A: standard sensitivity solve (`s_i(0) = 0`), contracts with `dp`
-/// - Run B: same but seeds `s[0](0) = dy0`, subtracts Run A `sens[0]` to isolate `Z·dy0`
+/// Uses a single sensitivity solve (Run A) with zero initial conditions for
+/// all sensitivity directions, then contracts with dp.  No dy0 term because
+/// y0 is the stored initial condition and is not a traced input.
 fn jvp_inner(
     handle: u64,
-    y0: &[f64],
     params: &[f64],
     t0: f64,
     t_final: f64,
     dp: &[f64],
-    dy0: &[f64],
     n_times: usize,
     n_state: usize,
     _method: Method,
 ) -> Result<Vec<f64>, String> {
-    let ts: Vec<f64> = (0..n_times)
-        .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
-        .collect();
+    let ts = make_ts(n_times, t0, t_final);
 
     let mutex = unsafe { &*(handle as *const Mutex<SolveProblem>) };
     let mut problem = mutex.lock().unwrap();
@@ -443,65 +359,27 @@ fn jvp_inner(
     let params_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
     problem.eqn_mut().set_params(&params_vec);
 
-    let y0_vec = NalgebraVec::from_vec(y0.to_vec(), NalgebraContext);
-    let new_dy = problem.eqn.rhs().call(&y0_vec, problem.t0);
+    // Single sensitivity solve: s_i(0) = 0 for all param directions i.
+    let state = problem
+        .bdf_state_sens::<NalgebraLU<f64>>()
+        .map_err(|e| format!("jvp bdf_state_sens: {e}"))?;
+    let mut solver = problem
+        .bdf_solver_sens::<NalgebraLU<f64>>(state)
+        .map_err(|e| format!("jvp bdf_solver_sens: {e}"))?;
+    let (_, sens, _) = solver
+        .solve_dense_sensitivities(ts.as_slice())
+        .map_err(|e| format!("jvp solve_dense_sensitivities: {e}"))?;
 
-    // Run A: all sensitivities with zero initial conditions
-    let sens_a: Vec<NalgebraMat<f64>> = {
-        let mut state = problem
-            .bdf_state_sens::<NalgebraLU<f64>>()
-            .map_err(|e| format!("jvp bdf_state_sens (A): {e}"))?;
-        {
-            let s = state.as_mut();
-            s.y.copy_from(&y0_vec);
-            s.dy.copy_from(&new_dy);
-        }
-        let mut solver = problem
-            .bdf_solver_sens::<NalgebraLU<f64>>(state)
-            .map_err(|e| format!("jvp bdf_solver_sens (A): {e}"))?;
-        let (_, ret_sens, _) = solver
-            .solve_dense_sensitivities(ts.as_slice())
-            .map_err(|e| format!("jvp solve_dense_sensitivities (A): {e}"))?;
-        ret_sens
-    };
-
-    // Run B: seed s[0] = dy0 to capture Z·dy0 direction
-    let sens_b0: NalgebraMat<f64> = {
-        let dy0_vec = NalgebraVec::from_vec(dy0.to_vec(), NalgebraContext);
-        let mut state = problem
-            .bdf_state_sens::<NalgebraLU<f64>>()
-            .map_err(|e| format!("jvp bdf_state_sens (B): {e}"))?;
-        {
-            let s = state.as_mut();
-            s.y.copy_from(&y0_vec);
-            s.dy.copy_from(&new_dy);
-            // Seed first sensitivity direction with dy0
-            s.s[0].copy_from(&dy0_vec);
-        }
-        let mut solver = problem
-            .bdf_solver_sens::<NalgebraLU<f64>>(state)
-            .map_err(|e| format!("jvp bdf_solver_sens (B): {e}"))?;
-        let (_, mut ret_sens, _) = solver
-            .solve_dense_sensitivities(ts.as_slice())
-            .map_err(|e| format!("jvp solve_dense_sensitivities (B): {e}"))?;
-        ret_sens.remove(0)
-    };
-
-    // dys = Σ_i dp[i]*sens_a[i]  +  (sens_b[0] - sens_a[0])
-    let mut dys = vec![0.0f64; n_times * n_state];
+    // dys[t, s] = sum_i dp[i] * sens[i][s, t]
     let n_params = params.len();
-
+    let mut dys = vec![0.0f64; n_times * n_state];
     for col in 0..n_times {
         for row in 0..n_state {
-            let idx = col * n_state + row;
-            // param contribution
             let mut v = 0.0f64;
             for i in 0..n_params {
-                v += dp[i] * sens_a[i][(row, col)];
+                v += dp[i] * sens[i][(row, col)];
             }
-            // y0 contribution: sens_b0 - sens_a[0]
-            v += sens_b0[(row, col)] - sens_a[0][(row, col)];
-            dys[idx] = v;
+            dys[col * n_state + row] = v;
         }
     }
     Ok(dys)
@@ -512,12 +390,9 @@ pub unsafe extern "C" fn diffsol_jvp_rust(
     handle: u64,
     params: *const f64,
     n_params: usize,
-    y0: *const f64,
-    n_y0: usize,
     t0: f64,
     t_final: f64,
     dp: *const f64,
-    dy0: *const f64,
     dys_out: *mut f64,
     n_times: usize,
     n_state: usize,
@@ -527,19 +402,15 @@ pub unsafe extern "C" fn diffsol_jvp_rust(
 ) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
         let params_slice = slice::from_raw_parts(params, n_params);
-        let y0_slice = slice::from_raw_parts(y0, n_y0);
         let dp_slice = slice::from_raw_parts(dp, n_params);
-        let dy0_slice = slice::from_raw_parts(dy0, n_y0);
         let method = Method::from_i32(method)?;
 
         let dys = jvp_inner(
             handle,
-            y0_slice,
             params_slice,
             t0,
             t_final,
             dp_slice,
-            dy0_slice,
             n_times,
             n_state,
             method,

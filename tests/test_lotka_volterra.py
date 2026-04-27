@@ -17,7 +17,7 @@ def test_lv_matches_scipy():
     params = jnp.array([1.5, 1.0, 0.75, 3.0])
     y0 = jnp.array([1.0, 0.5])
     ode_problem = ODEProblem(lotka_volterra, y0, params, n_times=200)
-    ts, ys = ode_problem.solve(y0, params, jnp.array([0.0, 10.0]))
+    ts, ys = ode_problem.solve(params, jnp.array([0.0, 10.0]))
 
     def f(t, y):
         a, b, d, g = params
@@ -34,7 +34,7 @@ def test_lv_under_jit():
     params = jnp.array([1.5, 1.0, 0.75, 3.0])
     y0 = jnp.array([1.0, 0.5])
     ode_problem = ODEProblem(lotka_volterra, y0, params, n_times=200)
-    jit_solver = jax.jit(lambda p: ode_problem.solve(y0, p, jnp.array([0.0, 10.0])))
+    jit_solver = jax.jit(lambda p: ode_problem.solve(p, jnp.array([0.0, 10.0])))
     _, ys1 = jit_solver(params)
     _, ys2 = jit_solver(params * 1.01)
     assert ys1.shape == (200, 2)

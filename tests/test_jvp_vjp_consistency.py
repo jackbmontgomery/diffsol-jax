@@ -1,8 +1,8 @@
 """
-Step 7: JVP/VJP consistency — dot-product / adjoint test.
+JVP/VJP consistency — dot-product / adjoint test.
 
-For random dp, dy0, g:
-    <g, J·(dp, dy0)>  ==  <(grad_p, grad_y0), (dp, dy0)>
+For random dp and g:
+    <g, J·dp>  ==  <grad_p, dp>
 
 LHS uses _solve_jvp; RHS uses _solve_adjoint.
 These are independent Rust paths, so agreement at near-machine-precision
@@ -42,7 +42,7 @@ def make_problem(ode_solver="bdf"):
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
 def test_jvp_vjp_dotproduct(ode_solver, seed):
-    """<g, J(dp,dy0)>  ==  <(grad_p, grad_y0), (dp, dy0)> to solver tolerance."""
+    """<g, J·dp>  ==  <grad_p, dp> to solver tolerance."""
     prob = make_problem(ode_solver)
     handle = prob._handle
     n_state = len(Y0)
@@ -52,20 +52,18 @@ def test_jvp_vjp_dotproduct(ode_solver, seed):
 
     rng = np.random.default_rng(seed)
     dp = jnp.array(rng.standard_normal(n_params))
-    dy0 = jnp.array(rng.standard_normal(n_state))
     g = jnp.array(rng.standard_normal((N_TIMES, n_state)))
 
-    # LHS: <g, J·(dp, dy0)>
-    dys = _solve_jvp(handle, PARAMS, Y0, t0, t_final, dp, dy0, N_TIMES, n_state, method_code)
+    # LHS: <g, J·dp>
+    dys = _solve_jvp(handle, PARAMS, t0, t_final, dp, N_TIMES, n_state, method_code)
     lhs = float(jnp.sum(g * dys))
 
-    # RHS: <(grad_p, grad_y0), (dp, dy0)>
-    grad_p, grad_y0 = _solve_adjoint(
-        handle, PARAMS, Y0, T_SPAN, g, N_TIMES, n_state, method_code
+    # RHS: <grad_p, dp>
+    grad_p, _grad_y0 = _solve_adjoint(
+        handle, PARAMS, T_SPAN, g, N_TIMES, n_state, method_code
     )
-    rhs = float(jnp.dot(grad_p, dp) + jnp.dot(grad_y0, dy0))
+    rhs = float(jnp.dot(grad_p, dp))
 
-    # Relative error normalised by magnitude of LHS
     scale = max(abs(lhs), abs(rhs), 1e-12)
     rel = abs(lhs - rhs) / scale
     assert rel < 1e-4, (

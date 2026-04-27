@@ -23,7 +23,7 @@ def test_lv_grad_matches_fd():
     t_span = jnp.array([0.0, 10.0])
 
     def loss(p):
-        _, ys = ode_problem.solve(y0, p, t_span)
+        _, ys = ode_problem.solve(p, t_span)
         return jnp.sum(ys**2)
 
     grad_ad = jax.grad(loss)(params)
@@ -46,7 +46,7 @@ def test_decay_closed_form():
     t_span = jnp.array([0.0, T])
 
     def loss(p):
-        _, ys = ode_problem.solve(jnp.array([1.0]), p, t_span)
+        _, ys = ode_problem.solve(p, t_span)
         return ys[-1, 0] ** 2
 
     g = jax.grad(loss)(jnp.array([k]))[0]
@@ -62,10 +62,10 @@ def test_lv_param_fitting():
 
     ode_problem = ODEProblem(lotka_volterra, y0, true_p)
     t_span = jnp.array([0.0, 10.0])
-    _, target_ys = ode_problem.solve(y0, true_p, t_span)
+    _, target_ys = ode_problem.solve(true_p, t_span)
 
     def loss(p):
-        _, ys = ode_problem.solve(y0, p, t_span)
+        _, ys = ode_problem.solve(p, t_span)
         return jnp.mean((ys - target_ys) ** 2)
 
     p = true_p + 0.2 * jax.random.normal(jax.random.PRNGKey(0), (4,))

@@ -33,11 +33,11 @@ def lotka_volterra_ds(t, y, p):
 
 ode_problem = ODEProblem(lotka_volterra_ds, Y0, TRUE_P, N_TIMES, ode_solver="tsit45")
 
-_, target_ys = ode_problem.solve(Y0, TRUE_P, T_SPAN)
+_, target_ys = ode_problem.solve(TRUE_P, T_SPAN)
 
 
 def loss_ds(p):
-    _, ys = ode_problem.solve(Y0, p, T_SPAN)
+    _, ys = ode_problem.solve(p, T_SPAN)
     return jnp.mean((ys - target_ys) ** 2)
 
 

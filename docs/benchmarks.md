@@ -1,8 +1,8 @@
 # Benchmarks
 
-All benchmarks compare diffsol-jax against [diffrax](https://github.com/patrick-kidger/diffrax)
-on the same ODE problems, same tolerances (`rtol=atol=1e-8`), and the same hardware
-(Apple M-series). Each benchmark picks the most appropriate diffrax solver for the problem type.
+All benchmarks compare diffsol-jax against [diffrax](https://github.com/patrick-kidger/diffrax) on
+the same ODE problems, same tolerances (`rtol=atol=1e-8`), and the same hardware (Apple M-series).
+Each benchmark picks the most appropriate diffrax solver for the problem type.
 
 ## Forward solve
 
@@ -30,8 +30,8 @@ uv run python benchmarks/bench_stiff.py
 | Lotka-Volterra (Tsit45+AD) | 184.9 ms / 500 steps | 2882.4 ms / 500 steps | 15.59x  |
 
 Both solvers converge to the same parameters (`max |p_err| = 0.0175`). The speedup comes from
-diffsol running entirely in compiled Rust/LLVM — gradients avoid JAX's tracing overhead on the
-inner solver loop.
+diffsol running entirely in compiled Rust/LLVM — gradients avoid JAX's tracing overhead on the inner
+solver loop.
 
 ```bash
 uv run python benchmarks/bench_grad.py

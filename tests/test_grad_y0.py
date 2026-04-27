@@ -1,5 +1,7 @@
 """
-Step 3 test: grad_y0 from adjoint matches finite differences.
+Adjoint (VJP) correctness test.
+
+grad_params from adjoint matches finite differences.
 """
 
 import jax
@@ -32,51 +34,51 @@ def make_problem(ode_solver="bdf"):
 
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
-def test_grad_y0_matches_fd(ode_solver):
-    """grad_y0 from adjoint matches finite-difference estimate."""
+def test_grad_params_matches_fd(ode_solver):
+    """grad_params from adjoint matches finite-difference estimate."""
     prob = make_problem(ode_solver)
     handle = prob._handle
     n_state = len(Y0)
+    n_params = len(PARAMS)
     method_code = {"bdf": 0, "tsit45": 1, "esdirk34": 2, "tr_bdf2": 3}[ode_solver]
     t0, t_final = float(T_SPAN[0]), float(T_SPAN[1])
 
-    def loss_ys(y0):
-        ys, _ = _solve_forward(handle, PARAMS, y0, t0, t_final, N_TIMES, n_state, method_code)
+    def loss_ys(p):
+        ys, _ = _solve_forward(handle, p, t0, t_final, N_TIMES, n_state, method_code)
         return jnp.sum(ys ** 2)
 
-    # cotangent g_ys = d(loss)/d(ys) — shape (N_TIMES, n_state)
-    ys, _ = _solve_forward(handle, PARAMS, Y0, t0, t_final, N_TIMES, n_state, method_code)
+    ys, _ = _solve_forward(handle, PARAMS, t0, t_final, N_TIMES, n_state, method_code)
     g_ys = 2.0 * ys  # gradient of sum(ys**2) w.r.t. ys
 
-    _, grad_y0 = _solve_adjoint(
-        handle, PARAMS, Y0, T_SPAN, g_ys, N_TIMES, n_state, method_code
+    grad_p, _ = _solve_adjoint(
+        handle, PARAMS, T_SPAN, g_ys, N_TIMES, n_state, method_code
     )
 
-    # finite-difference reference
     eps = 1e-4
     fd = jnp.array([
-        (loss_ys(Y0.at[i].set(Y0[i] + eps)) - loss_ys(Y0.at[i].set(Y0[i] - eps))) / (2 * eps)
-        for i in range(n_state)
+        (loss_ys(PARAMS.at[i].set(PARAMS[i] + eps)) - loss_ys(PARAMS.at[i].set(PARAMS[i] - eps))) / (2 * eps)
+        for i in range(n_params)
     ])
 
-    rel = jnp.max(jnp.abs(grad_y0 - fd) / (jnp.abs(fd) + 1e-6))
-    assert rel < 2e-2, f"{ode_solver}: grad_y0 rel err {rel:.2e}\n  adj={np.asarray(grad_y0)}\n  fd ={np.asarray(fd)}"
+    rel = jnp.max(jnp.abs(grad_p - fd) / (jnp.abs(fd) + 1e-6))
+    assert rel < 2e-2, f"{ode_solver}: grad_params rel err {rel:.2e}\n  adj={np.asarray(grad_p)}\n  fd ={np.asarray(fd)}"
 
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
-def test_grad_y0_nonzero(ode_solver):
-    """grad_y0 is not identically zero — adjoint is actually computing it."""
+def test_grad_params_nonzero(ode_solver):
+    """grad_params is not identically zero — adjoint is actually computing it."""
     prob = make_problem(ode_solver)
     handle = prob._handle
     n_state = len(Y0)
     method_code = {"bdf": 0, "tsit45": 1, "esdirk34": 2, "tr_bdf2": 3}[ode_solver]
 
-    ys, _ = _solve_forward(handle, PARAMS, Y0, float(T_SPAN[0]), float(T_SPAN[1]),
-                           N_TIMES, n_state, method_code)
+    ys, _ = _solve_forward(
+        handle, PARAMS, float(T_SPAN[0]), float(T_SPAN[1]), N_TIMES, n_state, method_code
+    )
     g_ys = jnp.ones_like(ys)
 
-    _, grad_y0 = _solve_adjoint(
-        handle, PARAMS, Y0, T_SPAN, g_ys, N_TIMES, n_state, method_code
+    grad_p, _ = _solve_adjoint(
+        handle, PARAMS, T_SPAN, g_ys, N_TIMES, n_state, method_code
     )
-    assert jnp.max(jnp.abs(grad_y0)) > 1e-6, \
-        f"{ode_solver}: grad_y0 suspiciously zero: {np.asarray(grad_y0)}"
+    assert jnp.max(jnp.abs(grad_p)) > 1e-6, \
+        f"{ode_solver}: grad_params suspiciously zero: {np.asarray(grad_p)}"

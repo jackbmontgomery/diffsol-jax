@@ -2,11 +2,11 @@
 
 JAX wrapper around [diffsol](https://github.com/martinjrobins/diffsol), a Rust ODE solver library.
 
-diffsol-jax exposes diffsol's ODE solvers via `jax.ffi` so they can be called inside `jax.jit`
-and differentiated with `jax.grad`. You write a right-hand-side function in Python; the library
-lowers it to a [DiffSL](https://martinjrobins.github.io/diffsl/) source string, compiles it once,
-and caches the result — subsequent calls skip recompilation and update parameters in place.
-Gradients are computed via diffsol's discrete adjoint, wrapped with `jax.custom_vjp`.
+diffsol-jax exposes diffsol's ODE solvers via `jax.ffi` so they can be called inside `jax.jit` and
+differentiated with `jax.grad`. You write a right-hand-side function in Python; the library lowers
+it to a [DiffSL](https://martinjrobins.github.io/diffsl/) source string, compiles it once, and
+caches the result — subsequent calls skip recompilation and update parameters in place. Gradients
+are computed via diffsol's discrete adjoint, wrapped with `jax.custom_vjp`.
 
 ```python
 import jax
@@ -32,6 +32,5 @@ ts, ys = jax.jit(lambda p: problem.solve(p, t_span))(params)
 
 ---
 
-[Getting started](getting-started.md) — install and first solve.
-[API reference](api/index.md) — full public API.
-[Benchmarks](benchmarks.md) — forward and gradient timing vs diffrax.
+[Getting started](getting-started.md) — install and first solve. [API reference](api/index.md) —
+full public API. [Benchmarks](benchmarks.md) — forward and gradient timing vs diffrax.

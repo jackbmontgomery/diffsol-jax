@@ -85,7 +85,6 @@ fn make_ts(n_times: usize, t0: f64, t_final: f64) -> Vec<f64> {
         .collect()
 }
 
-/// Forward solve using the stored initial condition.
 fn solve_inner(
     handle: u64,
     params: &[f64],
@@ -202,8 +201,7 @@ pub unsafe extern "C" fn diffsol_solve_rust(
     }
 }
 
-/// Adjoint (reverse-mode) pass using the stored initial condition.
-fn adjoint_inner(
+fn vjp_inner(
     handle: u64,
     params: &[f64],
     t0: f64,
@@ -307,7 +305,7 @@ pub unsafe extern "C" fn diffsol_vjp_rust(
         let g_ys_slice = slice::from_raw_parts(g_ys, n_times * n_state);
         let method = Method::from_i32(method)?;
 
-        let (grad_p, grad_y0) = adjoint_inner(
+        let (grad_p, grad_y0) = vjp_inner(
             handle,
             params_slice,
             t0,
@@ -336,11 +334,6 @@ pub unsafe extern "C" fn diffsol_vjp_rust(
     }
 }
 
-/// Forward-mode sensitivity: dys = J_params * dp.
-///
-/// Uses a single sensitivity solve (Run A) with zero initial conditions for
-/// all sensitivity directions, then contracts with dp.  No dy0 term because
-/// y0 is the stored initial condition and is not a traced input.
 fn jvp_inner(
     handle: u64,
     params: &[f64],
@@ -359,7 +352,6 @@ fn jvp_inner(
     let params_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
     problem.eqn_mut().set_params(&params_vec);
 
-    // Single sensitivity solve: s_i(0) = 0 for all param directions i.
     let state = problem
         .bdf_state_sens::<NalgebraLU<f64>>()
         .map_err(|e| format!("jvp bdf_state_sens: {e}"))?;
@@ -370,7 +362,6 @@ fn jvp_inner(
         .solve_dense_sensitivities(ts.as_slice())
         .map_err(|e| format!("jvp solve_dense_sensitivities: {e}"))?;
 
-    // dys[t, s] = sum_i dp[i] * sens[i][s, t]
     let n_params = params.len();
     let mut dys = vec![0.0f64; n_times * n_state];
     for col in 0..n_times {

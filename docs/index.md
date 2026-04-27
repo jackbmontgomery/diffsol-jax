@@ -5,8 +5,7 @@ JAX wrapper around [diffsol](https://github.com/martinjrobins/diffsol), a Rust O
 diffsol-jax exposes diffsol's ODE solvers via `jax.ffi` so they can be called inside `jax.jit` and
 differentiated with `jax.grad`. You write a right-hand-side function in Python; the library lowers
 it to a [DiffSL](https://martinjrobins.github.io/diffsl/) source string, compiles it once, and
-caches the result — subsequent calls skip recompilation and update parameters in place. Gradients
-are computed via diffsol's discrete adjoint, wrapped with `jax.custom_vjp`.
+caches the result — subsequent calls skip recompilation and update parameters in place.
 
 ```python
 import jax

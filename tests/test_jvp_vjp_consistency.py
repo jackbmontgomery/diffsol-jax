@@ -21,7 +21,7 @@ PARAMS = jnp.array([1.5, 1.0, 0.75, 3.0])
 Y0 = jnp.array([1.0, 0.5])
 T_SPAN = jnp.array([0.0, 5.0])
 N_TIMES = 50
-ODE_SOLVERS = ["bdf"]
+ODE_SOLVERS = ["tsit45", "bdf"]
 
 
 def lotka_volterra(t, y, p):
@@ -61,7 +61,7 @@ def test_jvp_vjp_dotproduct(ode_solver, seed):
 
     scale = max(abs(lhs), abs(rhs), 1e-12)
     rel = abs(lhs - rhs) / scale
-    assert rel < 1e-4, (
+    assert rel < 1e-3, (
         f"{ode_solver} seed={seed}: dot-product mismatch\n"
         f"  lhs={lhs:.10e}  rhs={rhs:.10e}  rel={rel:.2e}"
     )

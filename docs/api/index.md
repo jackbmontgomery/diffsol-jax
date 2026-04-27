@@ -28,5 +28,6 @@ back to BDF for the adjoint -- their implicit adjoint solvers fail to converge o
 problems.
 
 ```python
-problem = ODEProblem(rhs, y0=y0, params=params, ode_solver="tsit45")
+problem = ODEProblem(rhs, y0=y0, params=params)
+problem.solve(params, t_span, ode_solver="tsit45")
 ```

@@ -18,8 +18,7 @@ PARAMS = jnp.array([1.5, 1.0, 0.75, 3.0])
 Y0 = jnp.array([1.0, 0.5])
 T_SPAN = jnp.array([0.0, 5.0])
 N_TIMES = 50
-# JVP only implemented via BDF internally
-ODE_SOLVERS = ["bdf"]
+ODE_SOLVERS = ["tsit45", "bdf"]
 
 
 def lotka_volterra(t, y, p):
@@ -34,7 +33,6 @@ def make_problem(ode_solver="bdf"):
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_jvp_matches_fd(ode_solver):
-    """dys from JVP matches finite-difference directional derivative (params)."""
     prob = make_problem(ode_solver)
     handle = prob._handle
     n_state = len(Y0)
@@ -47,7 +45,6 @@ def test_jvp_matches_fd(ode_solver):
 
     dys = _solve_jvp(handle, PARAMS, t0, t_final, dp, N_TIMES, n_state, method_code)
 
-    # Finite-difference reference (centered for O(eps^2) accuracy)
     eps = 1e-4
     ys_plus, _ = _solve_forward(
         handle, PARAMS + eps * dp, t0, t_final, N_TIMES, n_state, method_code
@@ -67,7 +64,6 @@ def test_jvp_matches_fd(ode_solver):
 
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_jvp_zero_tangents(ode_solver):
-    """Zero tangents produce zero dys."""
     prob = make_problem(ode_solver)
     handle = prob._handle
     n_state = len(Y0)

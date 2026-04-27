@@ -74,12 +74,12 @@ def test_lv_param_fitting():
 
     @jax.jit
     def step(p, state):
-        l, g = jax.value_and_grad(loss)(p)
-        updates, state = opt.update(g, state)
-        return optax.apply_updates(p, updates), state, l
+        loss_val, grads = jax.value_and_grad(loss)(p)
+        updates, state = opt.update(grads, state)
+        return optax.apply_updates(p, updates), state, loss_val
 
     for _ in range(500):
-        p, state, l = step(p, state)
+        p, state, loss_val = step(p, state)
 
     assert jnp.max(jnp.abs(p - true_p)) < 0.05, (
         f"did not converge: p={p}, true={true_p}"

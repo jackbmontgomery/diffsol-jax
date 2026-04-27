@@ -43,9 +43,9 @@ def loss_ds(p):
 
 @jax.jit
 def step_ds(p, state):
-    l, g = jax.value_and_grad(loss_ds)(p)
+    loss_val, g = jax.value_and_grad(loss_ds)(p)
     updates, state = opt.update(g, state)
-    return optax.apply_updates(p, updates), state, l
+    return optax.apply_updates(p, updates), state, loss_val
 
 
 def run_gd_ds():
@@ -87,9 +87,9 @@ def loss_dx(p):
 
 @jax.jit
 def step_dx(p, state):
-    l, g = jax.value_and_grad(loss_dx)(p)
+    loss_val, g = jax.value_and_grad(loss_dx)(p)
     updates, state = opt.update(g, state)
-    return optax.apply_updates(p, updates), state, l
+    return optax.apply_updates(p, updates), state, loss_val
 
 
 def run_gd_dx():

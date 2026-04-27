@@ -11,10 +11,14 @@ dependencies = [
     "jax>=0.4.31",
 ]
 
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
 python-source = "python"
 module-name = "diffsol_jax._rust"
+
+[tool.ruff.lint]
+ignore = ["F722"]
 
 [dependency-groups]
 bench = [

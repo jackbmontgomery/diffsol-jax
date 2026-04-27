@@ -16,24 +16,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Ruff check
+        run: uvx ruff check .
+      - name: Ruff format check
+        run: uvx ruff format --check .
+      - name: Cargo fmt
+        run: cargo fmt --all -- --check
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "17.0"
-      - name: Install ruff
-        run: pip install ruff
-      - name: Ruff check
-        run: ruff check .
-      - name: Ruff format check
-        run: ruff format --check .
-      - name: Cargo fmt
-        run: cargo fmt --all -- --check
       - name: Cargo clippy
         env:
           LLVM_SYS_170_PREFIX: ${{ env.LLVM_PATH }}
@@ -52,9 +48,6 @@ jobs:
             target: arm64
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Install LLVM and Clang
         if: runner.os == 'macOS'
         uses: KyleMayes/install-llvm-action@v2
@@ -79,20 +72,17 @@ jobs:
         with:
           name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
           path: ./wheelhouse/*.whl
+      - uses: astral-sh/setup-uv@v5
       - name: Test wheel (cp311)
         run: |
-          set -e
-          python3 -m venv .venv
-          source .venv/bin/activate
-          pip install "$(echo ./wheelhouse/*cp311*.whl)[dev]"
-          pytest -s -v
+          uv venv .venv
+          uv pip install --python .venv "$(echo ./wheelhouse/*cp311*.whl)[dev]"
+          .venv/bin/pytest -s -v
       - name: Test wheel (cp313)
         run: |
-          set -e
-          python3 -m venv .venv313
-          source .venv313/bin/activate
-          pip install "$(echo ./wheelhouse/*cp313*.whl)[dev]"
-          pytest -s -v
+          uv venv .venv313 --python 3.13
+          uv pip install --python .venv313 "$(echo ./wheelhouse/*cp313*.whl)[dev]"
+          .venv313/bin/pytest -s -v
 
   sdist:
     name: Source distribution

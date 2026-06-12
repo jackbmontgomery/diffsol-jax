@@ -10,6 +10,8 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
 diffsol = { git = "https://github.com/jackbmontgomery/diffsol", branch = "fix-ddata-zeroing-in-rhs-jac-mul", default-features = false, features = ["nalgebra", "faer"] }
+diffsol-c = { version = "0.4.6", features = ["diffsl-llvm17"] }
+ndarray = "0.17.2"
 
 [features]
 default = ["diffsol-llvm17"]

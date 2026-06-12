@@ -26,7 +26,16 @@ def _ensure_registered():
     if _REGISTERED:
         return
     ffi.register_ffi_target("diffsol_solve", _rust.get_ffi_capsule(), platform="cpu")
-    ffi.register_ffi_target("diffsol_vjp", _rust.get_vjp_ffi_capsule(), platform="cpu")
+    ffi.register_ffi_target(
+        "diffsol_solve_adjoint_fwd",
+        _rust.get_solve_adjoint_fwd_capsule(),
+        platform="cpu",
+    )
+    ffi.register_ffi_target(
+        "diffsol_solve_adjoint_bkwd",
+        _rust.get_solve_adjoint_bkwd_capsule(),
+        platform="cpu",
+    )
     ffi.register_ffi_target("diffsol_jvp", _rust.get_jvp_ffi_capsule(), platform="cpu")
     _REGISTERED = True
 
@@ -59,23 +68,69 @@ def _solve_forward(
     return ys, ts
 
 
-def _solve_vjp(handle: int, params, t_span, g_ys, n_times, n_state, method: int = 0):
+def _solve_adjoint_fwd(handle: int, params, t_span, n_times: int, n_state: int, method: int):
+    """Forward adjoint solve: returns (ys, ts, ckpt_handle) where ckpt_handle is an int64
+    scalar identifying the checkpoint bundle on the Rust heap."""
     _ensure_registered()
-    n_params = params.shape[0]
-    n_state_int = n_state
     out_type = (
-        jax.ShapeDtypeStruct((n_params,), jnp.float64),
-        jax.ShapeDtypeStruct((n_state_int,), jnp.float64),
+        jax.ShapeDtypeStruct((n_times, n_state), jnp.float64),
+        jax.ShapeDtypeStruct((n_times,), jnp.float64),
+        jax.ShapeDtypeStruct((1,), jnp.int64),
     )
-    return ffi.ffi_call("diffsol_vjp", out_type, vmap_method="sequential")(
+    return ffi.ffi_call(
+        "diffsol_solve_adjoint_fwd",
+        out_type,
+        has_side_effect=True,
+        vmap_method="sequential",
+    )(
         params,
         t_span,
-        g_ys,
         handle=np.int64(handle),
         n_times=np.int64(n_times),
         n_state=np.int64(n_state),
         method=np.int64(method),
     )
+
+
+def _solve_adjoint_bkwd(
+    handle: int, g_ys, ckpt_handle, n_times: int, n_state: int, n_params: int, method: int
+):
+    """Backward adjoint solve: consumes the checkpoint bundle and returns grad_params.
+    Must be called exactly once per corresponding _solve_adjoint_fwd."""
+    _ensure_registered()
+    out_type = jax.ShapeDtypeStruct((n_params,), jnp.float64)
+    return ffi.ffi_call(
+        "diffsol_solve_adjoint_bkwd",
+        out_type,
+        has_side_effect=True,
+        vmap_method="sequential",
+    )(
+        g_ys,
+        ckpt_handle,
+        handle=np.int64(handle),
+        n_times=np.int64(n_times),
+        n_state=np.int64(n_state),
+        n_params=np.int64(n_params),
+        method=np.int64(method),
+    )
+
+
+def _solve_vjp(handle: int, params, t_span, g_ys, n_times, n_state, method: int = 0):
+    """VJP via split discrete adjoint. Returns (grad_params, grad_y0_zeros).
+    Provided for backward compatibility with tests; internally uses the split
+    adjoint_fwd + adjoint_bkwd path."""
+    _ensure_registered()
+    params = jnp.asarray(params, dtype=jnp.float64)
+    t_span = jnp.asarray(t_span, dtype=jnp.float64)
+    g_ys = jnp.asarray(g_ys, dtype=jnp.float64)
+    n_params = params.shape[0]
+
+    _ys, _ts, ckpt = _solve_adjoint_fwd(handle, params, t_span, n_times, n_state, method)
+    grad_p = _solve_adjoint_bkwd(
+        handle, g_ys, ckpt, n_times, n_state, int(n_params), method
+    )
+    grad_y0 = jnp.zeros(n_state, dtype=jnp.float64)
+    return grad_p, grad_y0
 
 
 def _solve_jvp(
@@ -99,39 +154,36 @@ def _solve_jvp(
     return dys
 
 
-def _make_primitive(handle: int, n_state: int, n_times: int, method: int):
-    """Build a JAX primitive pair for one (handle, method) configuration.
-
-    Returns the primal primitive ``prim`` whose ``.bind(params, t_span)``
-    call supports ``jax.jit``, ``jax.jvp``, ``jax.grad``, and ``jax.vmap``.
+def _make_primitive(handle: int, n_state: int, n_times: int, method: int, n_params: int):
+    """Build the JAX primitive family for one (handle, method) configuration.
 
     Architecture
     ------------
-    ``prim``  -- primal solve, outputs ``(ys, ts)`` in FFI order.
-        * MLIR lowering  -> ``diffsol_solve`` XLA custom call
-        * JVP rule       -> calls ``sens_prim`` (linear in tangents)
-        * Batch rule     -> sequential ``lax.map``
+    ``prim`` -- primal solve (no checkpoint), ``(ys, ts)``.
+        Used for plain forward evaluation.
 
-    ``sens_prim`` -- directional JVP  (linear in ``dp``).
-        * MLIR lowering  -> ``diffsol_jvp`` XLA custom call
-        * Transpose rule -> calls ``_solve_vjp`` (the VJP)
-        * Batch rule     -> sequential ``lax.map``
+    ``prim_fwd`` -- checkpointing primal: ``(ys, ts, ckpt_handle)``.
+        Used *only* under differentiation. Calls ``diffsol_solve_adjoint_fwd``.
+
+    ``sens_prim`` -- linear primitive: ``(params, t_span, ckpt_handle, dp) → dys``.
+        Its transpose calls ``diffsol_solve_adjoint_bkwd`` with the checkpoint.
     """
     _ensure_registered()
 
+    # ── primal primitive (no checkpoint) ─────────────────────────────────────
     prim = core.Primitive(f"diffsol_{handle}_{method}")
     prim.multiple_results = True
 
-    def abstract_eval(params, t_span):
+    def prim_abstract_eval(params, t_span):
         return [
             jax_core.ShapedArray((n_times, n_state), jnp.float64),
             jax_core.ShapedArray((n_times,), jnp.float64),
         ]
 
-    prim.def_abstract_eval(abstract_eval)
+    prim.def_abstract_eval(prim_abstract_eval)
 
-    def impl(params, t_span):
-        ys, ts = ffi.ffi_call(
+    def prim_impl(params, t_span):
+        return ffi.ffi_call(
             "diffsol_solve",
             (
                 jax.ShapeDtypeStruct((n_times, n_state), jnp.float64),
@@ -146,25 +198,66 @@ def _make_primitive(handle: int, n_state: int, n_times: int, method: int):
             n_state=np.int64(n_state),
             method=np.int64(method),
         )
-        return ys, ts
 
-    prim.def_impl(impl)
+    prim.def_impl(prim_impl)
 
     mlir.register_lowering(
         prim,
-        mlir.lower_fun(impl, multiple_results=True),
+        mlir.lower_fun(prim_impl, multiple_results=True),
         platform="cpu",
     )
 
+    # ── checkpointing primal primitive (used under differentiation) ───────────
+    prim_fwd = core.Primitive(f"diffsol_fwd_{handle}_{method}")
+    prim_fwd.multiple_results = True
+
+    def prim_fwd_abstract_eval(params, t_span):
+        return [
+            jax_core.ShapedArray((n_times, n_state), jnp.float64),
+            jax_core.ShapedArray((n_times,), jnp.float64),
+            jax_core.ShapedArray((1,), jnp.int64),  # ckpt_handle
+        ]
+
+    prim_fwd.def_abstract_eval(prim_fwd_abstract_eval)
+
+    def prim_fwd_impl(params, t_span):
+        return ffi.ffi_call(
+            "diffsol_solve_adjoint_fwd",
+            (
+                jax.ShapeDtypeStruct((n_times, n_state), jnp.float64),
+                jax.ShapeDtypeStruct((n_times,), jnp.float64),
+                jax.ShapeDtypeStruct((1,), jnp.int64),
+            ),
+            has_side_effect=True,
+            vmap_method="sequential",
+        )(
+            params,
+            t_span,
+            handle=np.int64(handle),
+            n_times=np.int64(n_times),
+            n_state=np.int64(n_state),
+            method=np.int64(method),
+        )
+
+    prim_fwd.def_impl(prim_fwd_impl)
+
+    mlir.register_lowering(
+        prim_fwd,
+        mlir.lower_fun(prim_fwd_impl, multiple_results=True),
+        platform="cpu",
+    )
+
+    # ── linear sensitivity primitive ─────────────────────────────────────────
     sens_prim = core.Primitive(f"diffsol_sens_{handle}_{method}")
     sens_prim.multiple_results = False
 
-    def sens_abstract_eval(params, t_span, dp):
+    def sens_abstract_eval(params, t_span, ckpt_handle, dp):
         return jax_core.ShapedArray((n_times, n_state), jnp.float64)
 
     sens_prim.def_abstract_eval(sens_abstract_eval)
 
-    def sens_impl(params, t_span, dp):
+    def sens_impl(params, t_span, ckpt_handle, dp):
+        # Under eager execution, run the JVP directly (no checkpoint needed).
         return ffi.ffi_call(
             "diffsol_jvp",
             jax.ShapeDtypeStruct((n_times, n_state), jnp.float64),
@@ -187,14 +280,16 @@ def _make_primitive(handle: int, n_state: int, n_times: int, method: int):
         platform="cpu",
     )
 
-    def sens_transpose(ct, params, t_span, dp):
+    def sens_transpose(ct, params, t_span, ckpt_handle, dp):
+        """VJP via the backward adjoint pass, consuming the checkpoint from prim_fwd."""
         ct_dys = ad.instantiate_zeros(ct)
-        grad_p, _grad_y0 = _solve_vjp(
-            handle, params, t_span, ct_dys, n_times, n_state, method
+        grad_p = _solve_adjoint_bkwd(
+            handle, ct_dys, ckpt_handle, n_times, n_state, n_params, method
         )
         return (
-            None,
-            None,
+            None,   # params (residual, not linear)
+            None,   # t_span (residual)
+            None,   # ckpt_handle (residual)
             grad_p if ad.is_undefined_primal(dp) else None,
         )
 
@@ -203,16 +298,15 @@ def _make_primitive(handle: int, n_state: int, n_times: int, method: int):
     def jvp_rule(vals, tans):
         params, t_span = vals
         dp, _dt_span = tans
-        primal_out = prim.bind(params, t_span)
-        _ys, ts = primal_out
+        # Use prim_fwd to create the checkpoint for the backward pass.
+        ys, ts, ckpt_handle = prim_fwd.bind(params, t_span)
         dp = ad.instantiate_zeros(dp)
-        dys = sens_prim.bind(params, t_span, dp)
-        return primal_out, (dys, jnp.zeros_like(ts))
+        dys = sens_prim.bind(params, t_span, ckpt_handle, dp)
+        return (ys, ts), (dys, jnp.zeros_like(ts))
 
     ad.primitive_jvps[prim] = jvp_rule
 
     def _batch(vals, dims, *, bind_fn, n_out):
-        """Move batched axes to front, broadcast non-batched, map."""
         moved = [
             jnp.moveaxis(v, d, 0) if d is not None else v for v, d in zip(vals, dims)
         ]
@@ -239,8 +333,8 @@ def _make_primitive(handle: int, n_state: int, n_times: int, method: int):
     batching.primitive_batchers[prim] = primal_batch
 
     def sens_batch(vals, dims):
-        def bind_fn(p, ts, dp):
-            return sens_prim.bind(p, ts, dp)
+        def bind_fn(p, ts, ckpt, dp):
+            return sens_prim.bind(p, ts, ckpt, dp)
 
         return _batch(vals, dims, bind_fn=bind_fn, n_out=1)
 
@@ -263,7 +357,7 @@ class ODEProblem:
 
     Supported AD operations
     -----------------------
-    * ``jax.grad`` / ``jax.vjp`` — reverse-mode via diffsol adjoint
+    * ``jax.grad`` / ``jax.vjp`` — reverse-mode via diffsol discrete adjoint
     * ``jax.jvp`` / ``jax.jacfwd`` — forward-mode via diffsol sensitivities
     * ``jax.jit`` — compiled via XLA custom call
     * ``jax.vmap`` — sequential batching via ``lax.map``
@@ -282,6 +376,7 @@ class ODEProblem:
     _handle: int
     n_times: int
     n_state: int
+    n_params: int
 
     def __init__(
         self,
@@ -304,6 +399,7 @@ class ODEProblem:
         self._handle = solver.handle()
         self.n_times = n_times
         self.n_state = len(y0)
+        self.n_params = len(params)
         self._prims: dict = {}
 
     def solve(
@@ -317,15 +413,18 @@ class ODEProblem:
         :param params: Parameter vector, shape ``(n_params,)``, dtype ``float64``.
         :param t_span: ``[t0, t_final]``, shape ``(2,)``, dtype ``float64``.
         :param ode_solver: Solver name — ``"bdf"``, ``"tsit45"``,
-            ``"esdirk34"``, or ``"tr_bdf2"``.  Defaults to the solver
-            passed at construction time.
+            ``"esdirk34"``, or ``"tr_bdf2"``.  Defaults to ``"bdf"``.
         :returns: ``(ts, ys)`` where ``ts`` has shape ``(n_times,)`` and
             ``ys`` has shape ``(n_times, n_state)``.
         """
         ode_solver_code = _method_code(ode_solver)
         if ode_solver_code not in self._prims:
             self._prims[ode_solver_code] = _make_primitive(
-                self._handle, self.n_state, self.n_times, ode_solver_code
+                self._handle,
+                self.n_state,
+                self.n_times,
+                ode_solver_code,
+                self.n_params,
             )
         prim = self._prims[ode_solver_code]
 

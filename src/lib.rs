@@ -1,6 +1,6 @@
 use diffsol_c::{
-    AdjointCheckpointWrapper, HostArray, JitBackendType, LinearSolverType, MatrixType,
-    OdeSolverType, OdeWrapper, ScalarType, SolutionWrapper,
+    HostArray, JitBackendType, LinearSolverType, MatrixType, OdeSolverType, OdeWrapper,
+    ScalarType,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -10,8 +10,7 @@ use std::os::raw::c_char;
 // Getter functions defined in wrapper.cc that return XLA FFI handler pointers.
 extern "C" {
     fn get_diffsol_solve_handler() -> *mut c_void;
-    fn get_diffsol_solve_adjoint_fwd_handler() -> *mut c_void;
-    fn get_diffsol_solve_adjoint_bkwd_handler() -> *mut c_void;
+    fn get_diffsol_vjp_handler() -> *mut c_void;
     fn get_diffsol_jvp_handler() -> *mut c_void;
 }
 
@@ -87,14 +86,6 @@ fn copy_ts_to_xla(ts_ha: HostArray, ts_out: *mut f64, n_times: usize) -> Result<
     Ok(())
 }
 
-// Bundles the forward solution (contains saved t_eval) and the adjoint checkpoint.
-// Both are needed for the backward pass: the solution provides t_eval, the checkpoint
-// provides forward trajectory data.
-struct AdjointBundle {
-    solution: SolutionWrapper,
-    checkpoint: AdjointCheckpointWrapper,
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Extern "C" bridge functions called from wrapper.cc
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,20 +136,22 @@ pub unsafe extern "C" fn diffsol_solve_rust(
     }
 }
 
-/// Forward adjoint solve: computes ys and ts (primal outputs) and creates an
-/// AdjointBundle on the heap whose pointer is written to *ckpt_out as a u64.
-/// The caller is responsible for consuming this bundle exactly once via
-/// diffsol_solve_adjoint_bkwd_rust.
+/// Fused VJP: runs the checkpointing forward solve and the discrete adjoint
+/// backward pass in one call. The checkpoint never leaves this function, so
+/// there is no cross-call lifetime to manage.
+///
+/// g_ys is (n_times, n_state) row-major in XLA. diffsol expects dgdu_eval as
+/// (n_state, n_times) col-major, but these layouts are identical in flat memory,
+/// so we reinterpret the XLA buffer as (n_state, n_times) col-major directly.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn diffsol_solve_adjoint_fwd_rust(
+pub unsafe extern "C" fn diffsol_vjp_rust(
     handle: u64,
     params_ptr: *const f64,
     n_params: usize,
     t0: f64,
     t_final: f64,
-    ys_out: *mut f64,
-    ts_out: *mut f64,
-    ckpt_out: *mut u64,
+    g_ys_ptr: *const f64,
+    grad_params_out: *mut f64,
     n_times: usize,
     n_state: usize,
     method: i32,
@@ -181,56 +174,6 @@ pub unsafe extern "C" fn diffsol_solve_adjoint_fwd_rust(
             .solve_adjoint_fwd(params_ha, t_eval_ha)
             .map_err(|e| e.to_string())?;
 
-        // Copy primal outputs before moving solution into the bundle.
-        copy_ys_to_xla(solution.get_ys().map_err(|e| e.to_string())?, ys_out, n_times, n_state)?;
-        copy_ts_to_xla(solution.get_ts().map_err(|e| e.to_string())?, ts_out, n_times)?;
-
-        let bundle = Box::new(AdjointBundle {
-            solution,
-            checkpoint,
-        });
-        unsafe { *ckpt_out = Box::into_raw(bundle) as u64 };
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => 0,
-        Err(e) => {
-            unsafe { write_err(&e, err_buf, err_buf_len) };
-            -1
-        }
-    }
-}
-
-/// Backward adjoint solve: runs the adjoint backward integration consuming the
-/// AdjointBundle identified by ckpt_handle. The bundle is freed here regardless of
-/// success or failure, so the XLA graph must call this exactly once per forward.
-///
-/// g_ys is (n_times, n_state) row-major in XLA. diffsol expects dgdu_eval as
-/// (n_state, n_times) col-major, but these layouts are identical in flat memory,
-/// so we reinterpret the XLA buffer as (n_state, n_times) col-major directly.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn diffsol_solve_adjoint_bkwd_rust(
-    handle: u64,
-    g_ys_ptr: *const f64,
-    grad_params_out: *mut f64,
-    n_times: usize,
-    n_state: usize,
-    n_params: usize,
-    ckpt_handle: u64,
-    method: i32,
-    err_buf: *mut c_char,
-    err_buf_len: usize,
-) -> i32 {
-    // Always take ownership so the bundle is freed even on error paths.
-    let bundle = unsafe { Box::from_raw(ckpt_handle as *mut AdjointBundle) };
-
-    let result = (|| -> Result<(), String> {
-        let wrapper = unsafe { get_wrapper(handle) }?;
-        wrapper
-            .set_ode_solver(ode_solver_from_method(method)?)
-            .map_err(|e| e.to_string())?;
-
         // Reinterpret XLA g_ys (n_times, n_state) row-major as (n_state, n_times)
         // col-major — identical flat layout — as required by solve_adjoint_bkwd.
         let dgdu_ha = HostArray::new_col_major(
@@ -243,7 +186,7 @@ pub unsafe extern "C" fn diffsol_solve_adjoint_bkwd_rust(
         );
 
         let grad_ha = wrapper
-            .solve_adjoint_bkwd(&bundle.solution, &bundle.checkpoint, dgdu_ha)
+            .solve_adjoint_bkwd(&solution, &checkpoint, dgdu_ha)
             .map_err(|e| e.to_string())?;
 
         // grad_ha is (n_params, 1) 2D; access via as_array.
@@ -259,7 +202,6 @@ pub unsafe extern "C" fn diffsol_solve_adjoint_bkwd_rust(
         }
         Ok(())
     })();
-    // bundle dropped here
 
     match result {
         Ok(()) => 0,
@@ -404,13 +346,8 @@ fn get_ffi_capsule(py: Python<'_>) -> PyResult<PyObject> {
 }
 
 #[pyfunction]
-fn get_solve_adjoint_fwd_capsule(py: Python<'_>) -> PyResult<PyObject> {
-    unsafe { make_xla_capsule(py, get_diffsol_solve_adjoint_fwd_handler()) }
-}
-
-#[pyfunction]
-fn get_solve_adjoint_bkwd_capsule(py: Python<'_>) -> PyResult<PyObject> {
-    unsafe { make_xla_capsule(py, get_diffsol_solve_adjoint_bkwd_handler()) }
+fn get_vjp_ffi_capsule(py: Python<'_>) -> PyResult<PyObject> {
+    unsafe { make_xla_capsule(py, get_diffsol_vjp_handler()) }
 }
 
 #[pyfunction]
@@ -423,8 +360,7 @@ fn get_jvp_ffi_capsule(py: Python<'_>) -> PyResult<PyObject> {
 fn diffsol_jax_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OdeSolver>()?;
     m.add_function(wrap_pyfunction!(get_ffi_capsule, m)?)?;
-    m.add_function(wrap_pyfunction!(get_solve_adjoint_fwd_capsule, m)?)?;
-    m.add_function(wrap_pyfunction!(get_solve_adjoint_bkwd_capsule, m)?)?;
+    m.add_function(wrap_pyfunction!(get_vjp_ffi_capsule, m)?)?;
     m.add_function(wrap_pyfunction!(get_jvp_ffi_capsule, m)?)?;
     Ok(())
 }

@@ -122,17 +122,24 @@ pub unsafe extern "C" fn diffsol_solve_rust(
             .map_err(|e| e.to_string())?;
 
         let t_eval = linspace(t0, t_final, n_times);
-        let params_ha =
-            HostArray::new_vector(params_ptr as *mut u8, n_params, ScalarType::F64);
-        let t_eval_ha =
-            HostArray::new_vector(t_eval.as_ptr() as *mut u8, n_times, ScalarType::F64);
+        let params_ha = HostArray::new_vector(params_ptr as *mut u8, n_params, ScalarType::F64);
+        let t_eval_ha = HostArray::new_vector(t_eval.as_ptr() as *mut u8, n_times, ScalarType::F64);
 
         let solution = wrapper
             .solve_dense(params_ha, t_eval_ha)
             .map_err(|e| e.to_string())?;
 
-        copy_ys_to_xla(solution.get_ys().map_err(|e| e.to_string())?, ys_out, n_times, n_state)?;
-        copy_ts_to_xla(solution.get_ts().map_err(|e| e.to_string())?, ts_out, n_times)?;
+        copy_ys_to_xla(
+            solution.get_ys().map_err(|e| e.to_string())?,
+            ys_out,
+            n_times,
+            n_state,
+        )?;
+        copy_ts_to_xla(
+            solution.get_ts().map_err(|e| e.to_string())?,
+            ts_out,
+            n_times,
+        )?;
         Ok(())
     })();
 
@@ -172,18 +179,25 @@ pub unsafe extern "C" fn diffsol_solve_adjoint_fwd_rust(
             .map_err(|e| e.to_string())?;
 
         let t_eval = linspace(t0, t_final, n_times);
-        let params_ha =
-            HostArray::new_vector(params_ptr as *mut u8, n_params, ScalarType::F64);
-        let t_eval_ha =
-            HostArray::new_vector(t_eval.as_ptr() as *mut u8, n_times, ScalarType::F64);
+        let params_ha = HostArray::new_vector(params_ptr as *mut u8, n_params, ScalarType::F64);
+        let t_eval_ha = HostArray::new_vector(t_eval.as_ptr() as *mut u8, n_times, ScalarType::F64);
 
         let (solution, checkpoint) = wrapper
             .solve_adjoint_fwd(params_ha, t_eval_ha)
             .map_err(|e| e.to_string())?;
 
         // Copy primal outputs before moving solution into the bundle.
-        copy_ys_to_xla(solution.get_ys().map_err(|e| e.to_string())?, ys_out, n_times, n_state)?;
-        copy_ts_to_xla(solution.get_ts().map_err(|e| e.to_string())?, ts_out, n_times)?;
+        copy_ys_to_xla(
+            solution.get_ys().map_err(|e| e.to_string())?,
+            ys_out,
+            n_times,
+            n_state,
+        )?;
+        copy_ts_to_xla(
+            solution.get_ts().map_err(|e| e.to_string())?,
+            ts_out,
+            n_times,
+        )?;
 
         let bundle = Box::new(AdjointBundle {
             solution,
@@ -294,10 +308,8 @@ pub unsafe extern "C" fn diffsol_jvp_rust(
             .map_err(|e| e.to_string())?;
 
         let t_eval = linspace(t0, t_final, n_times);
-        let params_ha =
-            HostArray::new_vector(params_ptr as *mut u8, n_params, ScalarType::F64);
-        let t_eval_ha =
-            HostArray::new_vector(t_eval.as_ptr() as *mut u8, n_times, ScalarType::F64);
+        let params_ha = HostArray::new_vector(params_ptr as *mut u8, n_params, ScalarType::F64);
+        let t_eval_ha = HostArray::new_vector(t_eval.as_ptr() as *mut u8, n_times, ScalarType::F64);
 
         let solution = wrapper
             .solve_fwd_sens(params_ha, t_eval_ha)
@@ -389,9 +401,8 @@ static XLA_FFI_CAPSULE_NAME: &[u8] = b"xla._CUSTOM_CALL_TARGET\0";
 // a Box<CapsuleContents> and the capsule data would point to that box, not to the handler.
 // JAX's register_ffi_target uses PyCapsule_GetPointer and expects the handler directly.
 unsafe fn make_xla_capsule(py: Python<'_>, handler: *mut c_void) -> PyResult<PyObject> {
-    let raw = unsafe {
-        pyo3::ffi::PyCapsule_New(handler, XLA_FFI_CAPSULE_NAME.as_ptr().cast(), None)
-    };
+    let raw =
+        unsafe { pyo3::ffi::PyCapsule_New(handler, XLA_FFI_CAPSULE_NAME.as_ptr().cast(), None) };
     if raw.is_null() {
         return Err(PyRuntimeError::new_err("PyCapsule_New returned null"));
     }

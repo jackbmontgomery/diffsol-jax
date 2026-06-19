@@ -10,6 +10,7 @@ Copyright &copy; 2026 The authors
 nav = [
     { "Home" = "index.md" },
     { "Getting started" = "getting-started.md" },
+    { "From Python to DiffSL" = "lowering.md" },
     { "API reference" = [
         { "Overview" = "api/index.md" },
         { "diffsol_jax" = "api/diffsol_jax.md" },

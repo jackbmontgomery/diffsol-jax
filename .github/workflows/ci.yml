@@ -89,18 +89,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install LLVM and Clang
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "17.0"
+      - uses: astral-sh/setup-uv@v5
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        env:
-          LLVM_SYS_170_PREFIX: ${{ env.LLVM_PATH }}
-        with:
-          args: --release --out dist --sdist --features diffsol-llvm17
-      - name: Remove wheels, just keep sdist
-        run: rm -rf dist/*.whl
+        run: uv build --sdist --out-dir dist
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:

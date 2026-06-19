@@ -24,7 +24,7 @@ def lotka_volterra(t, y, p):
 # diffsol-jax
 
 
-ode_problem = ODEProblem(lotka_volterra, Y0, PARAMS, N_TIMES, ode_solver="tsit45")
+ode_problem = ODEProblem(lotka_volterra, Y0, PARAMS, N_TIMES)
 
 diffsol_jit = jax.jit(lambda p: ode_problem.solve(p, T_SPAN))
 

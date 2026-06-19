@@ -1,160 +1,109 @@
-use diffsol::{
-    AdjointOdeSolverMethod, DenseMatrix, DiffSl, LlvmModule, Matrix, MatrixCommon, NalgebraContext,
-    NalgebraLU, NalgebraMat, NalgebraVec, OdeBuilder, OdeEquations, OdeSolverMethod,
-    OdeSolverProblem, OdeSolverState, SensitivitiesOdeSolverMethod, Vector,
+use diffsol_c::{
+    AdjointCheckpointWrapper, HostArray, JitBackendType, LinearSolverType, MatrixType,
+    OdeSolverType, OdeWrapper, ScalarType, SolutionWrapper,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use std::ffi::c_void;
 use std::os::raw::c_char;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::slice;
-use std::sync::{Arc, Mutex};
 
-type SolveProblem = OdeSolverProblem<DiffSl<NalgebraMat<f64>, LlvmModule>>;
-
-#[pyclass]
-pub struct OdeSolver {
-    problem: Arc<Mutex<SolveProblem>>,
+// Getter functions defined in wrapper.cc that return XLA FFI handler pointers.
+extern "C" {
+    fn get_diffsol_solve_handler() -> *mut c_void;
+    fn get_diffsol_solve_adjoint_fwd_handler() -> *mut c_void;
+    fn get_diffsol_solve_adjoint_bkwd_handler() -> *mut c_void;
+    fn get_diffsol_jvp_handler() -> *mut c_void;
 }
 
-#[pymethods]
-impl OdeSolver {
-    #[new]
-    fn new(diffsl_src: &str) -> PyResult<Self> {
-        let problem = OdeBuilder::<NalgebraMat<f64>>::new()
-            .rtol(1e-8)
-            .atol([1e-8])
-            .build_from_diffsl::<LlvmModule>(diffsl_src)
-            .map_err(|e| PyRuntimeError::new_err(format!("build: {e}")))?;
-        Ok(Self {
-            problem: Arc::new(Mutex::new(problem)),
-        })
-    }
-
-    fn handle(&self) -> u64 {
-        Arc::as_ptr(&self.problem) as u64
+// Maps Python method codes to OdeSolverType.
+// Python codes: 0=bdf, 1=tsit45, 2=esdirk34, 3=tr_bdf2
+fn ode_solver_from_method(method: i32) -> Result<OdeSolverType, String> {
+    match method {
+        0 => Ok(OdeSolverType::Bdf),
+        1 => Ok(OdeSolverType::Tsit45),
+        2 => Ok(OdeSolverType::Esdirk34),
+        3 => Ok(OdeSolverType::TrBdf2),
+        _ => Err(format!("unknown method code {method}")),
     }
 }
 
-#[repr(i32)]
-#[derive(Copy, Clone)]
-enum Method {
-    Bdf = 0,
-    Tsit45 = 1,
-    Esdirk34 = 2,
-    TrBdf2 = 3,
-}
-
-impl Method {
-    fn from_i32(x: i32) -> Result<Self, String> {
-        match x {
-            0 => Ok(Self::Bdf),
-            1 => Ok(Self::Tsit45),
-            2 => Ok(Self::Esdirk34),
-            3 => Ok(Self::TrBdf2),
-            _ => Err(format!("unknown method code {x}")),
-        }
+fn linspace(t0: f64, t_final: f64, n: usize) -> Vec<f64> {
+    if n == 1 {
+        return vec![t_final];
     }
-}
-
-fn flatten_mat(mat: &NalgebraMat<f64>, n_state: usize, n_times: usize) -> Result<Vec<f64>, String> {
-    if mat.nrows() != n_state {
-        return Err(format!(
-            "state size mismatch: got {} rows, expected {n_state}",
-            mat.nrows()
-        ));
-    }
-    if mat.ncols() != n_times {
-        return Err(format!(
-            "time size mismatch: got {} cols, expected {n_times}",
-            mat.ncols()
-        ));
-    }
-    let mut ys = Vec::with_capacity(n_times * n_state);
-    for col in 0..n_times {
-        for row in 0..n_state {
-            ys.push(mat[(row, col)]);
-        }
-    }
-    Ok(ys)
-}
-
-fn make_ts(n_times: usize, t0: f64, t_final: f64) -> Vec<f64> {
-    (0..n_times)
-        .map(|i| t0 + (t_final - t0) * (i as f64) / ((n_times - 1) as f64))
+    (0..n)
+        .map(|i| t0 + (t_final - t0) * i as f64 / (n - 1) as f64)
         .collect()
 }
 
-fn solve_inner(
-    handle: u64,
-    params: &[f64],
-    t0: f64,
-    t_final: f64,
+unsafe fn write_err(msg: &str, buf: *mut c_char, len: usize) {
+    if !buf.is_null() && len > 0 {
+        let bytes = msg.as_bytes();
+        let copy_len = bytes.len().min(len - 1);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), buf, copy_len);
+            *buf.add(copy_len) = 0;
+        }
+    }
+}
+
+unsafe fn get_wrapper(handle: u64) -> Result<&'static OdeWrapper, String> {
+    if handle == 0 {
+        return Err("null handle".to_string());
+    }
+    Ok(unsafe { &*(handle as *const OdeWrapper) })
+}
+
+// Copy ys from a (n_state × n_times) col-major HostArray into an XLA (n_times, n_state)
+// row-major buffer. The two layouts are identical in flat memory
+// (element [s][t] = s + t*n_state), so this is effectively a memcpy, but we use
+// as_array to stay within the public HostArray API.
+fn copy_ys_to_xla(
+    ys_ha: HostArray,
+    ys_out: *mut f64,
     n_times: usize,
     n_state: usize,
-    method: Method,
-) -> Result<(Vec<f64>, Vec<f64>), String> {
-    let ts = make_ts(n_times, t0, t_final);
-
-    let mutex = unsafe { &*(handle as *const Mutex<SolveProblem>) };
-    let mut problem = mutex.lock().unwrap();
-
-    let params_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
-    problem.eqn_mut().set_params(&params_vec);
-
-    let ys = match method {
-        Method::Bdf => {
-            let mut solver = problem
-                .bdf::<NalgebraLU<f64>>()
-                .map_err(|e| format!("bdf: {e}"))?;
-            let (mat, _) = solver
-                .solve_dense(ts.as_slice())
-                .map_err(|e| format!("solve_dense: {e}"))?;
-            flatten_mat(&mat, n_state, n_times)?
+) -> Result<(), String> {
+    let view = ys_ha.as_array::<f64>().map_err(|e| e.to_string())?;
+    // view shape is (n_state, n_times); view[[s, t]] gives ys at state s, time t.
+    for t in 0..n_times {
+        for s in 0..n_state {
+            // XLA row-major (n_times, n_state): index t*n_state + s
+            unsafe { *ys_out.add(t * n_state + s) = view[[s, t]] };
         }
-        Method::Tsit45 => {
-            let mut solver = problem.tsit45().map_err(|e| format!("tsit45: {e}"))?;
-            let (mat, _) = solver
-                .solve_dense(ts.as_slice())
-                .map_err(|e| format!("solve_dense: {e}"))?;
-            flatten_mat(&mat, n_state, n_times)?
-        }
-        Method::Esdirk34 => {
-            let mut solver = problem
-                .esdirk34::<NalgebraLU<f64>>()
-                .map_err(|e| format!("esdirk34: {e}"))?;
-            let (mat, _) = solver
-                .solve_dense(ts.as_slice())
-                .map_err(|e| format!("solve_dense: {e}"))?;
-            flatten_mat(&mat, n_state, n_times)?
-        }
-        Method::TrBdf2 => {
-            let mut solver = problem
-                .tr_bdf2::<NalgebraLU<f64>>()
-                .map_err(|e| format!("tr_bdf2: {e}"))?;
-            let (mat, _) = solver
-                .solve_dense(ts.as_slice())
-                .map_err(|e| format!("solve_dense: {e}"))?;
-            flatten_mat(&mat, n_state, n_times)?
-        }
-    };
-    Ok((ys, ts))
-}
-
-unsafe fn write_err(buf: *mut c_char, len: usize, msg: &str) {
-    if buf.is_null() || len == 0 {
-        return;
     }
-    let bytes = msg.as_bytes();
-    let n = bytes.len().min(len - 1);
-    std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, n);
-    *buf.add(n) = 0;
+    Ok(())
 }
 
-#[no_mangle]
+fn copy_ts_to_xla(ts_ha: HostArray, ts_out: *mut f64, n_times: usize) -> Result<(), String> {
+    let slice = ts_ha.as_slice::<f64>().map_err(|e| e.to_string())?;
+    if slice.len() != n_times {
+        return Err(format!(
+            "ts length mismatch: expected {n_times}, got {}",
+            slice.len()
+        ));
+    }
+    unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), ts_out, n_times) };
+    Ok(())
+}
+
+// Bundles the forward solution (contains saved t_eval) and the adjoint checkpoint.
+// Both are needed for the backward pass: the solution provides t_eval, the checkpoint
+// provides forward trajectory data.
+struct AdjointBundle {
+    solution: SolutionWrapper,
+    checkpoint: AdjointCheckpointWrapper,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extern "C" bridge functions called from wrapper.cc
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Primal dense solve at evenly-spaced evaluation times.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn diffsol_solve_rust(
     handle: u64,
-    params: *const f64,
+    params_ptr: *const f64,
     n_params: usize,
     t0: f64,
     t_final: f64,
@@ -166,224 +115,185 @@ pub unsafe extern "C" fn diffsol_solve_rust(
     err_buf: *mut c_char,
     err_buf_len: usize,
 ) -> i32 {
-    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
-        let params_slice = slice::from_raw_parts(params, n_params);
-        let method = Method::from_i32(method)?;
+    let result = (|| -> Result<(), String> {
+        let wrapper = unsafe { get_wrapper(handle) }?;
+        wrapper
+            .set_ode_solver(ode_solver_from_method(method)?)
+            .map_err(|e| e.to_string())?;
 
-        let (ys, ts) = solve_inner(handle, params_slice, t0, t_final, n_times, n_state, method)?;
+        let t_eval = linspace(t0, t_final, n_times);
+        let params_ha = HostArray::new_vector(params_ptr as *mut u8, n_params, ScalarType::F64);
+        let t_eval_ha = HostArray::new_vector(t_eval.as_ptr() as *mut u8, n_times, ScalarType::F64);
 
-        if ys.len() != n_times * n_state {
-            return Err(format!(
-                "ys length {} != n_times*n_state {}",
-                ys.len(),
-                n_times * n_state
-            ));
-        }
-        if ts.len() != n_times {
-            return Err(format!("ts length {} != n_times {}", ts.len(), n_times));
-        }
+        let solution = wrapper
+            .solve_dense(params_ha, t_eval_ha)
+            .map_err(|e| e.to_string())?;
 
-        slice::from_raw_parts_mut(ys_out, n_times * n_state).copy_from_slice(&ys);
-        slice::from_raw_parts_mut(ts_out, n_times).copy_from_slice(&ts);
+        copy_ys_to_xla(
+            solution.get_ys().map_err(|e| e.to_string())?,
+            ys_out,
+            n_times,
+            n_state,
+        )?;
+        copy_ts_to_xla(
+            solution.get_ts().map_err(|e| e.to_string())?,
+            ts_out,
+            n_times,
+        )?;
         Ok(())
-    }));
+    })();
 
     match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(msg)) => {
-            write_err(err_buf, err_buf_len, &msg);
-            1
-        }
-        Err(_) => {
-            write_err(err_buf, err_buf_len, "rust panic in diffsol_solve_rust");
-            2
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { write_err(&e, err_buf, err_buf_len) };
+            -1
         }
     }
 }
 
-fn vjp_inner(
+/// Forward adjoint solve: computes ys and ts (primal outputs) and creates an
+/// AdjointBundle on the heap whose pointer is written to *ckpt_out as a u64.
+/// The caller is responsible for consuming this bundle exactly once via
+/// diffsol_solve_adjoint_bkwd_rust.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn diffsol_solve_adjoint_fwd_rust(
     handle: u64,
-    params: &[f64],
-    t0: f64,
-    t_final: f64,
-    n_times: usize,
-    n_state: usize,
-    g_ys: &[f64],
-    method: Method,
-) -> Result<(Vec<f64>, Vec<f64>), String> {
-    let ts = make_ts(n_times, t0, t_final);
-
-    let mut g_mat = NalgebraMat::<f64>::zeros(n_state, n_times, NalgebraContext);
-    for col in 0..n_times {
-        for row in 0..n_state {
-            g_mat.set_index(row, col, g_ys[col * n_state + row]);
-        }
-    }
-
-    let n_params = params.len();
-
-    let mutex = unsafe { &*(handle as *const Mutex<SolveProblem>) };
-    let mut problem = mutex.lock().unwrap();
-
-    let params_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
-    problem.eqn_mut().set_params(&params_vec);
-
-    match method {
-        Method::Bdf => {
-            let mut solver = problem
-                .bdf::<NalgebraLU<f64>>()
-                .map_err(|e| format!("bdf: {e}"))?;
-            let (checkpointer, _, _) = solver
-                .solve_dense_with_checkpointing(ts.as_slice(), None)
-                .map_err(|e| format!("fwd checkpointing: {e}"))?;
-            let adj = problem
-                .bdf_solver_adjoint::<NalgebraLU<f64>, _>(checkpointer, Some(1))
-                .map_err(|e| format!("adj_bdf: {e}"))?;
-            let common = adj
-                .solve_adjoint_backwards_pass(None, ts.as_slice(), &[&g_mat])
-                .map_err(|e| format!("adj_pass: {e}"))?
-                .into_common();
-            let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
-            let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
-            Ok((grad_p, grad_y0))
-        }
-        Method::Tsit45 => {
-            let mut solver = problem.tsit45().map_err(|e| format!("tsit45: {e}"))?;
-            let (checkpointer, _, _) = solver
-                .solve_dense_with_checkpointing(ts.as_slice(), None)
-                .map_err(|e| format!("fwd checkpointing: {e}"))?;
-            let adj = problem
-                .tsit45_solver_adjoint::<_>(checkpointer, Some(1))
-                .map_err(|e| format!("adj_tsit45: {e}"))?;
-            let common = adj
-                .solve_adjoint_backwards_pass(None, ts.as_slice(), &[&g_mat])
-                .map_err(|e| format!("adj_pass: {e}"))?
-                .into_common();
-            let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
-            let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
-            Ok((grad_p, grad_y0))
-        }
-        Method::Esdirk34 | Method::TrBdf2 => {
-            let mut solver = problem
-                .bdf::<NalgebraLU<f64>>()
-                .map_err(|e| format!("bdf (adjoint fallback): {e}"))?;
-            let (checkpointer, _, _) = solver
-                .solve_dense_with_checkpointing(ts.as_slice(), None)
-                .map_err(|e| format!("fwd checkpointing: {e}"))?;
-            let adj = problem
-                .bdf_solver_adjoint::<NalgebraLU<f64>, _>(checkpointer, Some(1))
-                .map_err(|e| format!("adj_bdf: {e}"))?;
-            let common = adj
-                .solve_adjoint_backwards_pass(None, ts.as_slice(), &[&g_mat])
-                .map_err(|e| format!("adj_pass: {e}"))?
-                .into_common();
-            let grad_p = (0..n_params).map(|i| common.sg[0].get_index(i)).collect();
-            let grad_y0 = (0..n_state).map(|i| common.s[0].get_index(i)).collect();
-            Ok((grad_p, grad_y0))
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn diffsol_vjp_rust(
-    handle: u64,
-    params: *const f64,
+    params_ptr: *const f64,
     n_params: usize,
     t0: f64,
     t_final: f64,
-    g_ys: *const f64,
-    grad_p_out: *mut f64,
-    grad_y0_out: *mut f64,
+    ys_out: *mut f64,
+    ts_out: *mut f64,
+    ckpt_out: *mut u64,
     n_times: usize,
     n_state: usize,
     method: i32,
     err_buf: *mut c_char,
     err_buf_len: usize,
 ) -> i32 {
-    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
-        let params_slice = slice::from_raw_parts(params, n_params);
-        let g_ys_slice = slice::from_raw_parts(g_ys, n_times * n_state);
-        let method = Method::from_i32(method)?;
+    let result = (|| -> Result<(), String> {
+        let wrapper = unsafe { get_wrapper(handle) }?;
+        wrapper
+            .set_ode_solver(ode_solver_from_method(method)?)
+            .map_err(|e| e.to_string())?;
 
-        let (grad_p, grad_y0) = vjp_inner(
-            handle,
-            params_slice,
-            t0,
-            t_final,
+        let t_eval = linspace(t0, t_final, n_times);
+        let params_ha = HostArray::new_vector(params_ptr as *mut u8, n_params, ScalarType::F64);
+        let t_eval_ha = HostArray::new_vector(t_eval.as_ptr() as *mut u8, n_times, ScalarType::F64);
+
+        let (solution, checkpoint) = wrapper
+            .solve_adjoint_fwd(params_ha, t_eval_ha)
+            .map_err(|e| e.to_string())?;
+
+        // Copy primal outputs before moving solution into the bundle.
+        copy_ys_to_xla(
+            solution.get_ys().map_err(|e| e.to_string())?,
+            ys_out,
             n_times,
             n_state,
-            g_ys_slice,
-            method,
+        )?;
+        copy_ts_to_xla(
+            solution.get_ts().map_err(|e| e.to_string())?,
+            ts_out,
+            n_times,
         )?;
 
-        slice::from_raw_parts_mut(grad_p_out, n_params).copy_from_slice(&grad_p);
-        slice::from_raw_parts_mut(grad_y0_out, n_state).copy_from_slice(&grad_y0);
+        let bundle = Box::new(AdjointBundle {
+            solution,
+            checkpoint,
+        });
+        unsafe { *ckpt_out = Box::into_raw(bundle) as u64 };
         Ok(())
-    }));
+    })();
 
     match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(msg)) => {
-            write_err(err_buf, err_buf_len, &msg);
-            1
-        }
-        Err(_) => {
-            write_err(err_buf, err_buf_len, "rust panic in diffsol_vjp_rust");
-            2
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { write_err(&e, err_buf, err_buf_len) };
+            -1
         }
     }
 }
 
-fn jvp_inner(
+/// Backward adjoint solve: runs the adjoint backward integration consuming the
+/// AdjointBundle identified by ckpt_handle. The bundle is freed here regardless of
+/// success or failure, so the XLA graph must call this exactly once per forward.
+///
+/// g_ys is (n_times, n_state) row-major in XLA. diffsol expects dgdu_eval as
+/// (n_state, n_times) col-major, but these layouts are identical in flat memory,
+/// so we reinterpret the XLA buffer as (n_state, n_times) col-major directly.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn diffsol_solve_adjoint_bkwd_rust(
     handle: u64,
-    params: &[f64],
-    t0: f64,
-    t_final: f64,
-    dp: &[f64],
+    g_ys_ptr: *const f64,
+    grad_params_out: *mut f64,
     n_times: usize,
     n_state: usize,
-    _method: Method,
-) -> Result<Vec<f64>, String> {
-    let ts = make_ts(n_times, t0, t_final);
+    n_params: usize,
+    ckpt_handle: u64,
+    method: i32,
+    err_buf: *mut c_char,
+    err_buf_len: usize,
+) -> i32 {
+    // Always take ownership so the bundle is freed even on error paths.
+    let bundle = unsafe { Box::from_raw(ckpt_handle as *mut AdjointBundle) };
 
-    let mutex = unsafe { &*(handle as *const Mutex<SolveProblem>) };
-    let mut problem = mutex.lock().unwrap();
+    let result = (|| -> Result<(), String> {
+        let wrapper = unsafe { get_wrapper(handle) }?;
+        wrapper
+            .set_ode_solver(ode_solver_from_method(method)?)
+            .map_err(|e| e.to_string())?;
 
-    let params_vec = NalgebraVec::from_vec(params.to_vec(), NalgebraContext);
-    problem.eqn_mut().set_params(&params_vec);
+        // Reinterpret XLA g_ys (n_times, n_state) row-major as (n_state, n_times)
+        // col-major — identical flat layout — as required by solve_adjoint_bkwd.
+        let dgdu_ha = HostArray::new_col_major(
+            g_ys_ptr as *mut u8,
+            n_state,
+            n_times,
+            1,                // row_stride_elems (col-major: row index varies fastest)
+            n_state as isize, // col_stride_elems
+            ScalarType::F64,
+        );
 
-    let state = problem
-        .bdf_state_sens::<NalgebraLU<f64>>()
-        .map_err(|e| format!("jvp bdf_state_sens: {e}"))?;
-    let mut solver = problem
-        .bdf_solver_sens::<NalgebraLU<f64>>(state)
-        .map_err(|e| format!("jvp bdf_solver_sens: {e}"))?;
-    let (_, sens, _) = solver
-        .solve_dense_sensitivities(ts.as_slice())
-        .map_err(|e| format!("jvp solve_dense_sensitivities: {e}"))?;
+        let grad_ha = wrapper
+            .solve_adjoint_bkwd(&bundle.solution, &bundle.checkpoint, dgdu_ha)
+            .map_err(|e| e.to_string())?;
 
-    let n_params = params.len();
-    let mut dys = vec![0.0f64; n_times * n_state];
-    for col in 0..n_times {
-        for row in 0..n_state {
-            let mut v = 0.0f64;
-            for i in 0..n_params {
-                v += dp[i] * sens[i][(row, col)];
-            }
-            dys[col * n_state + row] = v;
+        // grad_ha is (n_params, 1) 2D; access via as_array.
+        let view = grad_ha.as_array::<f64>().map_err(|e| e.to_string())?;
+        let n = view.shape()[0];
+        if n != n_params {
+            return Err(format!(
+                "grad_params size mismatch: expected {n_params}, got {n}"
+            ));
+        }
+        for i in 0..n_params {
+            unsafe { *grad_params_out.add(i) = view[[i, 0]] };
+        }
+        Ok(())
+    })();
+    // bundle dropped here
+
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { write_err(&e, err_buf, err_buf_len) };
+            -1
         }
     }
-    Ok(dys)
 }
 
-#[no_mangle]
+/// JVP (forward sensitivity): computes dys = J @ dp where J is the parameter
+/// Jacobian from solve_fwd_sens, contracted with the direction dp.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn diffsol_jvp_rust(
     handle: u64,
-    params: *const f64,
+    params_ptr: *const f64,
     n_params: usize,
     t0: f64,
     t_final: f64,
-    dp: *const f64,
+    dp_ptr: *const f64,
     dys_out: *mut f64,
     n_times: usize,
     n_state: usize,
@@ -391,102 +301,141 @@ pub unsafe extern "C" fn diffsol_jvp_rust(
     err_buf: *mut c_char,
     err_buf_len: usize,
 ) -> i32 {
-    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
-        let params_slice = slice::from_raw_parts(params, n_params);
-        let dp_slice = slice::from_raw_parts(dp, n_params);
-        let method = Method::from_i32(method)?;
+    let result = (|| -> Result<(), String> {
+        let wrapper = unsafe { get_wrapper(handle) }?;
+        wrapper
+            .set_ode_solver(ode_solver_from_method(method)?)
+            .map_err(|e| e.to_string())?;
 
-        let dys = jvp_inner(
-            handle,
-            params_slice,
-            t0,
-            t_final,
-            dp_slice,
-            n_times,
-            n_state,
-            method,
-        )?;
+        let t_eval = linspace(t0, t_final, n_times);
+        let params_ha = HostArray::new_vector(params_ptr as *mut u8, n_params, ScalarType::F64);
+        let t_eval_ha = HostArray::new_vector(t_eval.as_ptr() as *mut u8, n_times, ScalarType::F64);
 
-        if dys.len() != n_times * n_state {
+        let solution = wrapper
+            .solve_fwd_sens(params_ha, t_eval_ha)
+            .map_err(|e| e.to_string())?;
+
+        // sens is Vec<HostArray> of length n_params; each array is (n_state, n_times).
+        let sens = solution.get_sens().map_err(|e| e.to_string())?;
+        if sens.len() != n_params {
             return Err(format!(
-                "dys length {} != n_times*n_state {}",
-                dys.len(),
-                n_times * n_state
+                "sens count mismatch: expected {n_params}, got {}",
+                sens.len()
             ));
         }
-        slice::from_raw_parts_mut(dys_out, n_times * n_state).copy_from_slice(&dys);
+
+        let dp = unsafe { std::slice::from_raw_parts(dp_ptr, n_params) };
+
+        // Pre-compute 2D views for all sensitivity arrays to avoid repeated as_array calls.
+        // Each view is (n_state, n_times); view[[s, t]] = d(ys[t,s])/d(params[i]).
+        let views: Vec<_> = sens
+            .iter()
+            .map(|ha| ha.as_array::<f64>().map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // dys_out: (n_times, n_state) row-major
+        // dys[t][s] = sum_i dp[i] * sens_i[s][t]
+        for t in 0..n_times {
+            for s in 0..n_state {
+                let acc: f64 = (0..n_params).map(|i| dp[i] * views[i][[s, t]]).sum();
+                unsafe { *dys_out.add(t * n_state + s) = acc };
+            }
+        }
         Ok(())
-    }));
+    })();
 
     match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(msg)) => {
-            write_err(err_buf, err_buf_len, &msg);
-            1
-        }
-        Err(_) => {
-            write_err(err_buf, err_buf_len, "rust panic in diffsol_jvp_rust");
-            2
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { write_err(&e, err_buf, err_buf_len) };
+            -1
         }
     }
 }
 
-extern "C" {
-    fn DiffsolSolve();
-    fn DiffsolVjp();
-    fn DiffsolJvp();
+// ─────────────────────────────────────────────────────────────────────────────
+// PyO3 module
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[pyclass]
+pub struct OdeSolver {
+    wrapper: OdeWrapper,
+}
+
+#[pymethods]
+impl OdeSolver {
+    #[new]
+    fn new(diffsl_src: &str) -> PyResult<Self> {
+        let wrapper = OdeWrapper::new_jit(
+            diffsl_src,
+            JitBackendType::Llvm,
+            ScalarType::F64,
+            MatrixType::NalgebraDense,
+            LinearSolverType::Default,
+            OdeSolverType::Bdf,
+        )
+        .map_err(|e| PyRuntimeError::new_err(format!("build: {e}")))?;
+
+        wrapper
+            .set_rtol(1e-8)
+            .map_err(|e| PyRuntimeError::new_err(format!("set_rtol: {e}")))?;
+        wrapper
+            .set_atol(1e-8)
+            .map_err(|e| PyRuntimeError::new_err(format!("set_atol: {e}")))?;
+
+        Ok(Self { wrapper })
+    }
+
+    // Returns a stable u64 handle (raw pointer) to the inner OdeWrapper.
+    // Valid for the lifetime of this Python object; PyO3 boxes the struct on the heap.
+    fn handle(&self) -> u64 {
+        &self.wrapper as *const OdeWrapper as u64
+    }
+}
+
+// Capsule name expected by jax.ffi.register_ffi_target for CPU kernels.
+static XLA_FFI_CAPSULE_NAME: &[u8] = b"xla._CUSTOM_CALL_TARGET\0";
+
+// Creates a Python capsule whose data IS the XLA_FFI_Handler* pointer (no wrapping layer).
+// We use PyCapsule_New directly because pyo3's PyCapsule::new_bound stores the value inside
+// a Box<CapsuleContents> and the capsule data would point to that box, not to the handler.
+// JAX's register_ffi_target uses PyCapsule_GetPointer and expects the handler directly.
+unsafe fn make_xla_capsule(py: Python<'_>, handler: *mut c_void) -> PyResult<PyObject> {
+    let raw =
+        unsafe { pyo3::ffi::PyCapsule_New(handler, XLA_FFI_CAPSULE_NAME.as_ptr().cast(), None) };
+    if raw.is_null() {
+        return Err(PyRuntimeError::new_err("PyCapsule_New returned null"));
+    }
+    Ok(unsafe { PyObject::from_owned_ptr(py, raw) })
 }
 
 #[pyfunction]
 fn get_ffi_capsule(py: Python<'_>) -> PyResult<PyObject> {
-    static CAPSULE_NAME: &[u8] = b"xla._CUSTOM_CALL_TARGET\0";
-    let ptr = DiffsolSolve as *mut std::ffi::c_void;
-    unsafe {
-        let cap = pyo3::ffi::PyCapsule_New(ptr, CAPSULE_NAME.as_ptr() as *const c_char, None);
-        if cap.is_null() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "PyCapsule_New failed",
-            ));
-        }
-        Ok(PyObject::from_owned_ptr(py, cap))
-    }
+    unsafe { make_xla_capsule(py, get_diffsol_solve_handler()) }
 }
 
 #[pyfunction]
-fn get_vjp_ffi_capsule(py: Python<'_>) -> PyResult<PyObject> {
-    static CAPSULE_NAME: &[u8] = b"xla._CUSTOM_CALL_TARGET\0";
-    let ptr = DiffsolVjp as *mut std::ffi::c_void;
-    unsafe {
-        let cap = pyo3::ffi::PyCapsule_New(ptr, CAPSULE_NAME.as_ptr() as *const c_char, None);
-        if cap.is_null() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "PyCapsule_New failed",
-            ));
-        }
-        Ok(PyObject::from_owned_ptr(py, cap))
-    }
+fn get_solve_adjoint_fwd_capsule(py: Python<'_>) -> PyResult<PyObject> {
+    unsafe { make_xla_capsule(py, get_diffsol_solve_adjoint_fwd_handler()) }
+}
+
+#[pyfunction]
+fn get_solve_adjoint_bkwd_capsule(py: Python<'_>) -> PyResult<PyObject> {
+    unsafe { make_xla_capsule(py, get_diffsol_solve_adjoint_bkwd_handler()) }
 }
 
 #[pyfunction]
 fn get_jvp_ffi_capsule(py: Python<'_>) -> PyResult<PyObject> {
-    static CAPSULE_NAME: &[u8] = b"xla._CUSTOM_CALL_TARGET\0";
-    let ptr = DiffsolJvp as *mut std::ffi::c_void;
-    unsafe {
-        let cap = pyo3::ffi::PyCapsule_New(ptr, CAPSULE_NAME.as_ptr() as *const c_char, None);
-        if cap.is_null() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "PyCapsule_New failed",
-            ));
-        }
-        Ok(PyObject::from_owned_ptr(py, cap))
-    }
+    unsafe { make_xla_capsule(py, get_diffsol_jvp_handler()) }
 }
 
 #[pymodule]
-fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(get_ffi_capsule, m)?)?;
-    m.add_function(wrap_pyfunction!(get_vjp_ffi_capsule, m)?)?;
-    m.add_function(wrap_pyfunction!(get_jvp_ffi_capsule, m)?)?;
+#[pyo3(name = "_rust")]
+fn diffsol_jax_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OdeSolver>()?;
+    m.add_function(wrap_pyfunction!(get_ffi_capsule, m)?)?;
+    m.add_function(wrap_pyfunction!(get_solve_adjoint_fwd_capsule, m)?)?;
+    m.add_function(wrap_pyfunction!(get_solve_adjoint_bkwd_capsule, m)?)?;
+    m.add_function(wrap_pyfunction!(get_jvp_ffi_capsule, m)?)?;
     Ok(())
 }

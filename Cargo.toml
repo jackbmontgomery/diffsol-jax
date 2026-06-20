@@ -13,7 +13,8 @@ diffsol-c = "0.4.6"
 ndarray = "0.17.2"
 
 [features]
-default = ["diffsol-llvm17"]
+default = ["diffsol-cranelift"]
+diffsol-cranelift = ["diffsol-c/diffsl-cranelift"]
 diffsol-llvm17 = ["diffsol-c/diffsl-llvm17"]
 suitesparse = ["diffsol-c/suitesparse"]
 

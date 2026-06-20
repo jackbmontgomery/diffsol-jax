@@ -4,16 +4,17 @@ JVP/VJP consistency — dot-product / adjoint test.
 For random dp and g:
     <g, J·dp>  ==  <grad_p, dp>
 
-LHS uses _solve_jvp; RHS uses _solve_vjp.
-These are independent Rust paths, so agreement at near-machine-precision
-confirms forward and reverse modes are mathematically consistent.
+LHS uses forward mode (``jax.jvp``); RHS uses reverse mode (``jax.vjp``). Both
+go through the public ``solve``; reverse mode is JAX's automatic transpose of the
+forward-sensitivity contraction, so agreement to solver tolerance confirms the
+two modes are mathematically consistent.
 """
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from diffsol_jax import ODEProblem, _solve_jvp, _solve_vjp
+from diffsol_jax import ODEProblem
 
 jax.config.update("jax_enable_x64", True)
 
@@ -30,7 +31,7 @@ def lotka_volterra(t, y, p):
     return (alpha * x - beta * x * yy, delta * x * yy - gamma * yy)
 
 
-def make_problem(ode_solver="bdf"):
+def make_problem():
     return ODEProblem(lotka_volterra, Y0, PARAMS, n_times=N_TIMES)
 
 
@@ -38,25 +39,22 @@ def make_problem(ode_solver="bdf"):
 @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
 def test_jvp_vjp_dotproduct(ode_solver, seed):
     """<g, J·dp>  ==  <grad_p, dp> to solver tolerance."""
-    prob = make_problem(ode_solver)
-    handle = prob._handle
-    n_state = len(Y0)
-    n_params = len(PARAMS)
-    method_code = {"bdf": 0, "tsit45": 1, "esdirk34": 2, "tr_bdf2": 3}[ode_solver]
-    t0, t_final = float(T_SPAN[0]), float(T_SPAN[1])
+    prob = make_problem()
+
+    def ys_of(p):
+        return prob.solve(p, T_SPAN, ode_solver=ode_solver)[1]
 
     rng = np.random.default_rng(seed)
-    dp = jnp.array(rng.standard_normal(n_params))
-    g = jnp.array(rng.standard_normal((N_TIMES, n_state)))
+    dp = jnp.array(rng.standard_normal(len(PARAMS)))
+    g = jnp.array(rng.standard_normal((N_TIMES, len(Y0))))
 
-    # LHS: <g, J·dp>
-    dys = _solve_jvp(handle, PARAMS, t0, t_final, dp, N_TIMES, n_state, method_code)
+    # LHS: <g, J·dp> via forward mode
+    _, dys = jax.jvp(ys_of, (PARAMS,), (dp,))
     lhs = float(jnp.sum(g * dys))
 
-    # RHS: <grad_p, dp>
-    grad_p, _grad_y0 = _solve_vjp(
-        handle, PARAMS, T_SPAN, g, N_TIMES, n_state, method_code
-    )
+    # RHS: <grad_p, dp> via reverse mode
+    _, vjp_fn = jax.vjp(ys_of, PARAMS)
+    (grad_p,) = vjp_fn(g)
     rhs = float(jnp.dot(grad_p, dp))
 
     scale = max(abs(lhs), abs(rhs), 1e-12)

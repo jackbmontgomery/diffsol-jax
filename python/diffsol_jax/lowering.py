@@ -82,8 +82,12 @@ _UNARY_FNS = {
 }
 
 # jaxpr primitive name -> DiffSL infix operator.
+# ``add_any`` is JAX's tangent-accumulation primitive (from ``jvp``/``jacfwd``); it
+# is semantically identical to ``add`` and appears throughout augmented-sensitivity
+# RHS code.
 _BINARY_OPS = {
     "add": "+",
+    "add_any": "+",
     "sub": "-",
     "mul": "*",
     "div": "/",
@@ -166,6 +170,14 @@ class Lowering:
         self.scalar_wraps: dict = {}
         self.concat_only: set = set()
 
+        # Vector "views": maps a jaxpr var to a contiguous slice of an underlying
+        # named vector, so width-1 indexing resolves to a scalar symbol/literal and
+        # width-k indexing yields a narrower view. The state/parameter vectors are
+        # the root views; rank-1 constvars (e.g. the one-hot tangents from
+        # ``jax.jvp`` in augmented-sensitivity code) register as ``"const"`` views.
+        # Each entry is ``("state"|"param", offset)`` or ``("const", offset, values)``.
+        self.views: dict = {}
+
     # ── symbol table ─────────────────────────────────────────────────────────
 
     def fresh(self, hint: str = "v") -> str:
@@ -202,14 +214,25 @@ class Lowering:
             self._HANDLERS.get(eqn.primitive.name, Lowering._elementwise)(self, eqn)
 
     def bind_const(self, var, val) -> None:
-        """Bind a jaxpr constvar, emitting a scalar definition for it."""
+        """Bind a jaxpr constvar.
+
+        Scalars become a named DiffSL scalar definition. Rank-1 constants (e.g.
+        the one-hot tangents from ``jax.jvp``) are recorded in
+        :attr:`const_vectors` so that width-1 ``slice``/``squeeze`` against them
+        resolves to the inline literal; the vector itself is never emitted.
+        """
         shape = getattr(val, "shape", ())
-        if shape != ():
-            raise NotImplementedError(
-                f"non-scalar constvar (shape={shape}); pass as a parameter instead"
-            )
-        name = self.fresh("c")
-        self.bind(var, self.emit(name, "", _fmt_float(float(val))))
+        if shape == ():
+            name = self.fresh("c")
+            self.bind(var, self.emit(name, "", _fmt_float(float(val))))
+            return
+        if len(shape) == 1:
+            self.views[var] = ("const", 0, [float(x) for x in val])
+            return
+        raise NotImplementedError(
+            f"constvar rank {len(shape)} (shape={shape}) not supported; "
+            "only scalars and 1-D constants"
+        )
 
     # ── primitive handlers ───────────────────────────────────────────────────
     #
@@ -218,29 +241,47 @@ class Lowering:
     # ``_HANDLERS`` below; everything not listed falls through to
     # ``_elementwise``.
 
+    def _view_element(self, view, i: int) -> Value:
+        """Resolve element ``i`` of a vector view to its DiffSL symbol/literal."""
+        kind, off = view[0], view[1]
+        if kind == "state":
+            return Value(self.state_names[off + i])
+        if kind == "param":
+            return Value(self.param_names[off + i])
+        return Value(_fmt_float(view[2][off + i]))  # "const"
+
     def _slice(self, eqn) -> None:
-        """``p[k:k+1]`` / ``y[k:k+1]`` -> the parameter/state symbol."""
+        """Index/sub-slice a vector view.
+
+        A width-1 slice of the state/parameter/const vector resolves to the
+        corresponding scalar symbol or literal; a width-k slice yields a narrower
+        view (offset shifted) that later slices resolve through.
+        """
         in_atom = eqn.invars[0]
         start = eqn.params["start_indices"][0]
         width = eqn.params["limit_indices"][0] - start
-        if width == 1 and in_atom is self.p_var:
-            self.bind(eqn.outvars[0], Value(self.param_names[start]))
-            return
-        if width == 1 and in_atom is self.y_var:
-            self.bind(eqn.outvars[0], Value(self.state_names[start]))
+        strides = eqn.params.get("strides")
+        view = self.views.get(in_atom)
+        if view is not None and (strides is None or tuple(strides) == (1,)):
+            if width == 1:
+                self.bind(eqn.outvars[0], self._view_element(view, start))
+                return
+            if view[0] == "const":
+                self.views[eqn.outvars[0]] = ("const", view[1] + start, view[2])
+            else:
+                self.views[eqn.outvars[0]] = (view[0], view[1] + start)
             return
         raise NotImplementedError(
-            f"slice start={start} width={width} only supported on the "
-            "parameter/state vectors with width 1"
+            f"slice start={start} width={width} strides={strides} only supported "
+            "on the parameter/state/const vectors"
         )
 
     def _squeeze(self, eqn) -> None:
-        """Drop a unit axis. On a single-element p/y vector this is the index."""
+        """Drop a unit axis. On a length-1 vector view this is an index."""
         (a,) = eqn.invars
-        if a is self.p_var and self.n_param == 1:
-            self.bind(eqn.outvars[0], Value(self.param_names[0]))
-        elif a is self.y_var and self.n_state == 1:
-            self.bind(eqn.outvars[0], Value(self.state_names[0]))
+        view = self.views.get(a)
+        if view is not None:
+            self.bind(eqn.outvars[0], self._view_element(view, 0))
         else:
             self.bind(eqn.outvars[0], Value(self.resolve(a).name, ""))
 
@@ -491,6 +532,8 @@ def make_diffsl_tuple(
     low.bind(t_var, Value("t"))
     low.bind(y_var, Value("__u_vec", "i" if n_state > 1 else ""))
     low.bind(p_var, Value("__p_vec", "i" if n_param > 1 else ""))
+    low.views[y_var] = ("state", 0)
+    low.views[p_var] = ("param", 0)
     low.concat_only = _find_concat_only_broadcasts(jaxpr)
 
     for cv, cval in zip(jaxpr.constvars, consts):

@@ -1,11 +1,3 @@
-"""XLA custom-call bridge.
-
-Registers the Rust FFI target (once per process) and invokes the primal dense
-solve through JAX's ``ffi_call``. This is the single Rust/FFI entry point used for
-both the value and - via the augmented system in ``sensitivity`` - its
-derivatives.
-"""
-
 from __future__ import annotations
 
 import jax
@@ -22,7 +14,9 @@ def _ensure_registered() -> None:
     global _REGISTERED
     if _REGISTERED:
         return
-    jax_ffi.register_ffi_target("diffsol_solve", _rust.get_ffi_capsule(), platform="cpu")
+    jax_ffi.register_ffi_target(
+        "diffsol_solve", _rust.get_ffi_capsule(), platform="cpu"
+    )
     _REGISTERED = True
 
 

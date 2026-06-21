@@ -19,8 +19,6 @@ fn registry() -> &'static Registry<OdeWrapper> {
     ODE_REGISTRY.get_or_init(Registry::new)
 }
 
-/// Clone out the wrapper for `handle`, or `Err` if the id is unknown.
-///
 /// The returned `OdeWrapper` is an `Arc` handle to a `Mutex`-guarded solver, so
 /// the registry lock is not held during the solve and concurrent solves on one
 /// handle serialize via diffsol-c's own internal lock.
@@ -64,7 +62,6 @@ impl OdeSolver {
     }
 
     /// Stable opaque id for the inner solver, carried by the JAX FFI call.
-    /// Valid until this Python object is dropped.
     fn handle(&self) -> u64 {
         self.id
     }

@@ -6,16 +6,20 @@ site_url = "https://jackbmontgomery.com/diffsol-jax"
 copyright = """
 Copyright &copy; 2026 The authors
 """
+extra_javascript = [
+    "javascripts/mathjax.js",
+    "https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"
+]
 
 nav = [
     { "Home" = "index.md" },
     { "Getting started" = "getting-started.md" },
     { "From Python to DiffSL" = "lowering.md" },
+    { "Benchmarks" = "benchmarks.md" },
     { "API reference" = [
         { "Overview" = "api/index.md" },
         { "diffsol_jax" = "api/diffsol_jax.md" },
     ] },
-    { "Benchmarks" = "benchmarks.md" },
 ]
 
 [project.plugins.mkdocstrings.handlers.python]

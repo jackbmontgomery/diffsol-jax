@@ -4,19 +4,19 @@ Design
 ======
 
 ``ODEProblem`` lets the user write the ODE right-hand side as an ordinary
-Python function ``rhs(t, y, p)``. diffsol, however, does not consume Python —
+Python function ``rhs(t, y, p)``. diffsol, however, does not consume Python -
 it consumes `DiffSL <https://martinjrobins.github.io/diffsl/>`_, a small tensor
 DSL that it JIT-compiles to native code. This module bridges the two.
 
 We do *not* parse Python. Instead we let JAX do the hard part: ``jax.make_jaxpr``
-traces ``rhs`` into a `jaxpr <https://docs.jax.dev/en/latest/jaxpr.html>`_ — a
+traces ``rhs`` into a `jaxpr <https://docs.jax.dev/en/latest/jaxpr.html>`_ - a
 typed, flattened, single-assignment IR. A jaxpr is a list of equations
 
     out_vars = primitive[params] in_vars
 
 where every intermediate already has a known shape/dtype and every operation is
 one of a small, fixed set of *primitives* (``add``, ``mul``, ``sin``, ...).
-Translating that to DiffSL is a near-mechanical, primitive-by-primitive walk —
+Translating that to DiffSL is a near-mechanical, primitive-by-primitive walk -
 far more robust than pattern-matching Python ASTs.
 
 The mapping
@@ -28,28 +28,28 @@ each jaxpr equation becomes one DiffSL tensor definition.
 ================  =========================  ============================
 jaxpr concept     DiffSL concept             handled by
 ================  =========================  ============================
-``Var``           a named tensor             :class:`Value` in :class:`Lowering.values`
-``Literal``       an inline numeric constant :meth:`Lowering.resolve`
-``mul``/``sin``…  ``v { a * b }`` etc.       :meth:`Lowering._elementwise`
-function invars   ``in``/``u`` symbols       :func:`make_diffsl_tuple`
-function outvars  the ``F`` (dudt) block     :func:`make_diffsl_tuple`
+``Var``           a named tensor             ``Value`` in ``Lowering.values``
+``Literal``       an inline numeric constant ``Lowering.resolve``
+``mul``/``sin``...  ``v { a * b }`` etc.       ``Lowering._elementwise``
+function invars   ``in``/``u`` symbols       ``make_diffsl_tuple``
+function outvars  the ``F`` (dudt) block     ``make_diffsl_tuple``
 ================  =========================  ============================
 
 Two things keep this from being a one-liner per equation:
 
 1. **Subscripts.** DiffSL is a tensor language: a rank-1 value is written
-   ``name_i`` and a scalar is written ``name``. Every :class:`Value` therefore
+   ``name_i`` and a scalar is written ``name``. Every ``Value`` therefore
    carries its index letters (``""`` for a scalar, ``"i"`` for a vector), and
-   :meth:`Value.ref` produces the right textual form on demand.
+   ``Value.ref`` produces the right textual form on demand.
 
 2. **Tracer noise.** JAX emits a few structural primitives that carry no
-   arithmetic — ``slice``/``squeeze`` from ``p[0]`` indexing, ``broadcast_in_dim``
+   arithmetic - ``slice``/``squeeze`` from ``p[0]`` indexing, ``broadcast_in_dim``
    and ``concatenate`` from ``jnp.array([...])``, ``pjit`` wrappers, dtype casts.
    These are handled by dedicated, documented primitive handlers that mostly
    *rebind names* rather than emit code, so the generated DiffSL stays close to
    what a human would write by hand.
 
-The walk is a dispatch table (:attr:`Lowering._HANDLERS`) keyed on the primitive
+The walk is a dispatch table (``Lowering._HANDLERS``) keyed on the primitive
 name, replacing what would otherwise be one large ``if/elif`` chain. Anything we
 have not taught the lowerer about raises ``NotImplementedError`` with the
 offending primitive named, rather than silently miscompiling.
@@ -115,7 +115,7 @@ class Value:
     """A reference to an emitted DiffSL value.
 
     ``subs`` holds the value's index letters: ``""`` for a scalar, ``"i"`` for a
-    rank-1 tensor, ``"ij"`` for rank-2, and so on. :meth:`ref` renders the value
+    rank-1 tensor, ``"ij"`` for rank-2, and so on. ``ref`` renders the value
     as it must appear inside an expression.
     """
 
@@ -135,7 +135,7 @@ class Lowering:
     """Walks a jaxpr and accumulates DiffSL body lines.
 
     Holds the whole translation state: the symbol table mapping jaxpr ``Var`` s to
-    :class:`Value` s, the fresh-name counter, the accumulated body ``lines``, and
+    ``Value`` s, the fresh-name counter, the accumulated body ``lines``, and
     the metadata needed to recognise indexing into the parameter/state vectors.
     """
 
@@ -178,7 +178,7 @@ class Lowering:
         # Each entry is ``("state"|"param", offset)`` or ``("const", offset, values)``.
         self.views: dict = {}
 
-    # ── symbol table ─────────────────────────────────────────────────────────
+    # -- symbol table ---------------------------------------------------------
 
     def fresh(self, hint: str = "v") -> str:
         name = f"{hint}{self._counter}"
@@ -189,10 +189,10 @@ class Lowering:
         self.values[var] = value
 
     def resolve(self, atom) -> Value:
-        """Resolve a jaxpr atom (``Var`` or ``Literal``) to a :class:`Value`.
+        """Resolve a jaxpr atom (``Var`` or ``Literal``) to a ``Value``.
 
         A literal becomes an anonymous scalar whose "name" is its numeric text,
-        so :meth:`Value.ref` splices it inline.
+        so ``Value.ref`` splices it inline.
         """
         if isinstance(atom, jex_core.Literal):
             val = atom.val
@@ -202,12 +202,12 @@ class Lowering:
         return self.values[atom]
 
     def emit(self, name: str, subs: str, expr: str) -> Value:
-        """Emit ``name_subs { expr }`` and return the resulting :class:`Value`."""
+        """Emit ``name_subs { expr }`` and return the resulting ``Value``."""
         ref = name if subs == "" else f"{name}_{subs}"
         self.lines.append(f"{ref} {{ {expr} }}")
         return Value(name, subs)
 
-    # ── driver ───────────────────────────────────────────────────────────────
+    # -- driver ---------------------------------------------------------------
 
     def lower_eqns(self, eqns) -> None:
         for eqn in eqns:
@@ -218,7 +218,7 @@ class Lowering:
 
         Scalars become a named DiffSL scalar definition. Rank-1 constants (e.g.
         the one-hot tangents from ``jax.jvp``) are recorded in
-        :attr:`const_vectors` so that width-1 ``slice``/``squeeze`` against them
+        ``const_vectors`` so that width-1 ``slice``/``squeeze`` against them
         resolves to the inline literal; the vector itself is never emitted.
         """
         shape = getattr(val, "shape", ())
@@ -234,7 +234,7 @@ class Lowering:
             "only scalars and 1-D constants"
         )
 
-    # ── primitive handlers ───────────────────────────────────────────────────
+    # -- primitive handlers ---------------------------------------------------
     #
     # Each handler consumes one equation: it either emits a DiffSL line (via
     # ``emit``) or merely rebinds names in the symbol table. Registered in
@@ -296,8 +296,8 @@ class Lowering:
 
         Only two patterns occur for ODE RHS code: a scalar lifted to a tensor
         (``jnp.array([scalar, ...])``), and a rank-preserving no-op. A scalar
-        lifted *purely* to feed a ``concatenate`` is recorded and elided — the
-        underlying scalar is spliced directly into the concatenation body — so we
+        lifted *purely* to feed a ``concatenate`` is recorded and elided - the
+        underlying scalar is spliced directly into the concatenation body - so we
         don't emit a dead intermediate vector.
         """
         (in_atom,) = eqn.invars
@@ -540,7 +540,7 @@ def make_diffsl_tuple(
         low.bind_const(cv, cval)
     low.lower_eqns(jaxpr.eqns)
 
-    # ── assemble the four blocks ─────────────────────────────────────────────
+    # -- assemble the four blocks ---------------------------------------------
     in_subs = "_i" if n_param > 1 else ""
     in_body = ", ".join(
         f"{param_names[i]} = {_fmt_float(float(p_example[i]))}" for i in range(n_param)

@@ -5,10 +5,15 @@ edition = "2021"
 
 [lib]
 name = "diffsol_jax"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "stub_gen"
+doc = false
 
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3-stub-gen = "0.8.2"
 diffsol-c = "0.4.6"
 ndarray = "0.17.2"
 

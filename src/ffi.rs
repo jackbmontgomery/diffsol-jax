@@ -1,7 +1,3 @@
-//! All `unsafe` boundary handling lives here.
-//! The handle is an opaque registry id, resolved via
-//! [`crate::ode::lookup`].
-
 use diffsol_c::{HostArray, OdeSolverType, ScalarType};
 use std::os::raw::c_char;
 

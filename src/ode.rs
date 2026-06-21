@@ -9,6 +9,7 @@ use diffsol_c::{
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use std::sync::OnceLock;
 
 use crate::registry::Registry;
@@ -31,11 +32,13 @@ pub(crate) fn lookup(handle: u64) -> Result<OdeWrapper, String> {
         .ok_or_else(|| format!("unknown handle {handle}"))
 }
 
+#[gen_stub_pyclass]
 #[pyclass]
 pub struct OdeSolver {
     id: u64,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl OdeSolver {
     #[new]

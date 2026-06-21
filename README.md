@@ -44,9 +44,10 @@ ts, ys = jax.jit(lambda p: problem.solve(p, t_span))(params)
 - CPU only, f64 only.
 - No vmap batching rule; `vmap_method="sequential"` gives correct results via a Python loop.
 - The DiffSL lowerer handles elementwise ops and the common ODE patterns (Lotka-Volterra, Lorenz).
-  Operations like `dot_general`, `reduce_sum`, and `concatenate` are not supported, so neural
-  ODEs are not supported yet.
+  Operations like `dot_general`, `reduce_sum`, and `concatenate` are not supported, so neural ODEs
+  are not supported yet.
 - Differentiation uses JAX-level forward sensitivities (no separate adjoint pass). DiffSL modules
   are JIT-compiled with Cranelift and cached per source string; the first call compiles, subsequent
   calls reuse the compiled module and update parameters via `set_params`.
 - Does not work with `jax.pmap`
+- Second-order derivatives

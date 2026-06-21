@@ -31,8 +31,8 @@ class ODEProblem:
         * ``jax.jit`` - compiled via the XLA custom call
         * ``jax.vmap`` - sequential batching
 
-        Not supported: higher-order derivatives (``grad(grad(...))``), gradients
-        w.r.t. ``y0`` (fixed at construction) or ``t_span``.
+        **Not supported**: higher-order derivatives (``grad(grad(...))``) or
+        gradients w.r.t. ``y0``.
     """
 
     solver: _rust.OdeSolver
@@ -54,7 +54,7 @@ class ODEProblem:
             rhs: Right-hand-side function ``rhs(t, y, p) -> tuple[float, ...]``.
             y0: Initial state vector (shape determines ``n_state``). Fixed.
             params: Example parameter vector (shape determines ``n_params``).
-            n_times: Number of output time points. Defaults to ``200``.
+            n_times: Number of evenly spaced output time points. Defaults to ``200``.
         """
         self._rhs = rhs
         self._y0 = jnp.asarray(y0, dtype=jnp.float64)

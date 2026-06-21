@@ -11,28 +11,19 @@ Differentiation strategy:
     all derivatives are obtained by *forward sensitivity analysis done at the JAX level*:
 
     * Alongside the primal RHS we build an **augmented RHS** for the state
-      ``[y; S]`` where ``S = \partial y / \partial p``. Its sensitivity block is
-      ``dS_:,j/dt = \partial f/\partial y * S_:,j + \partial f/\partial p * e_j``, which we obtain column-by-column with
-      ``jax.jvp`` of the user RHS at trace time. The whole augmented system lowers to a
-      single DiffSL string and is solved as an ordinary primal solve on Cranelift.
+      ``[y; S]`` where \( S = \partial y / \partial p \). Its sensitivity block is
+      ``dS_:,j/dt`` \(= \frac{\partial f}{\partial y} * S_:,j + \frac{\partial f}{\partial p} * e_j\),
+      which we obtain column-by-column with ``jax.jvp`` of the user RHS at trace time. The whole augmented system lowers to a
+      single DiffSL string and is solved as an ordinary solve.
     * Solving the augmented system materialises the full Jacobian
-      ``J[t] = \partial y(t)/\partial p`` of shape ``(n_times, n_state, n_params)``.
+      ``J[t]`` \(= \frac{\partial y(t)}{\partial p}\) of shape ``(n_times, n_state, n_params)``.
     * ``jax.custom_jvp`` then defines the tangent as ``dys = J * dp``. Because ``J``
       is a constant w.r.t. the linearisation, JAX transposes this contraction for free,
       giving reverse-mode (``grad``/``vjp``) without any adjoint solve.
 
-    This means there is exactly one Rust/FFI entry point - the primal dense solve - used
-    for both the value and (via the augmented system) its derivatives.
-
-    The augmented solver is built lazily, only the first time a problem is
-    differentiated, so plain forward evaluation never pays for it.
-
-Module layout:
-    * ``problem``:  the ``ODEProblem`` class
-    * ``solver_type``:  the ``OdeSolverType`` solver selection enum
-    * ``sensitivity``:  augmented RHS + ``custom_jvp`` solver factory
-    * ``ffi``:  the XLA custom-call bridge
-    * ``lowering``: Python RHS -> DiffSL source lowering
+    This means there is exactly one Rust/FFI entry point used for both the value
+    and its derivatives. The augmented solver is built lazily, only the first
+    time a problem is differentiated.
 """
 
 import jax
@@ -40,6 +31,6 @@ import jax
 from .problem import ODEProblem
 from .solver_type import OdeSolverType
 
-jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", True)  # Only f64 is supported
 
 __all__ = ["ODEProblem", "OdeSolverType"]

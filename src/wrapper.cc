@@ -4,31 +4,21 @@
 
 namespace ffi = xla::ffi;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Rust bridge function declaration
-// ─────────────────────────────────────────────────────────────────────────────
-
 extern "C" {
 
 int32_t diffsol_solve_rust(uint64_t handle, const double *params,
-                            size_t n_params, double t0, double t_final,
-                            double *ys_out, double *ts_out, size_t n_times,
-                            size_t n_state, int32_t method, char *err_buf,
-                            size_t err_buf_len);
-
-} // extern "C"
-
-// ─────────────────────────────────────────────────────────────────────────────
-// XLA FFI handler — primal dense solve (the only solve entry point; derivatives
-// are computed JAX-side via the augmented forward-sensitivity system).
-// ─────────────────────────────────────────────────────────────────────────────
+                           size_t n_params, double t0, double t_final,
+                           double *ys_out, double *ts_out, size_t n_times,
+                           size_t n_state, int32_t method, char *err_buf,
+                           size_t err_buf_len);
+}
 
 static ffi::Error SolveImpl(ffi::Buffer<ffi::F64> params,
-                             ffi::Buffer<ffi::F64> t_span,
-                             ffi::Result<ffi::Buffer<ffi::F64>> ys,
-                             ffi::Result<ffi::Buffer<ffi::F64>> ts,
-                             int64_t handle, int64_t n_times, int64_t n_state,
-                             int64_t method) {
+                            ffi::Buffer<ffi::F64> t_span,
+                            ffi::Result<ffi::Buffer<ffi::F64>> ys,
+                            ffi::Result<ffi::Buffer<ffi::F64>> ts,
+                            int64_t handle, int64_t n_times, int64_t n_state,
+                            int64_t method) {
   if (t_span.dimensions().size() != 1 || t_span.dimensions()[0] != 2) {
     return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                       "t_span must have shape [2]");
@@ -51,24 +41,19 @@ static ffi::Error SolveImpl(ffi::Buffer<ffi::F64> params,
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolve, SolveImpl,
-                               ffi::Ffi::Bind()
-                                   .Arg<ffi::Buffer<ffi::F64>>() // params
-                                   .Arg<ffi::Buffer<ffi::F64>>() // t_span
-                                   .Ret<ffi::Buffer<ffi::F64>>() // ys
-                                   .Ret<ffi::Buffer<ffi::F64>>() // ts
-                                   .Attr<int64_t>("handle")
-                                   .Attr<int64_t>("n_times")
-                                   .Attr<int64_t>("n_state")
-                                   .Attr<int64_t>("method"));
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Handler pointer getter called from lib.rs to build the PyCapsule
-// ─────────────────────────────────────────────────────────────────────────────
+                              ffi::Ffi::Bind()
+                                  .Arg<ffi::Buffer<ffi::F64>>() // params
+                                  .Arg<ffi::Buffer<ffi::F64>>() // t_span
+                                  .Ret<ffi::Buffer<ffi::F64>>() // ys
+                                  .Ret<ffi::Buffer<ffi::F64>>() // ts
+                                  .Attr<int64_t>("handle")
+                                  .Attr<int64_t>("n_times")
+                                  .Attr<int64_t>("n_state")
+                                  .Attr<int64_t>("method"));
 
 extern "C" {
 
 void *get_diffsol_solve_handler() {
   return reinterpret_cast<void *>(DiffsolSolve);
 }
-
-} // extern "C"
+}

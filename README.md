@@ -50,4 +50,4 @@ ts, ys = jax.jit(lambda p: problem.solve(p, t_span))(params)
   are JIT-compiled with Cranelift and cached per source string; the first call compiles, subsequent
   calls reuse the compiled module and update parameters via `set_params`.
 - Does not work with `jax.pmap`
-- Second-order derivatives
+- Higher-order derivatives

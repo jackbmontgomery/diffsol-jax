@@ -374,6 +374,39 @@ class Lowering:
         self.lines.append(f"{out_name}_{out_subs} {{\n  {body},\n}}")
         self.bind(out_var, Value(out_name, out_subs))
 
+    def _stack(self, eqn) -> None:
+        """Stack values along a new leading axis into a DiffSL tensor literal.
+
+        Newer JAX lowers ``jnp.stack([a, b, ...])`` to a single ``stack``
+        primitive; older JAX emitted per-element ``broadcast_in_dim`` feeding a
+        ``concatenate`` (see ``_concatenate``). With scalar inputs this is the
+        compact ``cat_i { a, b }`` vector; with rank->=1 inputs each input
+        becomes one slice at its index along the new axis.
+        """
+        out_var = eqn.outvars[0]
+        out_rank = len(out_var.aval.shape)
+        axis = eqn.params["axis"]
+        if axis != 0:
+            raise NotImplementedError(
+                f"stack along axis {axis} not supported (only axis 0)"
+            )
+
+        out_subs = _index_letters(out_rank)
+        out_name = self.fresh("cat")
+
+        if len(eqn.invars[0].aval.shape) == 0:
+            # scalars -> 1-D vector literal: cat_i { a, b }
+            body = ", ".join(self.resolve(iv).ref() for iv in eqn.invars)
+            self.bind(out_var, self.emit(out_name, out_subs, body))
+            return
+
+        elements = [
+            f"({i}): {self.resolve(iv).ref()}" for i, iv in enumerate(eqn.invars)
+        ]
+        body = ",\n  ".join(elements)
+        self.lines.append(f"{out_name}_{out_subs} {{\n  {body},\n}}")
+        self.bind(out_var, Value(out_name, out_subs))
+
     def _call(self, eqn) -> None:
         """Inline a ``pjit`` / ``closed_call`` subjaxpr into the current scope.
 
@@ -433,6 +466,7 @@ class Lowering:
         "convert_element_type": _convert_element_type,
         "broadcast_in_dim": _broadcast_in_dim,
         "concatenate": _concatenate,
+        "stack": _stack,
         "pjit": _call,
         "closed_call": _call,
     }

@@ -16,33 +16,13 @@ N_TIMES = 200
 N_WARMUP = 3
 N_REPEAT = 10
 
+ts_save = jnp.linspace(0.0, T_END, N_TIMES)
+
 
 def van_der_pol(t, y, p):
     mu = p[0]
     y1, y2 = y[0], y[1]
     return (y2, mu * (1.0 - y1 * y1) * y2 - y1)
-
-
-# diffsol-jax (BDF)
-
-ode_problem = ODEProblem(van_der_pol, Y0, PARAMS, N_TIMES)
-
-diffsol_jit = jax.jit(lambda p: ode_problem.solve(p, T_SPAN))
-
-for _ in range(N_WARMUP):
-    _, ys_ds = diffsol_jit(PARAMS)
-    ys_ds.block_until_ready()
-
-t0 = time.perf_counter()
-for _ in range(N_REPEAT):
-    _, ys_ds = diffsol_jit(PARAMS)
-    ys_ds.block_until_ready()
-ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
-
-
-# diffrax (Kvaerno5)
-
-ts_save = jnp.linspace(0.0, T_END, N_TIMES)
 
 
 def diffrax_solve(p):
@@ -67,25 +47,49 @@ def diffrax_solve(p):
     return sol.ys
 
 
-diffrax_jit = jax.jit(diffrax_solve)
+def run():
+    ode_problem = ODEProblem(van_der_pol, Y0, PARAMS, N_TIMES)
+    diffsol_jit = jax.jit(lambda p: ode_problem.solve(p, T_SPAN))
 
-for _ in range(N_WARMUP):
-    ys_dx = diffrax_jit(PARAMS)
-    ys_dx.block_until_ready()
+    for _ in range(N_WARMUP):
+        _, ys_ds = diffsol_jit(PARAMS)
+        ys_ds.block_until_ready()
+    t0 = time.perf_counter()
+    for _ in range(N_REPEAT):
+        _, ys_ds = diffsol_jit(PARAMS)
+        ys_ds.block_until_ready()
+    ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
-t0 = time.perf_counter()
-for _ in range(N_REPEAT):
-    ys_dx = diffrax_jit(PARAMS)
-    ys_dx.block_until_ready()
-dx_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
+    diffrax_jit = jax.jit(diffrax_solve)
+    for _ in range(N_WARMUP):
+        ys_dx = diffrax_jit(PARAMS)
+        ys_dx.block_until_ready()
+    t0 = time.perf_counter()
+    for _ in range(N_REPEAT):
+        ys_dx = diffrax_jit(PARAMS)
+        ys_dx.block_until_ready()
+    dx_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
+
+    return {
+        "label": f"Van der Pol μ={MU:.0f} (stiff)",
+        "ds_ms": ds_ms,
+        "dx_ms": dx_ms,
+        "dx_solver": "Kvaerno5",
+        "speedup": dx_ms / ds_ms,
+        "max_diff": float(jnp.max(jnp.abs(ys_ds - ys_dx))),
+    }
 
 
-# results
+def main():
+    r = run()
+    print(
+        f"Van der Pol mu={MU:.0f} t=[0, {T_END:.0f}] (n_times={N_TIMES}, n={N_REPEAT})"
+    )
+    print(f"  diffsol-jax (BDF):      {r['ds_ms']:.1f} ms/call")
+    print(f"  diffrax     (Kvaerno5): {r['dx_ms']:.1f} ms/call")
+    print(f"  speedup:                {r['speedup']:.2f}x")
+    print(f"  max |diff|:             {r['max_diff']:.2e}")
 
-max_diff = float(jnp.max(jnp.abs(ys_ds - ys_dx)))
 
-print(f"Van der Pol mu={MU:.0f} t=[0, {T_END:.0f}] (n_times={N_TIMES}, n={N_REPEAT})")
-print(f"  diffsol-jax (BDF):      {ds_ms:.1f} ms/call")
-print(f"  diffrax     (Kvaerno5): {dx_ms:.1f} ms/call")
-print(f"  speedup:                {dx_ms / ds_ms:.2f}x")
-print(f"  max |diff|:             {max_diff:.2e}")
+if __name__ == "__main__":
+    main()

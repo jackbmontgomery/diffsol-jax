@@ -26,7 +26,13 @@ jobs:
         run: uvx ruff format --check .
       - name: Cargo fmt
         run: cargo fmt --all -- --check
+      - name: Install jax (build dependency)
+        run: |
+          uv venv .venv --python 3.11
+          uv pip install --python .venv "jax>=0.4.31"
       - name: Cargo clippy
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: cargo clippy --all-targets -- -D warnings
 
   wheels:
@@ -50,6 +56,7 @@ jobs:
           CIBW_ARCHS_LINUX: ${{ matrix.platform.target }}
           CIBW_ARCHS_MACOS: ${{ matrix.platform.target }}
           CIBW_BUILD_VERBOSITY: "1"
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain stable -y"
           CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin" RUSTFLAGS="-C linker-features=-lld"'
           CIBW_ENVIRONMENT_MACOS: 'PATH="$PATH:$HOME/.cargo/bin" MACOSX_DEPLOYMENT_TARGET=14.0'
@@ -61,7 +68,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Test wheel (cp311)
         run: |
-          uv venv .venv
+          uv venv .venv --python 3.11
           uv pip install --python .venv "$(echo ./wheelhouse/*cp311*.whl)[dev]"
           .venv/bin/pytest -s -v
       - name: Test wheel (cp313)

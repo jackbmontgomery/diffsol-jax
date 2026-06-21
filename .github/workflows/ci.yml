@@ -69,12 +69,14 @@ jobs:
       - name: Test wheel (cp311)
         run: |
           uv venv .venv --python 3.11
-          uv pip install --python .venv "$(echo ./wheelhouse/*cp311*.whl)[dev]"
+          uv pip install --python .venv "$(echo ./wheelhouse/*cp311*.whl)"
+          uv pip install --python .venv --group dev
           .venv/bin/pytest -s -v
       - name: Test wheel (cp313)
         run: |
           uv venv .venv313 --python 3.13
-          uv pip install --python .venv313 "$(echo ./wheelhouse/*cp313*.whl)[dev]"
+          uv pip install --python .venv313 "$(echo ./wheelhouse/*cp313*.whl)"
+          uv pip install --python .venv313 --group dev
           .venv313/bin/pytest -s -v
 
   sdist:

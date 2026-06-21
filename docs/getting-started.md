@@ -4,14 +4,6 @@
 
 - Rust toolchain (stable)
 - Python >= 3.12
-- C++17 compiler
-- LLVM 20 (required for adjoint/gradient support)
-
-On macOS with Homebrew:
-
-```bash
-brew install llvm
-```
 
 ## Installation
 

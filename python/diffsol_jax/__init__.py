@@ -1,34 +1,32 @@
-"""JAX bindings for the diffsol ODE solver (LLVM-free, Cranelift backend).
+"""JAX bindings for the diffsol ODE solver.
 
 A user writes the ODE right-hand side as a plain Python function ``rhs(t, y, p)``.
-:class:`ODEProblem` lowers it to `DiffSL <https://martinjrobins.github.io/diffsl/>`_
-(see :mod:`diffsol_jax.lowering`), JIT-compiles it with diffsol's Cranelift backend,
-and exposes a :meth:`~ODEProblem.solve` method that is compatible with
-:func:`jax.jit`, :func:`jax.grad`, :func:`jax.jvp`/:func:`jax.jacfwd`, and
-:func:`jax.vmap`.
+``ODEProblem`` lowers it to `DiffSL <https://martinjrobins.github.io/diffsl/>`_,
+JIT-compiles it with diffsol's Cranelift backend,
+and exposes a ``ODEProblem.solve`` method that is compatible with
+``jax.jit``, ``jax.grad``, ``jax.jvp``/``jax.jacfwd``, and ``jax.vmap``.
 
-Differentiation strategy
-------------------------
-Cranelift gives us a fast primal solve but, unlike the LLVM/Enzyme backend, it does
-not emit the reverse/sensitivity kernels that diffsol's built-in adjoint needs. So
-all derivatives are obtained by *forward sensitivity analysis done at the JAX level*:
+Differentiation strategy:
+    Cranelift gives us a fast primal solve but, unlike the LLVM/Enzyme backend, it does
+    not emit the reverse/sensitivity kernels that diffsol's built-in adjoint needs. So
+    all derivatives are obtained by *forward sensitivity analysis done at the JAX level*:
 
-* Alongside the primal RHS we build an **augmented RHS** for the state
-  ``[y; S]`` where ``S = ∂y/∂p``. Its sensitivity block is
-  ``dS_:,j/dt = ∂f/∂y · S_:,j + ∂f/∂p · e_j``, which we obtain column-by-column with
-  ``jax.jvp`` of the user RHS at trace time. The whole augmented system lowers to a
-  single DiffSL string and is solved as an ordinary primal solve on Cranelift.
-* Solving the augmented system materialises the full Jacobian
-  ``J[t] = ∂y(t)/∂p`` of shape ``(n_times, n_state, n_params)``.
-* :func:`jax.custom_jvp` then defines the tangent as ``dys = J · dp``. Because ``J``
-  is a constant w.r.t. the linearisation, JAX transposes this contraction for free,
-  giving reverse-mode (``grad``/``vjp``) without any adjoint solve.
+    * Alongside the primal RHS we build an **augmented RHS** for the state
+      ``[y; S]`` where ``S = ∂y/∂p``. Its sensitivity block is
+      ``dS_:,j/dt = ∂f/∂y · S_:,j + ∂f/∂p · e_j``, which we obtain column-by-column with
+      ``jax.jvp`` of the user RHS at trace time. The whole augmented system lowers to a
+      single DiffSL string and is solved as an ordinary primal solve on Cranelift.
+    * Solving the augmented system materialises the full Jacobian
+      ``J[t] = ∂y(t)/∂p`` of shape ``(n_times, n_state, n_params)``.
+    * ``jax.custom_jvp`` then defines the tangent as ``dys = J · dp``. Because ``J``
+      is a constant w.r.t. the linearisation, JAX transposes this contraction for free,
+      giving reverse-mode (``grad``/``vjp``) without any adjoint solve.
 
-This means there is exactly one Rust/FFI entry point — the primal dense solve — used
-for both the value and (via the augmented system) its derivatives.
+    This means there is exactly one Rust/FFI entry point — the primal dense solve — used
+    for both the value and (via the augmented system) its derivatives.
 
-The augmented solver is built lazily, only the first time a problem is
-differentiated, so plain forward evaluation never pays for it.
+    The augmented solver is built lazily, only the first time a problem is
+    differentiated, so plain forward evaluation never pays for it.
 """
 
 from typing import Callable, Literal, Tuple
@@ -171,23 +169,22 @@ class ODEProblem:
 
     Wraps a user-supplied right-hand-side function, lowers it to a
     `DiffSL <https://martinjrobins.github.io/diffsl/>`_ source string, and
-    compiles it (Cranelift backend, no LLVM) for use with :func:`jax.jit`,
-    :func:`jax.grad`, :func:`jax.jvp`, and :func:`jax.vmap`.
+    compiles it for use with ``jax.jit``,
+    ``jax.grad``, ``jax.jvp``, and ``jax.vmap``.
 
-    The compiled solver is exposed via :meth:`solve`, which accepts ``params``
+    The compiled solver is exposed via ``solve``, which accepts ``params``
     and a time span. Initial conditions are fixed at construction time from
     ``y0``.
 
-    Supported AD operations
-    -----------------------
-    * ``jax.grad`` / ``jax.vjp`` — reverse mode via the auto-transposed
-      forward-sensitivity Jacobian
-    * ``jax.jvp`` / ``jax.jacfwd`` — forward mode via the same Jacobian
-    * ``jax.jit`` — compiled via the XLA custom call
-    * ``jax.vmap`` — sequential batching
+    Supported AD operations:
+        * ``jax.grad`` / ``jax.vjp`` — reverse mode via the auto-transposed
+          forward-sensitivity Jacobian
+        * ``jax.jvp`` / ``jax.jacfwd`` — forward mode via the same Jacobian
+        * ``jax.jit`` — compiled via the XLA custom call
+        * ``jax.vmap`` — sequential batching
 
-    Not supported: higher-order derivatives (``grad(grad(...))``), gradients
-    w.r.t. ``y0`` (fixed at construction) or ``t_span``.
+        Not supported: higher-order derivatives (``grad(grad(...))``), gradients
+        w.r.t. ``y0`` (fixed at construction) or ``t_span``.
     """
 
     solver: _rust.OdeSolver
@@ -205,10 +202,11 @@ class ODEProblem:
     ):
         """Compile an ODE problem from a Python RHS function.
 
-        :param rhs: Right-hand-side function ``rhs(t, y, p) -> tuple[float, ...]``.
-        :param y0: Initial state vector (shape determines ``n_state``). Fixed.
-        :param params: Example parameter vector (shape determines ``n_params``).
-        :param n_times: Number of output time points. Defaults to ``200``.
+        Args:
+            rhs: Right-hand-side function ``rhs(t, y, p) -> tuple[float, ...]``.
+            y0: Initial state vector (shape determines ``n_state``). Fixed.
+            params: Example parameter vector (shape determines ``n_params``).
+            n_times: Number of output time points. Defaults to ``200``.
         """
         self._rhs = rhs
         self._y0 = jnp.asarray(y0, dtype=jnp.float64)
@@ -254,11 +252,14 @@ class ODEProblem:
     ) -> Tuple[Float[Array, " {n_times}"], Float[Array, "{n_times} state"]]:
         """Solve the ODE, returning ``(ts, ys)``.
 
-        :param params: Parameter vector, shape ``(n_params,)``, dtype ``float64``.
-        :param t_span: ``[t0, t_final]``, shape ``(2,)``, dtype ``float64``.
-        :param ode_solver: Solver name — ``"bdf"``, ``"tsit45"``,
-            ``"esdirk34"``, or ``"tr_bdf2"``.  Defaults to ``"bdf"``.
-        :returns: ``(ts, ys)`` where ``ts`` has shape ``(n_times,)`` and
+        Args:
+            params: Parameter vector, shape ``(n_params,)``, dtype ``float64``.
+            t_span: ``[t0, t_final]``, shape ``(2,)``, dtype ``float64``.
+            ode_solver: Solver name — ``"bdf"``, ``"tsit45"``,
+                ``"esdirk34"``, or ``"tr_bdf2"``. Defaults to ``"bdf"``.
+
+        Returns:
+            Tuple of ``(ts, ys)`` where ``ts`` has shape ``(n_times,)`` and
             ``ys`` has shape ``(n_times, n_state)``.
         """
         code = _method_code(ode_solver)

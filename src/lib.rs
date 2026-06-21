@@ -1,5 +1,3 @@
-// The #[pyfunction] macro expansion in pyo3 0.22 trips clippy::useless_conversion
-// on recent clippy; the generated code is correct, so allow it crate-wide.
 #![allow(clippy::useless_conversion)]
 
 use diffsol_c::{
@@ -10,13 +8,10 @@ use pyo3::prelude::*;
 use std::ffi::c_void;
 use std::os::raw::c_char;
 
-// Getter function defined in wrapper.cc that returns the XLA FFI handler pointer.
 extern "C" {
     fn get_diffsol_solve_handler() -> *mut c_void;
 }
 
-// Maps Python method codes to OdeSolverType.
-// Python codes: 0=bdf, 1=tsit45, 2=esdirk34, 3=tr_bdf2
 fn ode_solver_from_method(method: i32) -> Result<OdeSolverType, String> {
     match method {
         0 => Ok(OdeSolverType::Bdf),
@@ -54,10 +49,6 @@ unsafe fn get_wrapper(handle: u64) -> Result<&'static OdeWrapper, String> {
     Ok(unsafe { &*(handle as *const OdeWrapper) })
 }
 
-// Copy ys from a (n_state × n_times) col-major HostArray into an XLA (n_times, n_state)
-// row-major buffer. The two layouts are identical in flat memory
-// (element [s][t] = s + t*n_state), so this is effectively a memcpy, but we use
-// as_array to stay within the public HostArray API.
 fn copy_ys_to_xla(
     ys_ha: HostArray,
     ys_out: *mut f64,
@@ -65,10 +56,8 @@ fn copy_ys_to_xla(
     n_state: usize,
 ) -> Result<(), String> {
     let view = ys_ha.as_array::<f64>().map_err(|e| e.to_string())?;
-    // view shape is (n_state, n_times); view[[s, t]] gives ys at state s, time t.
     for t in 0..n_times {
         for s in 0..n_state {
-            // XLA row-major (n_times, n_state): index t*n_state + s
             unsafe { *ys_out.add(t * n_state + s) = view[[s, t]] };
         }
     }
@@ -87,23 +76,6 @@ fn copy_ts_to_xla(ts_ha: HostArray, ts_out: *mut f64, n_times: usize) -> Result<
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Extern "C" bridge function called from wrapper.cc
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Primal dense solve at evenly-spaced evaluation times.
-///
-/// This is the only Rust/FFI solve entry point. Derivatives are computed entirely
-/// on the JAX side via forward sensitivity: the augmented `[y; S]` system is built
-/// in Python, lowered to DiffSL, and solved through this same primal path (see
-/// `python/diffsol_jax/__init__.py`). Cranelift (no LLVM/Enzyme) is sufficient.
-///
-/// # Safety
-///
-/// `handle` must be a live `OdeWrapper` pointer from `OdeSolver::handle`.
-/// `params_ptr` must point to `n_params` readable `f64`s; `ys_out`/`ts_out` must
-/// point to writable buffers of `n_times * n_state` and `n_times` `f64`s
-/// respectively; `err_buf` must be writable for `err_buf_len` bytes (or null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn diffsol_solve_rust(
     handle: u64,
@@ -155,10 +127,6 @@ pub unsafe extern "C" fn diffsol_solve_rust(
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PyO3 module
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[pyclass]
 pub struct OdeSolver {

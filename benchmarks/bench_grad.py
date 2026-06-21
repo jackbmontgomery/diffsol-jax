@@ -22,42 +22,16 @@ INIT_P = TRUE_P + PERTURB
 
 ts_save = jnp.linspace(T_SPAN[0], T_SPAN[1], N_TIMES)
 
+# Set inside run().
+ode_problem = None
+target_ys = None
+opt = None
+
 
 def lotka_volterra_ds(t, y, p):
     x, yy = y[0], y[1]
     alpha, beta, delta, gamma = p[0], p[1], p[2], p[3]
     return (alpha * x - beta * x * yy, delta * x * yy - gamma * yy)
-
-
-# --- diffsol-jax setup ---
-
-ode_problem = ODEProblem(lotka_volterra_ds, Y0, TRUE_P, N_TIMES)
-
-_, target_ys = ode_problem.solve(TRUE_P, T_SPAN, ode_solver="tsit45")
-
-
-def loss_ds(p):
-    _, ys = ode_problem.solve(p, T_SPAN, ode_solver="tsit45")
-    return jnp.mean((ys - target_ys) ** 2)
-
-
-@jax.jit
-def step_ds(p, state):
-    loss_val, g = jax.value_and_grad(loss_ds)(p)
-    updates, state = opt.update(g, state)
-    return optax.apply_updates(p, updates), state, loss_val
-
-
-def run_gd_ds():
-    p = INIT_P
-    opt_state = opt.init(p)
-    for _ in range(N_STEPS):
-        p, opt_state, _ = step_ds(p, opt_state)
-    p.block_until_ready()
-    return p
-
-
-# --- diffrax setup ---
 
 
 def diffrax_solve(p):
@@ -80,9 +54,21 @@ def diffrax_solve(p):
     return sol.ys
 
 
+def loss_ds(p):
+    _, ys = ode_problem.solve(p, T_SPAN, ode_solver="tsit45")
+    return jnp.mean((ys - target_ys) ** 2)
+
+
 def loss_dx(p):
     ys = diffrax_solve(p)
     return jnp.mean((ys - target_ys) ** 2)
+
+
+@jax.jit
+def step_ds(p, state):
+    loss_val, g = jax.value_and_grad(loss_ds)(p)
+    updates, state = opt.update(g, state)
+    return optax.apply_updates(p, updates), state, loss_val
 
 
 @jax.jit
@@ -90,6 +76,15 @@ def step_dx(p, state):
     loss_val, g = jax.value_and_grad(loss_dx)(p)
     updates, state = opt.update(g, state)
     return optax.apply_updates(p, updates), state, loss_val
+
+
+def run_gd_ds():
+    p = INIT_P
+    opt_state = opt.init(p)
+    for _ in range(N_STEPS):
+        p, opt_state, _ = step_ds(p, opt_state)
+    p.block_until_ready()
+    return p
 
 
 def run_gd_dx():
@@ -101,39 +96,52 @@ def run_gd_dx():
     return p
 
 
-# --- warmup & benchmark ---
+def run():
+    global ode_problem, target_ys, opt
+    ode_problem = ODEProblem(lotka_volterra_ds, Y0, TRUE_P, N_TIMES)
+    _, target_ys = ode_problem.solve(TRUE_P, T_SPAN, ode_solver="tsit45")
+    opt = optax.adam(LR)
 
-opt = optax.adam(LR)
+    for _ in range(N_WARMUP):
+        run_gd_ds()
+    for _ in range(N_WARMUP):
+        run_gd_dx()
 
-print("Warming up diffsol-jax...")
-for _ in range(N_WARMUP):
-    run_gd_ds()
+    t0 = time.perf_counter()
+    for _ in range(N_REPEAT):
+        final_p_ds = run_gd_ds()
+    ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
-print("Warming up diffrax...")
-for _ in range(N_WARMUP):
-    run_gd_dx()
+    t0 = time.perf_counter()
+    for _ in range(N_REPEAT):
+        final_p_dx = run_gd_dx()
+    dx_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
-print(f"Benchmarking ({N_REPEAT} runs x {N_STEPS} adam steps)...")
+    return {
+        "label": "Lotka-Volterra (Tsit45+sens)",
+        "ds_ms": ds_ms,
+        "dx_ms": dx_ms,
+        "speedup": dx_ms / ds_ms,
+        "ds_err": float(jnp.max(jnp.abs(final_p_ds - TRUE_P))),
+        "dx_err": float(jnp.max(jnp.abs(final_p_dx - TRUE_P))),
+    }
 
-t0 = time.perf_counter()
-for _ in range(N_REPEAT):
-    final_p_ds = run_gd_ds()
-ds_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
 
-t0 = time.perf_counter()
-for _ in range(N_REPEAT):
-    final_p_dx = run_gd_dx()
-dx_ms = (time.perf_counter() - t0) / N_REPEAT * 1e3
+def main():
+    print(f"Benchmarking ({N_REPEAT} runs x {N_STEPS} adam steps)...")
+    r = run()
+    print()
+    print(
+        f"Lotka-Volterra param fitting ({N_STEPS} adam steps, n_times={N_TIMES}, n={N_REPEAT})"
+    )
+    print(
+        f"  diffsol-jax (Tsit45+sens): {r['ds_ms']:.1f} ms/run  |  max |p_err|: {r['ds_err']:.4f}"
+    )
+    print(
+        f"  diffrax     (Tsit5+AD):    {r['dx_ms']:.1f} ms/run  |  max |p_err|: {r['dx_err']:.4f}"
+    )
+    print(f"  speedup:                   {r['speedup']:.2f}x")
 
-# --- results ---
 
-ds_err = float(jnp.max(jnp.abs(final_p_ds - TRUE_P)))
-dx_err = float(jnp.max(jnp.abs(final_p_dx - TRUE_P)))
-
-print()
-print(
-    f"Lotka-Volterra param fitting ({N_STEPS} adam steps, n_times={N_TIMES}, n={N_REPEAT})"
-)
-print(f"  diffsol-jax (BDF+AD):   {ds_ms:.1f} ms/run  |  max |p_err|: {ds_err:.4f}")
-print(f"  diffrax     (Tsit5+AD): {dx_ms:.1f} ms/run  |  max |p_err|: {dx_err:.4f}")
-print(f"  speedup:                {dx_ms / ds_ms:.2f}x")
+if __name__ == "__main__":
+    main()

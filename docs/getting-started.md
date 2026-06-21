@@ -3,7 +3,7 @@
 ## Requirements
 
 - Rust toolchain (stable)
-- Python >= 3.12
+- Python >= 3.11
 
 ## Installation
 
@@ -12,8 +12,8 @@ uv sync
 uv run maturin develop --release
 ```
 
-!!! note `.cargo/config.toml` sets `LLVM_SYS_201_PREFIX` to `/opt/homebrew/opt/llvm`. If LLVM 20 is
-installed elsewhere, update that path before running `maturin develop`.
+DiffSL is JIT-compiled with the [Cranelift](https://cranelift.dev/) backend, which is vendored
+through the `diffsol-c` crate — no system LLVM or other external toolchain is required.
 
 ## First forward solve
 
@@ -59,8 +59,8 @@ ts, ys = jax.jit(lambda p: problem.solve(p, t_span))(params)
 
 ## Computing gradients
 
-`jax.grad` works out of the box. The VJP uses diffsol's discrete adjoint; the compiled LLVM module
-is cached, so only the first gradient step pays compilation cost:
+`jax.grad` works out of the box. Differentiation uses JAX-level forward sensitivities; the compiled
+DiffSL module is cached, so only the first gradient step pays compilation cost:
 
 ```python
 def loss(p):

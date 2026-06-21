@@ -12,11 +12,9 @@ The user writes an RHS function in Python, which gets lowered to a
 ```
 Python rhs fn  ->  DiffSL string  ->  XLA FFI call
                                           |
-                                    C++ shim (wrapper.cc)
+                                       C++ shim
                                           |
-                                    Rust (lib.rs)
-                                          |
-                                    diffsol solver (BDF / Tsit45 / ESDIRK34 / TR-BDF2)
+                                       diffsol
 ```
 
 ## Example usage
@@ -41,18 +39,14 @@ ts, ys = jax.jit(lambda p: problem.solve(p, t_span))(params)
 # ts: float64[200],  ys: float64[200, 2]
 ```
 
----
-
-[Getting started](getting-started.md) — install and first solve. [API reference](api/index.md) —
-full public API. [Benchmarks](benchmarks.md) — forward and gradient timing vs diffrax.
-
 ## Limitations
 
 - CPU only, f64 only.
 - No vmap batching rule; `vmap_method="sequential"` gives correct results via a Python loop.
 - The DiffSL lowerer handles elementwise ops and the common ODE patterns (Lotka-Volterra, Lorenz).
-  Operations like `dot_general`, `reduce_sum`, and `concatenate` are not supported. And thus nerual
-  odes are not supported yet.
-- Forward and adjoint DiffSL modules are cached per source string (thread-local); first call
-  compiles, subsequent calls reuse the compiled module and update parameters via `set_params`.
+  Operations like `dot_general`, `reduce_sum`, and `concatenate` are not supported, so neural
+  ODEs are not supported yet.
+- Differentiation uses JAX-level forward sensitivities (no separate adjoint pass). DiffSL modules
+  are JIT-compiled with Cranelift and cached per source string; the first call compiles, subsequent
+  calls reuse the compiled module and update parameters via `set_params`.
 - Does not work with `jax.pmap`

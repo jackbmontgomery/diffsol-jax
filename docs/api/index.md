@@ -14,18 +14,17 @@ compatible with `jax.jit` and `jax.grad`.
 
 ## Solvers
 
-Pass the `ode_solver=` argument to `ODEProblem` to select a solver.
+Pass the `ode_solver=` argument to `solve` to select a solver.
 
-| `ode_solver=`     | Type                           | Adjoint        |
-| ----------------- | ------------------------------ | -------------- |
-| `"bdf"` (default) | BDF (implicit, variable-order) | BDF            |
-| `"tsit45"`        | Tsitouras 4(5) (explicit)      | Tsit45         |
-| `"esdirk34"`      | ESDIRK3(4) (implicit)          | BDF (fallback) |
-| `"tr_bdf2"`       | TR-BDF2 (implicit)             | BDF (fallback) |
+| `ode_solver=`     | Type                           |
+| ----------------- | ------------------------------ |
+| `"bdf"` (default) | BDF (implicit, variable-order) |
+| `"tsit45"`        | Tsitouras 4(5) (explicit)      |
+| `"esdirk34"`      | ESDIRK3(4) (implicit)          |
+| `"tr_bdf2"`       | TR-BDF2 (implicit)             |
 
-BDF and Tsit45 use their own solver for both forward and backward passes. ESDIRK34 and TR-BDF2 fall
-back to BDF for the adjoint -- their implicit adjoint solvers fail to converge on non-trivial
-problems.
+The same solver is used for the forward solve and for the augmented forward-sensitivity solve that
+backs `jax.grad`/`jax.jvp`/`jax.vjp` -- there is no separate adjoint pass.
 
 ```python
 problem = ODEProblem(rhs, y0=y0, params=params)

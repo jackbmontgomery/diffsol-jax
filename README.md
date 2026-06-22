@@ -1,4 +1,6 @@
-# diffsol-jax
+<p align="center">
+  <img src="assets/diffsol-jax.png" alt="Logo" width="200">
+</p>
 
 JAX wrapper around [diffsol](https://github.com/martinjrobins/diffsol), a Rust ODE solver library.
 Exposes diffsol's ODE solvers via `jax.ffi` so they can be called from inside `jax.jit` and
@@ -41,7 +43,7 @@ ts, ys = jax.jit(lambda p: problem.solve(p, t_span))(params)
 
 ## Limitations
 
-- CPU only, f64 only.
+- CPU only
 - No vmap batching rule; `vmap_method="sequential"` gives correct results via a Python loop.
 - The DiffSL lowerer handles elementwise ops and the common ODE patterns (Lotka-Volterra, Lorenz).
   Operations like `dot_general`, `reduce_sum`, and `concatenate` are not supported, so neural ODEs

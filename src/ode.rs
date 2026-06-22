@@ -1,9 +1,3 @@
-//! Construction JIT-compiles the diffsol problem once. The solver is stored in
-//! a process-global [`Registry`], and `handle()` returns its id for the JAX FFI
-//! call to carry. The Python object owns the registry slot: dropping it
-//! deregisters, so a compiled JAX function holding a stale id fails cleanly
-//! rather than dereferencing freed memory.
-
 use diffsol_c::{
     JitBackendType, LinearSolverType, MatrixType, OdeSolverType, OdeWrapper, ScalarType,
 };
@@ -42,23 +36,26 @@ pub struct OdeSolver {
 #[pymethods]
 impl OdeSolver {
     #[new]
-    fn new(diffsl_src: &str) -> PyResult<Self> {
+    fn new(diffsl_src: &str, scalar_type: usize) -> PyResult<Self> {
+        let scalar_type = match scalar_type {
+            32 => ScalarType::F32,
+            64 => ScalarType::F64,
+            other => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Invalid scalar type: {other}. Expected 32 or 64"
+                )))
+            }
+        };
+
         let wrapper = OdeWrapper::new_jit(
             diffsl_src,
             JitBackendType::Cranelift,
-            ScalarType::F64,
+            scalar_type,
             MatrixType::NalgebraDense,
             LinearSolverType::Default,
             OdeSolverType::Bdf,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("build: {e}")))?;
-
-        wrapper
-            .set_rtol(1e-8)
-            .map_err(|e| PyRuntimeError::new_err(format!("set_rtol: {e}")))?;
-        wrapper
-            .set_atol(1e-8)
-            .map_err(|e| PyRuntimeError::new_err(format!("set_atol: {e}")))?;
 
         let id = registry().insert(wrapper);
         Ok(Self { id })

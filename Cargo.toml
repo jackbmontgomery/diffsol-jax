@@ -16,11 +16,11 @@ pyo3 = { version = "0.22", features = ["extension-module"] }
 pyo3-stub-gen = "0.8.2"
 diffsol-c = "0.4.6"
 ndarray = "0.17.2"
+num-traits = "0.2.19"
 
 [features]
 default = ["diffsol-cranelift"]
 diffsol-cranelift = ["diffsol-c/diffsl-cranelift"]
-diffsol-llvm17 = ["diffsol-c/diffsl-llvm17"]
 suitesparse = ["diffsol-c/suitesparse"]
 
 [build-dependencies]

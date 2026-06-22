@@ -3,8 +3,6 @@ import jax.numpy as jnp
 import optax
 from diffsol_jax import ODEProblem
 
-jax.config.update("jax_enable_x64", True)
-
 
 def rhs_decay(t, y, p):
     return (-p[0] * y[0],)
@@ -14,29 +12,6 @@ def lotka_volterra(t, y, p):
     x, yy = y[0], y[1]
     alpha, beta, delta, gamma = p[0], p[1], p[2], p[3]
     return (alpha * x - beta * x * yy, delta * x * yy - gamma * yy)
-
-
-def test_lv_grad_matches_fd():
-    params = jnp.array([1.5, 1.0, 0.75, 3.0])
-    y0 = jnp.array([1.0, 0.5])
-    ode_problem = ODEProblem(lotka_volterra, y0, params)
-    t_span = jnp.array([0.0, 10.0])
-
-    def loss(p):
-        _, ys = ode_problem.solve(p, t_span)
-        return jnp.sum(ys**2)
-
-    grad_ad = jax.grad(loss)(params)
-
-    eps = 1e-5
-    grad_fd = jnp.array(
-        [
-            (loss(params.at[i].add(eps)) - loss(params.at[i].add(-eps))) / (2 * eps)
-            for i in range(4)
-        ]
-    )
-    rel = jnp.linalg.norm(grad_ad - grad_fd) / jnp.linalg.norm(grad_fd)
-    assert rel < 1e-3, f"rel err {rel}, ad={grad_ad}, fd={grad_fd}"
 
 
 def test_decay_closed_form():

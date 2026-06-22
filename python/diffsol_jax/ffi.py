@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import ffi as jax_ffi
+from jaxtyping import Array, Float
 
 from . import _rust
 
@@ -15,26 +15,62 @@ def _ensure_registered() -> None:
     if _REGISTERED:
         return
     jax_ffi.register_ffi_target(
-        "diffsol_solve", _rust.get_ffi_capsule(), platform="cpu"
+        "diffsol_solve_f64", _rust._get_ffi_capsule_f64(), platform="cpu"
+    )
+
+    jax_ffi.register_ffi_target(
+        "diffsol_solve_f32", _rust._get_ffi_capsule_f32(), platform="cpu"
     )
     _REGISTERED = True
 
 
-def _ffi_solve(handle: int, params, t_span, n_times: int, n_state: int, method: int):
+def _ffi_solve(
+    handle: int,
+    params: Float[Array, " state"],
+    t_span: Float[Array, "2"],
+    n_times: int,
+    n_state: int,
+    method: int,
+    rtol: float,
+    atol: float,
+):
     """Primal dense solve via the XLA custom call. Returns ``(ys, ts)``."""
     _ensure_registered()
-    return jax_ffi.ffi_call(
-        "diffsol_solve",
-        (
-            jax.ShapeDtypeStruct((n_times, n_state), jnp.float64),
-            jax.ShapeDtypeStruct((n_times,), jnp.float64),
-        ),
-        vmap_method="sequential",
-    )(
-        params,
-        t_span,
-        handle=np.int64(handle),
-        n_times=np.int64(n_times),
-        n_state=np.int64(n_state),
-        method=np.int64(method),
-    )
+    if params.dtype != t_span.dtype:
+        raise TypeError("Ensure params and t_span are the same type")
+    elif params.dtype == jnp.float32:
+        return jax_ffi.ffi_call(
+            "diffsol_solve_f32",
+            (
+                jax.ShapeDtypeStruct((n_times, n_state), jnp.float32),
+                jax.ShapeDtypeStruct((n_times,), jnp.float32),
+            ),
+            vmap_method="sequential",
+        )(
+            params,
+            t_span,
+            handle=handle,
+            n_times=n_times,
+            n_state=n_state,
+            method=method,
+            rtol=rtol,
+            atol=atol,
+        )
+    elif params.dtype == jnp.float64:
+        return jax_ffi.ffi_call(
+            "diffsol_solve_f64",
+            (
+                jax.ShapeDtypeStruct((n_times, n_state), jnp.float64),
+                jax.ShapeDtypeStruct((n_times,), jnp.float64),
+            ),
+            vmap_method="sequential",
+        )(
+            params,
+            t_span,
+            handle=handle,
+            n_times=n_times,
+            n_state=n_state,
+            method=method,
+            rtol=rtol,
+            atol=atol,
+        )

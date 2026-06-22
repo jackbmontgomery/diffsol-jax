@@ -26,11 +26,11 @@ Differentiation strategy:
     time a problem is differentiated.
 """
 
-import jax
+# import jax
 
 from .problem import ODEProblem
 from .solver_type import OdeSolverType
 
-jax.config.update("jax_enable_x64", True)  # Only f64 is supported
+# jax.config.update("jax_enable_x64", True)  # Only f64 is supported
 
 __all__ = ["ODEProblem", "OdeSolverType"]

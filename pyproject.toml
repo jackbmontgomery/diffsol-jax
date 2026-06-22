@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.5", "jax>=0.4.31"]
+requires = ["maturin>=1.5", "jax>=0.10.2"]
 build-backend = "maturin"
 
 [project]
@@ -24,8 +24,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dependencies = [
-    "equinox>=0.13.7",
-    "jax>=0.4.31",
+    "jax>=0.10.2",
 ]
 
 [project.urls]

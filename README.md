@@ -1,5 +1,3 @@
-# diffsol-jax
-
 JAX wrapper around [diffsol](https://github.com/martinjrobins/diffsol), a Rust ODE solver library.
 Exposes diffsol's ODE solvers via `jax.ffi` so they can be called from inside `jax.jit` and
 differentiated with `jax.grad`.

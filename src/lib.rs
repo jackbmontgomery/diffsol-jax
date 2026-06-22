@@ -12,8 +12,9 @@ use pyo3_stub_gen::define_stub_info_gatherer;
 use pyo3_stub_gen::derive::gen_stub_pyfunction;
 use std::ffi::c_void;
 
-extern "C" {
-    fn get_diffsol_solve_handler() -> *mut c_void;
+unsafe extern "C" {
+    fn get_diffsol_solve_handler_f64() -> *mut c_void;
+    fn get_diffsol_solve_handler_f32() -> *mut c_void;
 }
 
 static XLA_FFI_CAPSULE_NAME: &[u8] = b"xla._CUSTOM_CALL_TARGET\0";
@@ -29,15 +30,22 @@ unsafe fn make_xla_capsule(py: Python<'_>, handler: *mut c_void) -> PyResult<PyO
 
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn get_ffi_capsule(py: Python<'_>) -> PyResult<PyObject> {
-    unsafe { make_xla_capsule(py, get_diffsol_solve_handler()) }
+fn _get_ffi_capsule_f64(py: Python<'_>) -> PyResult<PyObject> {
+    unsafe { make_xla_capsule(py, get_diffsol_solve_handler_f64()) }
+}
+
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn _get_ffi_capsule_f32(py: Python<'_>) -> PyResult<PyObject> {
+    unsafe { make_xla_capsule(py, get_diffsol_solve_handler_f32()) }
 }
 
 #[pymodule]
 #[pyo3(name = "_rust")]
 fn diffsol_jax_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OdeSolver>()?;
-    m.add_function(wrap_pyfunction!(get_ffi_capsule, m)?)?;
+    m.add_function(wrap_pyfunction!(_get_ffi_capsule_f64, m)?)?;
+    m.add_function(wrap_pyfunction!(_get_ffi_capsule_f32, m)?)?;
     Ok(())
 }
 

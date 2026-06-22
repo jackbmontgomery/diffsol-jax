@@ -1,67 +1,11 @@
-"""Lower a traced JAX function (a *jaxpr*) to a DiffSL source string.
-
-Design
-======
-
-``ODEProblem`` lets the user write the ODE right-hand side as an ordinary
-Python function ``rhs(t, y, p)``. diffsol, however, does not consume Python -
-it consumes `DiffSL <https://martinjrobins.github.io/diffsl/>`_, a small tensor
-DSL that it JIT-compiles to native code. This module bridges the two.
-
-We do *not* parse Python. Instead we let JAX do the hard part: ``jax.make_jaxpr``
-traces ``rhs`` into a `jaxpr <https://docs.jax.dev/en/latest/jaxpr.html>`_ - a
-typed, flattened, single-assignment IR. A jaxpr is a list of equations
-
-    out_vars = primitive[params] in_vars
-
-where every intermediate already has a known shape/dtype and every operation is
-one of a small, fixed set of *primitives* (``add``, ``mul``, ``sin``, ...).
-Translating that to DiffSL is a near-mechanical, primitive-by-primitive walk -
-far more robust than pattern-matching Python ASTs.
-
-The mapping
------------
-
-Both IRs are single-assignment, so the spine of the translation is trivial:
-each jaxpr equation becomes one DiffSL tensor definition.
-
-================  =========================  ============================
-jaxpr concept     DiffSL concept             handled by
-================  =========================  ============================
-``Var``           a named tensor             ``Value`` in ``Lowering.values``
-``Literal``       an inline numeric constant ``Lowering.resolve``
-``mul``/``sin``...  ``v { a * b }`` etc.       ``Lowering._elementwise``
-function invars   ``in``/``u`` symbols       ``make_diffsl_tuple``
-function outvars  the ``F`` (dudt) block     ``make_diffsl_tuple``
-================  =========================  ============================
-
-Two things keep this from being a one-liner per equation:
-
-1. **Subscripts.** DiffSL is a tensor language: a rank-1 value is written
-   ``name_i`` and a scalar is written ``name``. Every ``Value`` therefore
-   carries its index letters (``""`` for a scalar, ``"i"`` for a vector), and
-   ``Value.ref`` produces the right textual form on demand.
-
-2. **Tracer noise.** JAX emits a few structural primitives that carry no
-   arithmetic - ``slice``/``squeeze`` from ``p[0]`` indexing, ``broadcast_in_dim``
-   and ``concatenate`` from ``jnp.array([...])``, ``pjit`` wrappers, dtype casts.
-   These are handled by dedicated, documented primitive handlers that mostly
-   *rebind names* rather than emit code, so the generated DiffSL stays close to
-   what a human would write by hand.
-
-The walk is a dispatch table (``Lowering._HANDLERS``) keyed on the primitive
-name, replacing what would otherwise be one large ``if/elif`` chain. Anything we
-have not taught the lowerer about raises ``NotImplementedError`` with the
-offending primitive named, rather than silently miscompiling.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import jax
-import jax.numpy as jnp
 from jax.extend import core as jex_core
+from jaxtyping import Array, Float
 
 # DiffSL index letters. Skip 'o' (reads as zero); 't' is reserved for time.
 _INDEX_LETTERS = "ijklmnpqrs"
@@ -286,9 +230,6 @@ class Lowering:
             self.bind(eqn.outvars[0], Value(self.resolve(a).name, ""))
 
     def _convert_element_type(self, eqn) -> None:
-        new_dtype = eqn.params["new_dtype"]
-        if jnp.dtype(new_dtype) != jnp.float64:
-            raise NotImplementedError(f"convert_element_type to {new_dtype}: f64 only")
         self.bind(eqn.outvars[0], self.resolve(eqn.invars[0]))
 
     def _broadcast_in_dim(self, eqn) -> None:
@@ -518,9 +459,9 @@ def _find_concat_only_broadcasts(jaxpr) -> set:
 
 
 def make_diffsl_tuple(
-    rhs,
-    y0,
-    p_example,
+    rhs: Callable,
+    y0: Float[Array, ""],
+    p_example: Float[Array, ""],
     t_example: float = 0.0,
     *,
     param_names: list[str] | None = None,
@@ -536,9 +477,6 @@ def make_diffsl_tuple(
     ``u`` block (state initial values, baked in from ``y0``), the body (one tensor
     definition per traced equation), and the ``F`` block (the dudt vector).
     """
-    y0 = jnp.asarray(y0, dtype=jnp.float64)
-    p_example = jnp.asarray(p_example, dtype=jnp.float64)
-    t_example = jnp.float64(t_example)
 
     n_state = int(y0.shape[0]) if y0.ndim == 1 else 1
     n_param = int(p_example.shape[0]) if p_example.ndim == 1 else 1

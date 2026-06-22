@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, Callable
 
 import jax
@@ -43,7 +44,9 @@ def _make_aug_rhs(rhs: Callable, n_state: int, n_param: int) -> Callable:
         outs = [rhs_vec(t, y, p)]
         for j in range(n_param):
             col = y_aug[n_state + j * n_state : n_state + (j + 1) * n_state]
-            e_j = jnp.array([1.0 if k == j else 0.0 for k in range(n_param)])
+            e_j = jnp.array(
+                [1.0 if k == j else 0.0 for k in range(n_param)], dtype=p.dtype
+            )
             _, dcol = jax.jvp(lambda yy, pp: rhs_vec(t, yy, pp), (y, p), (col, e_j))
             outs.append(dcol)
         return jnp.concatenate(outs)
@@ -53,6 +56,10 @@ def _make_aug_rhs(rhs: Callable, n_state: int, n_param: int) -> Callable:
 
 def _make_solver(problem: "ODEProblem", method: int) -> Callable:
     r"""Return a ``custom_jvp`` solve function for one ``(problem, method)`` pair.
+
+    ``rtol``/``atol`` are passed at call time as non-differentiated arguments
+    (they are lowered as static FFI attributes), so a single solver can be reused
+    across calls with different tolerances - the caller caches on ``method`` alone.
 
     The primal is the Cranelift dense solve; the JVP solves the augmented system
     to obtain ``J = \partial ys / \partial p`` and contracts it with ``dp``. Reverse
@@ -64,19 +71,23 @@ def _make_solver(problem: "ODEProblem", method: int) -> Callable:
     n_times = problem.n_times
     n_aug = n_state * (1 + n_param)
 
-    @jax.custom_jvp
-    def solve(params, t_span):
-        return _ffi_solve(problem._handle, params, t_span, n_times, n_state, method)
+    @partial(jax.custom_jvp, nondiff_argnums=(0, 1))
+    def solve(rtol, atol, params, t_span):
+        return _ffi_solve(
+            problem._handle, params, t_span, n_times, n_state, method, rtol, atol
+        )
 
     @solve.defjvp
-    def solve_jvp(primals, tangents):
+    def solve_jvp(rtol, atol, primals, tangents):
         params, t_span = primals
         dp, _dt_span = tangents  # t_span tangents are not propagated
 
-        ys, ts = solve(params, t_span)
+        ys, ts = solve(rtol, atol, params, t_span)
 
         aug_handle = problem._ensure_aug_handle()
-        ys_aug, _ = _ffi_solve(aug_handle, params, t_span, n_times, n_aug, method)
+        ys_aug, _ = _ffi_solve(
+            aug_handle, params, t_span, n_times, n_aug, method, rtol, atol
+        )
         # ys_aug[:, n_state:] is S flattened by column: (n_times, n_param, n_state).
         # Transpose to J[t, state, param].
         jac = ys_aug[:, n_state:].reshape(n_times, n_param, n_state).transpose(0, 2, 1)

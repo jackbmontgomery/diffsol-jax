@@ -21,8 +21,6 @@ Enable 64-bit floats — diffsol-jax requires f64:
 
 ```python
 import jax
-jax.config.update("jax_enable_x64", True)
-
 import jax.numpy as jnp
 from diffsol_jax import ODEProblem
 ```

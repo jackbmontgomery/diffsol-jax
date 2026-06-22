@@ -4,13 +4,22 @@ from typing import Callable, Tuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jaxtyping import Array, Float
 
 from . import _rust
 from .lowering import make_diffsl_tuple
 from .sensitivity import _make_aug_rhs, _make_solver
 from .solver_type import OdeSolverLike, OdeSolverType
+
+
+def _scalar_bits(dtype) -> int:
+    """Map a JAX/NumPy float dtype to the solver scalar bit-width (32 or 64)."""
+    dtype = jnp.dtype(dtype)
+    if dtype == jnp.float32:
+        return 32
+    if dtype == jnp.float64:
+        return 64
+    raise TypeError(f"unsupported dtype {dtype}, expected float32 or float64")
 
 
 class ODEProblem:
@@ -57,10 +66,12 @@ class ODEProblem:
             n_times: Number of evenly spaced output time points. Defaults to ``200``.
         """
         self._rhs = rhs
-        self._y0 = jnp.asarray(y0, dtype=jnp.float64)
+        self._y0 = y0
+        self._params = params
+        self._scalar_bits = _scalar_bits(y0.dtype)
 
         diffsl_src = make_diffsl_tuple(rhs, y0, params)
-        self.solver = _rust.OdeSolver(diffsl_src)
+        self.solver = _rust.OdeSolver(diffsl_src, self._scalar_bits)
         self._handle = self.solver.handle()
 
         self.n_times = n_times
@@ -68,27 +79,28 @@ class ODEProblem:
         self.n_params = len(params)
 
         self._solvers: dict = {}
-        self._aug_solver = None  # built lazily on first differentiation
+        self._aug_solver = None
         self._aug_handle = None
 
     def _ensure_aug_handle(self) -> int:
         """Build (once) the augmented forward-sensitivity solver and return its handle."""
         if self._aug_handle is None:
             aug_rhs = _make_aug_rhs(self._rhs, self.n_state, self.n_params)
-            y0_aug = np.concatenate(
-                [
-                    np.asarray(self._y0, dtype=np.float64),
-                    np.zeros(self.n_state * self.n_params),
-                ]
-            )
-            p_example = np.zeros(self.n_params, dtype=np.float64)
             # The first differentiation of a problem may happen inside a jit trace.
             # make_diffsl_tuple bakes the initial values in as DiffSL literals (via
             # float()), so the build must run concretely, not on tracers -
             # ensure_compile_time_eval evaluates these ops eagerly even under jit.
+            # y0_aug must be constructed inside this block too, otherwise the
+            # concatenate produces a tracer when called during a jit trace.
             with jax.ensure_compile_time_eval():
-                aug_src = make_diffsl_tuple(aug_rhs, y0_aug, p_example)
-            self._aug_solver = _rust.OdeSolver(aug_src)
+                y0_aug = jnp.concatenate(
+                    [
+                        self._y0,
+                        jnp.zeros(self.n_state * self.n_params, dtype=self._y0.dtype),
+                    ]
+                )
+                aug_src = make_diffsl_tuple(aug_rhs, y0_aug, self._params)
+            self._aug_solver = _rust.OdeSolver(aug_src, self._scalar_bits)
             self._aug_handle = self._aug_solver.handle()
         return self._aug_handle
 
@@ -96,13 +108,15 @@ class ODEProblem:
         self,
         params: Float[Array, " params"],
         t_span: Float[Array, " 2"],
+        rtol: float = 1e-5,
+        atol: float = 1e-5,
         ode_solver: OdeSolverLike = OdeSolverType.BDF,
     ) -> Tuple[Float[Array, " {n_times}"], Float[Array, "{n_times} state"]]:
         """Solve the ODE, returning ``(ts, ys)``.
 
         Args:
             params: Parameter vector, shape ``(n_params,)``, dtype ``float64``.
-            t_span: ``[t0, t_final]``, shape ``(2,)``, dtype ``float64``.
+            t_span: ``[t0, t_final]``, shape ``(2,)``
             ode_solver: Solver to use - an ``OdeSolverType`` or its name as a
                 string (``"bdf"``, ``"tsit45"``, ``"esdirk34"``, ``"tr_bdf2"``).
                 Defaults to ``OdeSolverType.BDF``.
@@ -111,13 +125,17 @@ class ODEProblem:
             Tuple of ``(ts, ys)`` where ``ts`` has shape ``(n_times,)`` and
             ``ys`` has shape ``(n_times, n_state)``.
         """
+        if _scalar_bits(params.dtype) != self._scalar_bits:
+            raise TypeError(
+                f"params dtype {jnp.dtype(params.dtype)} does not match the "
+                f"problem scalar type (float{self._scalar_bits}, fixed at "
+                f"construction from y0)"
+            )
+
         code = int(OdeSolverType.coerce(ode_solver))
         if code not in self._solvers:
             self._solvers[code] = _make_solver(self, code)
         solve_fn = self._solvers[code]
 
-        params = jnp.asarray(params, dtype=jnp.float64)
-        t_span = jnp.asarray(t_span, dtype=jnp.float64)
-
-        ys, ts = solve_fn(params, t_span)
+        ys, ts = solve_fn(rtol, atol, params, t_span)
         return ts, ys

@@ -5,8 +5,6 @@ import jax
 import jax.numpy as jnp
 from diffsol_jax import ODEProblem
 
-jax.config.update("jax_enable_x64", True)
-
 MU = 1000.0
 PARAMS = jnp.array([MU])
 Y0 = jnp.array([2.0, 0.0])

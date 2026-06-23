@@ -3,7 +3,7 @@ import time
 import diffrax
 import jax
 import jax.numpy as jnp
-from diffsol_jax import ODEProblem
+from diffsol_jax import ODEProblem, OdeSolverType
 
 MU = 1000.0
 PARAMS = jnp.array([MU])
@@ -47,7 +47,11 @@ def diffrax_solve(p):
 
 def run():
     ode_problem = ODEProblem(van_der_pol, Y0, PARAMS, N_TIMES)
-    diffsol_jit = jax.jit(lambda p: ode_problem.solve(p, T_SPAN))
+    diffsol_jit = jax.jit(
+        lambda p: ode_problem.solve(
+            p, T_SPAN, rtol=1e-8, atol=1e-8, ode_solver=OdeSolverType.BDF
+        )
+    )
 
     for _ in range(N_WARMUP):
         _, ys_ds = diffsol_jit(PARAMS)

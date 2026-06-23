@@ -1,14 +1,9 @@
-"""Run every benchmark and refresh the tables in docs/benchmarks.md.
-
-Each benchmark module exposes a ``run()`` returning a result dict. This script
-runs them, formats two Markdown tables, and rewrites the regions marked with
-``<!-- BENCH:<name>:start -->`` / ``<!-- BENCH:<name>:end -->`` in the docs.
-
-    uv run python benchmarks/run_all.py
-"""
-
 import re
 from pathlib import Path
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
 
 import bench_forward
 import bench_grad

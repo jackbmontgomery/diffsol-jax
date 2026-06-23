@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/diffsol-jax.png" alt="Logo" width="200">
+  <img src="assets/diffsol-jax.png" alt="Logo" style="width: 80%;">
 </p>
 
 JAX wrapper around [diffsol](https://github.com/martinjrobins/diffsol), a Rust ODE solver library.
@@ -8,16 +8,6 @@ differentiated with `jax.grad`.
 
 The user writes an RHS function in Python, which gets lowered to a
 [diffsl](https://martinjrobins.github.io/diffsl/) source string and compiled on first call.
-
-## Architecture
-
-```
-Python rhs fn  ->  DiffSL string  ->  XLA FFI call
-                                          |
-                                       C++ shim
-                                          |
-                                       diffsol
-```
 
 ## Example usage
 

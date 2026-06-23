@@ -20,7 +20,6 @@ INIT_P = TRUE_P + PERTURB
 
 ts_save = jnp.linspace(T_SPAN[0], T_SPAN[1], N_TIMES)
 
-# Set inside run().
 ode_problem = None
 target_ys = None
 opt = None
@@ -30,6 +29,14 @@ def lotka_volterra_ds(t, y, p):
     x, yy = y[0], y[1]
     alpha, beta, delta, gamma = p[0], p[1], p[2], p[3]
     return (alpha * x - beta * x * yy, delta * x * yy - gamma * yy)
+
+
+def diffsol_solve():
+
+    def lotka_volterra_ds(t, y, p):
+        x, yy = y[0], y[1]
+        alpha, beta, delta, gamma = p[0], p[1], p[2], p[3]
+        return (alpha * x - beta * x * yy, delta * x * yy - gamma * yy)
 
 
 def diffrax_solve(p):

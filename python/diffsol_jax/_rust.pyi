@@ -5,13 +5,13 @@ import builtins
 import typing
 
 class OdeSolver:
-    def __new__(cls, diffsl_src:builtins.str, scalar_type:builtins.int) -> OdeSolver: ...
+    def __new__(
+        cls, diffsl_src: builtins.str, scalar_type: builtins.int
+    ) -> OdeSolver: ...
     def handle(self) -> builtins.int:
         r"""
         Stable opaque id for the inner solver, carried by the JAX FFI call.
         """
 
 def _get_ffi_capsule_f32() -> typing.Any: ...
-
 def _get_ffi_capsule_f64() -> typing.Any: ...
-

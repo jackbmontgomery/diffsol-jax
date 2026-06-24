@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "diffsol-jax"
-version = "0.0.1"
+version = "0.0.2"
 description = "JAX bindings for the diffsol Rust ODE solver, callable inside jax.jit and differentiable with jax.grad."
 readme = "README.md"
 requires-python = ">=3.11"

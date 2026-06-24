@@ -72,24 +72,24 @@ def _make_solve(problem: ODEProblem) -> Callable:
     n_param = problem.n_params
     n_aug = n_state * (1 + n_param)
 
-    @partial(jax.custom_jvp, nondiff_argnums=(0, 1, 2))
-    def solve(method, rtol, atol, params, t_eval):
+    @partial(jax.custom_jvp, nondiff_argnums=(0, 1, 2, 3))
+    def solve(method, h0, rtol, atol, params, t_eval):
         n_times = t_eval.shape[0]
         return _ffi_solve(
-            problem._handle, params, t_eval, n_times, n_state, method, rtol, atol
+            problem._handle, params, t_eval, n_times, n_state, method, h0, rtol, atol
         )
 
     @solve.defjvp
-    def solve_jvp(method, rtol, atol, primals, tangents):
+    def solve_jvp(method, h0, rtol, atol, primals, tangents):
         params, t_eval = primals
         dp, _dt_eval = tangents
         n_times = t_eval.shape[0]
 
-        ys, ts = solve(method, rtol, atol, params, t_eval)
+        ys, ts = solve(method, h0, rtol, atol, params, t_eval)
 
         aug_handle = problem._ensure_aug_handle()
         ys_aug, _ = _ffi_solve(
-            aug_handle, params, t_eval, n_times, n_aug, method, rtol, atol
+            aug_handle, params, t_eval, n_times, n_aug, method, h0, rtol, atol
         )
         # ys_aug[:, n_state:] is S flattened by column: (n_times, n_param, n_state).
         # Transpose to J[t, state, param].

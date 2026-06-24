@@ -9,12 +9,10 @@ MU = 1000.0
 PARAMS = jnp.array([MU])
 Y0 = jnp.array([2.0, 0.0])
 T_END = 2 * MU
-T_SPAN = jnp.array([0.0, T_END])
 N_TIMES = 200
+T_EVAL = jnp.linspace(0.0, T_END, N_TIMES)
 N_WARMUP = 3
 N_REPEAT = 10
-
-ts_save = jnp.linspace(0.0, T_END, N_TIMES)
 
 
 def van_der_pol(t, y, p):
@@ -38,7 +36,7 @@ def diffrax_solve(p):
         dt0=1.0,
         y0=Y0,
         args=mu,
-        saveat=diffrax.SaveAt(ts=ts_save),
+        saveat=diffrax.SaveAt(ts=T_EVAL),
         stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-8),
         max_steps=500_000,
     )
@@ -46,10 +44,10 @@ def diffrax_solve(p):
 
 
 def run():
-    ode_problem = ODEProblem(van_der_pol, Y0, PARAMS, N_TIMES)
+    ode_problem = ODEProblem(van_der_pol, Y0, PARAMS)
     diffsol_jit = jax.jit(
         lambda p: ode_problem.solve(
-            p, T_SPAN, rtol=1e-8, atol=1e-8, ode_solver=OdeSolverType.BDF
+            p, T_EVAL, ode_solver=OdeSolverType.BDF, rtol=1e-8, atol=1e-8
         )
     )
 

@@ -27,7 +27,7 @@ def _ensure_registered() -> None:
 def _ffi_solve(
     handle: int,
     params: Float[Array, " state"],
-    t_span: Float[Array, "2"],
+    t_eval: Float[Array, " times"],
     n_times: int,
     n_state: int,
     method: int,
@@ -36,7 +36,7 @@ def _ffi_solve(
 ):
     """Primal dense solve via the XLA custom call. Returns ``(ys, ts)``."""
     _ensure_registered()
-    if params.dtype != t_span.dtype:
+    if params.dtype != t_eval.dtype:
         raise TypeError("Ensure params and t_span are the same type")
     elif params.dtype == jnp.float32:
         return jax_ffi.ffi_call(
@@ -48,10 +48,8 @@ def _ffi_solve(
             vmap_method="sequential",
         )(
             params,
-            t_span,
+            t_eval,
             handle=handle,
-            n_times=n_times,
-            n_state=n_state,
             method=method,
             rtol=rtol,
             atol=atol,
@@ -66,10 +64,8 @@ def _ffi_solve(
             vmap_method="sequential",
         )(
             params,
-            t_span,
+            t_eval,
             handle=handle,
-            n_times=n_times,
-            n_state=n_state,
             method=method,
             rtol=rtol,
             atol=atol,

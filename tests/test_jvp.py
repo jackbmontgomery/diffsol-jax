@@ -6,8 +6,8 @@ from diffsol_jax import ODEProblem
 
 PARAMS = [1.5, 1.0, 0.75, 3.0]
 Y0 = [1.0, 0.5]
-T_SPAN = [0.0, 5.0]
 N_TIMES = 50
+T_EVAL = jnp.linspace(0.0, 10.0, N_TIMES)
 ODE_SOLVERS = ["tsit45", "bdf"]
 DTYPES = [jnp.float32, jnp.float64]
 
@@ -26,20 +26,20 @@ def lotka_volterra(t, y, p):
 def _setup(dtype):
     params = jnp.array(PARAMS, dtype=dtype)
     y0 = jnp.array(Y0, dtype=dtype)
-    t_span = jnp.array(T_SPAN, dtype=dtype)
-    prob = ODEProblem(lotka_volterra, y0, params, n_times=N_TIMES)
-    return prob, params, t_span
+    t_eval = jnp.array(T_EVAL, dtype=dtype)
+    prob = ODEProblem(lotka_volterra, y0, params)
+    return prob, params, t_eval
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_jvp_matches_fd(ode_solver, dtype):
     cfg = SETTINGS[dtype]
-    prob, params, t_span = _setup(dtype)
+    prob, params, t_eval = _setup(dtype)
 
     def ys_of(p):
         return prob.solve(
-            p, t_span, ode_solver=ode_solver, rtol=cfg["rtol"], atol=cfg["atol"]
+            p, t_eval, ode_solver=ode_solver, rtol=cfg["rtol"], atol=cfg["atol"]
         )[1]
 
     rng = np.random.default_rng(42)
@@ -61,10 +61,10 @@ def test_jvp_matches_fd(ode_solver, dtype):
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_jvp_zero_tangents(ode_solver, dtype):
-    prob, params, t_span = _setup(dtype)
+    prob, params, t_eval = _setup(dtype)
 
     def ys_of(p):
-        return prob.solve(p, t_span, ode_solver=ode_solver)[1]
+        return prob.solve(p, t_eval, ode_solver=ode_solver)[1]
 
     dp = jnp.zeros(len(PARAMS), dtype=dtype)
     _, dys = jax.jvp(ys_of, (params,), (dp,))

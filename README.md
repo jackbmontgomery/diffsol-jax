@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/diffsol-jax.png" alt="Logo" style="width: 80%;">
+  <img src="assets/diffsol-jax.png" alt="Logo" style="width: 75%;">
 </p>
 
 JAX wrapper around [diffsol](https://github.com/martinjrobins/diffsol), a Rust ODE solver library.

@@ -14,10 +14,9 @@ def lorenz(t, y, p):
 def test_lorenz_short_horizon():
     params = jnp.array([10.0, 28.0, 8.0 / 3.0])
     y0 = jnp.array([1.0, 0.0, 0.0])
+    t_eval = jnp.linspace(0, 2.0, 200)
     ode_problem = ODEProblem(lorenz, y0, params)
-    ts, ys = ode_problem.solve(
-        params, jnp.array([0.0, 2.0]), ode_solver=OdeSolverType.TSIT45
-    )
+    ts, ys = ode_problem.solve(params, t_eval, ode_solver=OdeSolverType.TSIT45)
 
     def f(t, y):
         s, r, b = params
@@ -33,11 +32,10 @@ def test_lorenz_short_horizon():
 def test_lorenz_under_jit():
     params = jnp.array([10.0, 28.0, 8.0 / 3.0])
     y0 = jnp.array([1.0, 0.0, 0.0])
+    t_eval = jnp.linspace(0, 2.0, 200)
     ode_problem = ODEProblem(lorenz, y0, params)
     jit_solver = jax.jit(
-        lambda p: ode_problem.solve(
-            p, jnp.array([0.0, 2.0]), ode_solver=OdeSolverType.TSIT45
-        )
+        lambda p: ode_problem.solve(p, t_eval, ode_solver=OdeSolverType.TSIT45)
     )
     _, ys1 = jit_solver(params)
     _, ys2 = jit_solver(params * 1.01)

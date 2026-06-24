@@ -9,7 +9,7 @@ jax.config.update("jax_enable_x64", True)
 
 PARAMS = [1.5, 1.0, 0.75, 3.0]
 Y0 = [1.0, 0.5]
-T_SPAN = [0.0, 10.0]
+T_EVAL = jnp.linspace(0, 10.0, 200)
 ODE_SOLVERS = ["bdf", "tsit45", "esdirk34", "tr_bdf2"]
 DTYPES = [jnp.float32, jnp.float64]
 
@@ -23,7 +23,7 @@ def _inputs(dtype):
     return (
         jnp.array(PARAMS, dtype=dtype),
         jnp.array(Y0, dtype=dtype),
-        jnp.array(T_SPAN, dtype=dtype),
+        jnp.array(T_EVAL, dtype=dtype),
     )
 
 
@@ -52,11 +52,11 @@ def scipy_reference(ts):
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_lv_matches_scipy(ode_solver, dtype):
     cfg = SETTINGS[dtype]
-    params, y0, t_span = _inputs(dtype)
+    params, y0, t_eval = _inputs(dtype)
 
-    ode_problem = ODEProblem(lotka_volterra, y0, params, n_times=100)
+    ode_problem = ODEProblem(lotka_volterra, y0, params)
     ts, ys = ode_problem.solve(
-        params, t_span, ode_solver=ode_solver, rtol=cfg["rtol"], atol=cfg["atol"]
+        params, t_eval, ode_solver=ode_solver, rtol=cfg["rtol"], atol=cfg["atol"]
     )
 
     assert ys.dtype == dtype
@@ -71,13 +71,13 @@ def test_lv_matches_scipy(ode_solver, dtype):
 @pytest.mark.parametrize("ode_solver", ODE_SOLVERS)
 def test_lv_grad_matches_fd(ode_solver, dtype):
     cfg = SETTINGS[dtype]
-    params, y0, t_span = _inputs(dtype)
+    params, y0, t_eval = _inputs(dtype)
 
-    ode_problem = ODEProblem(lotka_volterra, y0, params, n_times=100)
+    ode_problem = ODEProblem(lotka_volterra, y0, params)
 
     def loss(p):
         _, ys = ode_problem.solve(
-            p, t_span, ode_solver=ode_solver, rtol=cfg["rtol"], atol=cfg["atol"]
+            p, t_eval, ode_solver=ode_solver, rtol=cfg["rtol"], atol=cfg["atol"]
         )
         return jnp.sum(ys**2)
 
@@ -104,7 +104,7 @@ def test_lv_grad_matches_fd(ode_solver, dtype):
 
 
 def test_unknown_solver_raises():
-    params, y0, t_span = _inputs(jnp.float64)
+    params, y0, t_eval = _inputs(jnp.float64)
     prob = ODEProblem(lotka_volterra, y0=y0, params=params)
     with pytest.raises(ValueError, match="unknown solver"):
-        prob.solve(params, t_span, ode_solver="rk4_custom")
+        prob.solve(params, t_eval, ode_solver="rk4_custom")

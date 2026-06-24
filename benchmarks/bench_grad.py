@@ -8,8 +8,8 @@ from diffsol_jax import ODEProblem
 
 TRUE_P = jnp.array([1.5, 1.0, 0.75, 3.0])
 Y0 = jnp.array([1.0, 0.5])
-T_SPAN = jnp.array([0.0, 10.0])
 N_TIMES = 50
+T_EVAL = jnp.linspace(0.0, 10.0, N_TIMES)
 N_STEPS = 500
 LR = 1e-2
 N_WARMUP = 2
@@ -17,8 +17,6 @@ N_REPEAT = 10
 
 PERTURB = 0.2 * jax.random.normal(jax.random.key(0), (4,))
 INIT_P = TRUE_P + PERTURB
-
-ts_save = jnp.linspace(T_SPAN[0], T_SPAN[1], N_TIMES)
 
 ode_problem = None
 target_ys = None
@@ -48,19 +46,19 @@ def diffrax_solve(p):
     sol = diffrax.diffeqsolve(
         diffrax.ODETerm(rhs),
         diffrax.Tsit5(),
-        t0=0.0,
-        t1=10.0,
+        t0=T_EVAL[0],
+        t1=T_EVAL[-1],
         dt0=0.05,
         y0=Y0,
         args=p,
-        saveat=diffrax.SaveAt(ts=ts_save),
+        saveat=diffrax.SaveAt(ts=T_EVAL),
         stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-8),
     )
     return sol.ys
 
 
 def loss_ds(p):
-    _, ys = ode_problem.solve(p, T_SPAN, ode_solver="tsit45")
+    _, ys = ode_problem.solve(p, T_EVAL, ode_solver="tsit45")
     return jnp.mean((ys - target_ys) ** 2)
 
 
@@ -103,8 +101,8 @@ def run_gd_dx():
 
 def run():
     global ode_problem, target_ys, opt
-    ode_problem = ODEProblem(lotka_volterra_ds, Y0, TRUE_P, N_TIMES)
-    _, target_ys = ode_problem.solve(TRUE_P, T_SPAN, ode_solver="tsit45")
+    ode_problem = ODEProblem(lotka_volterra_ds, Y0, TRUE_P)
+    _, target_ys = ode_problem.solve(TRUE_P, T_EVAL, ode_solver="tsit45")
     opt = optax.adam(LR)
 
     for _ in range(N_WARMUP):

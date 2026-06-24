@@ -15,16 +15,6 @@ fn ode_solver_from_method(method: i32) -> Result<OdeSolverType, String> {
     }
 }
 
-fn linspace<T: Scalar>(t0: T, t_final: T, n: usize) -> Vec<T> {
-    if n == 1 {
-        return vec![t_final];
-    }
-    let denom = T::from_usize(n - 1).unwrap();
-    (0..n)
-        .map(|i| t0 + (t_final - t0) * T::from_usize(i).unwrap() / denom)
-        .collect()
-}
-
 fn copy_ys_to_xla<T: Scalar>(
     ys_ha: HostArray,
     ys_out: *mut T,
@@ -59,17 +49,15 @@ fn copy_ts_to_xla<T: Scalar>(
 #[allow(clippy::too_many_arguments)]
 fn solve_impl<T: Scalar + ToPrimitive>(
     handle: u64,
-    params_ptr: *const T,
+    params_ptr: *const f64,
     n_params: usize,
-    t0: T,
-    t_final: T,
+    t_eval_ptr: *const f64,
+    n_times: usize,
+    method: i32,
     rtol: f64,
     atol: f64,
     ys_out: *mut T,
     ts_out: *mut T,
-    n_times: usize,
-    n_state: usize,
-    method: i32,
 ) -> Result<(), String> {
     let wrapper = lookup(handle)?;
     wrapper
@@ -79,18 +67,8 @@ fn solve_impl<T: Scalar + ToPrimitive>(
     wrapper.set_rtol(rtol).map_err(|e| e.to_string())?;
     wrapper.set_atol(atol).map_err(|e| e.to_string())?;
 
-    // diffsol-c's `solve_dense` always reads the `params`/`t_eval` inputs as
-    // `&[f64]` and converts them internally to the solver's scalar type. The
-    // scalar type (F32/F64) only governs compute precision and the *output*
-    // dtype, so the input HostArrays must always be F64 regardless of T.
-    let params_f64: Vec<f64> = (0..n_params)
-        .map(|i| unsafe { *params_ptr.add(i) }.to_f64().unwrap())
-        .collect();
-    let t_eval = linspace(t0.to_f64().unwrap(), t_final.to_f64().unwrap(), n_times);
-
-    let params_ha =
-        HostArray::new_vector(params_f64.as_ptr() as *mut u8, n_params, ScalarType::F64);
-    let t_eval_ha = HostArray::new_vector(t_eval.as_ptr() as *mut u8, n_times, ScalarType::F64);
+    let params_ha = HostArray::new_vector(params_ptr as *mut u8, n_params, ScalarType::F64);
+    let t_eval_ha = HostArray::new_vector(t_eval_ptr as *mut u8, n_times, ScalarType::F64);
 
     let solution = wrapper
         .solve_dense(params_ha, t_eval_ha)
@@ -100,7 +78,7 @@ fn solve_impl<T: Scalar + ToPrimitive>(
         solution.get_ys().map_err(|e| e.to_string())?,
         ys_out,
         n_times,
-        n_state,
+        wrapper.get_nstates().map_err(|e| e.to_string())?,
     )?;
 
     copy_ts_to_xla(
@@ -117,21 +95,18 @@ pub unsafe extern "C" fn diffsol_solve_f64(
     handle: u64,
     params_ptr: *const f64,
     n_params: usize,
-    t0: f64,
-    t_final: f64,
+    t_eval_ptr: *const f64,
+    n_times: usize,
     rtol: f64,
     atol: f64,
+    method: i32,
     ys_out: *mut f64,
     ts_out: *mut f64,
-    n_times: usize,
-    n_state: usize,
-    method: i32,
     err_buf: *mut c_char,
     err_buf_len: usize,
 ) -> i32 {
     match solve_impl::<f64>(
-        handle, params_ptr, n_params, t0, t_final, rtol, atol, ys_out, ts_out, n_times, n_state,
-        method,
+        handle, params_ptr, n_params, t_eval_ptr, n_times, method, rtol, atol, ys_out, ts_out,
     ) {
         Ok(()) => 0,
         Err(e) => {
@@ -144,23 +119,20 @@ pub unsafe extern "C" fn diffsol_solve_f64(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn diffsol_solve_f32(
     handle: u64,
-    params_ptr: *const f32,
+    params_ptr: *const f64,
     n_params: usize,
-    t0: f32,
-    t_final: f32,
+    t_eval_ptr: *const f64,
+    n_times: usize,
     rtol: f64,
     atol: f64,
+    method: i32,
     ys_out: *mut f32,
     ts_out: *mut f32,
-    n_times: usize,
-    n_state: usize,
-    method: i32,
     err_buf: *mut c_char,
     err_buf_len: usize,
 ) -> i32 {
     match solve_impl::<f32>(
-        handle, params_ptr, n_params, t0, t_final, rtol, atol, ys_out, ts_out, n_times, n_state,
-        method,
+        handle, params_ptr, n_params, t_eval_ptr, n_times, method, rtol, atol, ys_out, ts_out,
     ) {
         Ok(()) => 0,
         Err(e) => {

@@ -54,12 +54,14 @@ def _make_aug_rhs(rhs: Callable, n_state: int, n_param: int) -> Callable:
     return aug
 
 
-def _make_solver(problem: "ODEProblem", method: int) -> Callable:
-    r"""Return a ``custom_jvp`` solve function for one ``(problem, method)`` pair.
+def _make_solve(problem: ODEProblem) -> Callable:
+    r"""Return the ``custom_jvp`` solve function for ``problem``.
 
-    ``rtol``/``atol`` are passed at call time as non-differentiated arguments
-    (they are lowered as static FFI attributes), so a single solver can be reused
-    across calls with different tolerances - the caller caches on ``method`` alone.
+    Built once per problem. ``method``/``rtol``/``atol`` are passed at call time
+    as non-differentiated arguments (lowered as static FFI attributes); ``method``
+    is a runtime FFI attribute on the Rust side, so it needs no separate compiled
+    solver. The output time count is read from ``t_eval.shape[0]`` at trace time,
+    so a single solve handles any ``t_eval`` shape with no caching.
 
     The primal is the Cranelift dense solve; the JVP solves the augmented system
     to obtain ``J = \partial ys / \partial p`` and contracts it with ``dp``. Reverse
@@ -68,25 +70,26 @@ def _make_solver(problem: "ODEProblem", method: int) -> Callable:
     """
     n_state = problem.n_state
     n_param = problem.n_params
-    n_times = problem.n_times
     n_aug = n_state * (1 + n_param)
 
-    @partial(jax.custom_jvp, nondiff_argnums=(0, 1))
-    def solve(rtol, atol, params, t_span):
+    @partial(jax.custom_jvp, nondiff_argnums=(0, 1, 2))
+    def solve(method, rtol, atol, params, t_eval):
+        n_times = t_eval.shape[0]
         return _ffi_solve(
-            problem._handle, params, t_span, n_times, n_state, method, rtol, atol
+            problem._handle, params, t_eval, n_times, n_state, method, rtol, atol
         )
 
     @solve.defjvp
-    def solve_jvp(rtol, atol, primals, tangents):
-        params, t_span = primals
-        dp, _dt_span = tangents  # t_span tangents are not propagated
+    def solve_jvp(method, rtol, atol, primals, tangents):
+        params, t_eval = primals
+        dp, _dt_eval = tangents
+        n_times = t_eval.shape[0]
 
-        ys, ts = solve(rtol, atol, params, t_span)
+        ys, ts = solve(method, rtol, atol, params, t_eval)
 
         aug_handle = problem._ensure_aug_handle()
         ys_aug, _ = _ffi_solve(
-            aug_handle, params, t_span, n_times, n_aug, method, rtol, atol
+            aug_handle, params, t_eval, n_times, n_aug, method, rtol, atol
         )
         # ys_aug[:, n_state:] is S flattened by column: (n_times, n_param, n_state).
         # Transpose to J[t, state, param].

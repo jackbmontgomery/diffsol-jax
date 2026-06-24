@@ -8,7 +8,7 @@ from jaxtyping import Array, Float
 
 from . import _rust
 from .lowering import make_diffsl_tuple
-from .sensitivity import _make_aug_rhs, _make_solver
+from .sensitivity import _make_aug_rhs, _make_solve
 from .solver_type import OdeSolverLike, OdeSolverType
 
 
@@ -30,8 +30,8 @@ class ODEProblem:
     ``jax.grad``, ``jax.jvp``, and ``jax.vmap``.
 
     The compiled solver is exposed via ``solve``, which accepts ``params``
-    and a time span. Initial conditions are fixed at construction time from
-    ``y0``.
+    and a time evaluation points. Initial conditions are fixed at construction
+    time from ``y0``.
 
     Supported AD operations:
         * ``jax.grad`` / ``jax.vjp`` - reverse mode via the auto-transposed
@@ -46,24 +46,20 @@ class ODEProblem:
 
     solver: _rust.OdeSolver
     _handle: int
-    n_times: int
     n_state: int
-    n_params: int
 
     def __init__(
         self,
         rhs: Callable,
         y0: Float[Array, " state"],
         params: Float[Array, " params"],
-        n_times: int = 200,
     ):
         """Compile an ODE problem from a Python RHS function.
 
         Args:
-            rhs: Right-hand-side function ``rhs(t, y, p) -> tuple[float, ...]``.
+            rhs: Right-hand-side function ``rhs(t, y, p) -> Float[Array, ...]``.
             y0: Initial state vector (shape determines ``n_state``). Fixed.
             params: Example parameter vector (shape determines ``n_params``).
-            n_times: Number of evenly spaced output time points. Defaults to ``200``.
         """
         self._rhs = rhs
         self._y0 = y0
@@ -74,13 +70,12 @@ class ODEProblem:
         self.solver = _rust.OdeSolver(diffsl_src, self._scalar_bits)
         self._handle = self.solver.handle()
 
-        self.n_times = n_times
         self.n_state = len(y0)
         self.n_params = len(params)
 
-        self._solvers: dict = {}
         self._aug_solver = None
         self._aug_handle = None
+        self._solve = _make_solve(self)
 
     def _ensure_aug_handle(self) -> int:
         """Build (once) the augmented forward-sensitivity solver and return its handle."""
@@ -107,23 +102,25 @@ class ODEProblem:
     def solve(
         self,
         params: Float[Array, " params"],
-        t_span: Float[Array, " 2"],
-        rtol: float = 1e-5,
-        atol: float = 1e-5,
+        t_eval: Float[Array, " times"],
         ode_solver: OdeSolverLike = OdeSolverType.BDF,
-    ) -> Tuple[Float[Array, " {n_times}"], Float[Array, "{n_times} state"]]:
+        rtol: float = 1e-5,
+        atol: float = 1e-6,
+    ) -> Tuple[Float[Array, " times"], Float[Array, "times state"]]:
         """Solve the ODE, returning ``(ts, ys)``.
 
         Args:
-            params: Parameter vector, shape ``(n_params,)``, dtype ``float64``.
-            t_span: ``[t0, t_final]``, shape ``(2,)``
+            params: Parameter vector, shape ``(n_params,)``
+            t_eval: Points for the solution to be evaluated at, shape ``(times,)``
             ode_solver: Solver to use - an ``OdeSolverType`` or its name as a
                 string (``"bdf"``, ``"tsit45"``, ``"esdirk34"``, ``"tr_bdf2"``).
                 Defaults to ``OdeSolverType.BDF``.
+            rtol: Relative Tolerance
+            atol: Absolute Tolerance
 
         Returns:
-            Tuple of ``(ts, ys)`` where ``ts`` has shape ``(n_times,)`` and
-            ``ys`` has shape ``(n_times, n_state)``.
+            ``ts`` the time points where the solutions has been evaluted (matches t_eval).
+            ``ys`` array of the solution values at the evaluated time points.
         """
         if _scalar_bits(params.dtype) != self._scalar_bits:
             raise TypeError(
@@ -133,9 +130,5 @@ class ODEProblem:
             )
 
         code = int(OdeSolverType.coerce(ode_solver))
-        if code not in self._solvers:
-            self._solvers[code] = _make_solver(self, code)
-        solve_fn = self._solvers[code]
-
-        ys, ts = solve_fn(rtol, atol, params, t_span)
+        ys, ts = self._solve(code, rtol, atol, params, t_eval)
         return ts, ys

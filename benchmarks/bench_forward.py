@@ -7,12 +7,10 @@ from diffsol_jax import ODEProblem, OdeSolverType
 
 PARAMS = jnp.array([1.5, 1.0, 0.75, 3.0])
 Y0 = jnp.array([1.0, 0.5])
-T_SPAN = jnp.array([0.0, 100.0])
 N_TIMES = 200
+T_EVAL = jnp.linspace(0.0, 100.0, N_TIMES)
 N_WARMUP = 3
 N_REPEAT = 20
-
-ts_save = jnp.linspace(T_SPAN[0], T_SPAN[1], N_TIMES)
 
 
 def lotka_volterra(t, y, p):
@@ -30,22 +28,22 @@ def diffrax_solve(p):
     sol = diffrax.diffeqsolve(
         diffrax.ODETerm(rhs),
         diffrax.Tsit5(),
-        t0=T_SPAN[0],
-        t1=T_SPAN[1],
+        t0=T_EVAL[0],
+        t1=T_EVAL[-1],
         dt0=0.05,
         y0=Y0,
         args=p,
-        saveat=diffrax.SaveAt(ts=ts_save),
+        saveat=diffrax.SaveAt(ts=T_EVAL),
         stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-8),
     )
     return sol.ys
 
 
 def run():
-    ode_problem = ODEProblem(lotka_volterra, Y0, PARAMS, N_TIMES)
+    ode_problem = ODEProblem(lotka_volterra, Y0, PARAMS)
     diffsol_jit = jax.jit(
         lambda p: ode_problem.solve(
-            p, T_SPAN, rtol=1e-8, atol=1e-8, ode_solver=OdeSolverType.TSIT45
+            p, T_EVAL, ode_solver=OdeSolverType.TSIT45, rtol=1e-8, atol=1e-8
         )
     )
 

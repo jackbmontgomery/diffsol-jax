@@ -8,17 +8,18 @@ and exposes a ``ODEProblem.solve`` method that is compatible with
 Differentiation strategy:
     Cranelift gives us a fast primal solve but, unlike the LLVM/Enzyme backend, it does
     not emit the reverse/sensitivity kernels that diffsol's built-in adjoint needs. So
-    all derivatives are obtained by *forward sensitivity analysis done at the JAX level*:
+    derivatives are obtained by *forward sensitivity analysis done at the JAX level*:
 
     * Alongside the primal RHS we build an **augmented RHS** for the state
-      ``[y; S]`` where \( S = \partial y / \partial p \). Its sensitivity block is
-      ``dS_:,j/dt`` \(= \frac{\partial f}{\partial y} * S_:,j + \frac{\partial f}{\partial p} * e_j\),
-      which we obtain column-by-column with ``jax.jvp`` of the user RHS at trace time. The whole augmented system lowers to a
-      single DiffSL string and is solved as an ordinary solve.
+      ``[y; S]`` where $S = \frac{\partial y}{\partial p}$. Its sensitivity block is
+      $\frac{\partial S_{:,j}}{\partial t} = \frac{\partial f}{\partial y} S_{:,j} + \frac{\partial f}{\partial p} e_j$,
+      which we obtain column-by-column with ``jax.jvp`` of the user RHS at trace
+      time. The whole augmented system lowers to a single DiffSL string and is
+      solved as an ordinary solve.
     * Solving the augmented system materialises the full Jacobian
-      ``J[t]`` \(= \frac{\partial y(t)}{\partial p}\) of shape ``(n_times, n_state, n_params)``.
-    * ``jax.custom_jvp`` then defines the tangent as ``dys = J * dp``. Because ``J``
-      is a constant w.r.t. the linearisation, JAX transposes this contraction for free,
+      $J(t) = \frac{\partial y(t)}{\partial p}$ of shape ``(n_times, n_state, n_params)``.
+    * ``jax.custom_jvp`` then defines the tangent as $dy = J\, dp$. Because $J$
+      is constant w.r.t. the linearisation, JAX transposes this contraction for free,
       giving reverse-mode (``grad``/``vjp``) without any adjoint solve.
 
     This means there is exactly one Rust/FFI entry point used for both the value
@@ -26,11 +27,7 @@ Differentiation strategy:
     time a problem is differentiated.
 """
 
-# import jax
-
 from .problem import ODEProblem
 from .solver_type import OdeSolverType
-
-# jax.config.update("jax_enable_x64", True)  # Only f64 is supported
 
 __all__ = ["ODEProblem", "OdeSolverType"]

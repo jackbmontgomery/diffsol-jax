@@ -18,7 +18,7 @@ class OdeSolverType(IntEnum):
     TR_BDF2 = 3
 
     @classmethod
-    def coerce(cls, value: "OdeSolverLike") -> "OdeSolverType":
+    def coerce(cls, value: OdeSolverLike) -> OdeSolverType:
         """Resolve an ``OdeSolverType`` or solver-name string to an ``OdeSolverType``.
 
         Args:

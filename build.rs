@@ -23,11 +23,11 @@ fn main() {
         .cpp(true)
         .std("c++17")
         .include(&jax_include)
-        .file("src/wrapper.cc")
+        .file("src/shim.cc")
         .compile("diffsol_wrapper");
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let wrapper_path = format!("{}/src/wrapper.cc", manifest_dir);
+    let wrapper_path = format!("{}/src/shim.cc", manifest_dir);
     let compile_commands = format!(
         r#"[
   {{
@@ -50,6 +50,6 @@ fn main() {
     )
     .expect("failed to write compile_commands.json");
 
-    println!("cargo:rerun-if-changed=src/wrapper.cc");
+    println!("cargo:rerun-if-changed=src/shim.cc");
     println!("cargo:rerun-if-changed=build.rs");
 }

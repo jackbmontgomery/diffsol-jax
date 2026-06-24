@@ -54,6 +54,7 @@ fn solve_impl<T: Scalar + ToPrimitive>(
     t_eval_ptr: *const f64,
     n_times: usize,
     method: i32,
+    h0: f64,
     rtol: f64,
     atol: f64,
     ys_out: *mut T,
@@ -64,6 +65,7 @@ fn solve_impl<T: Scalar + ToPrimitive>(
         .set_ode_solver(ode_solver_from_method(method)?)
         .map_err(|e| e.to_string())?;
 
+    wrapper.set_h0(h0).map_err(|e| e.to_string())?;
     wrapper.set_rtol(rtol).map_err(|e| e.to_string())?;
     wrapper.set_atol(atol).map_err(|e| e.to_string())?;
 
@@ -98,6 +100,7 @@ pub unsafe extern "C" fn diffsol_solve_f64(
     t_eval_ptr: *const f64,
     n_times: usize,
     method: i32,
+    h0: f64,
     rtol: f64,
     atol: f64,
     ys_out: *mut f64,
@@ -106,7 +109,7 @@ pub unsafe extern "C" fn diffsol_solve_f64(
     err_buf_len: usize,
 ) -> i32 {
     match solve_impl::<f64>(
-        handle, params_ptr, n_params, t_eval_ptr, n_times, method, rtol, atol, ys_out, ts_out,
+        handle, params_ptr, n_params, t_eval_ptr, n_times, method, h0, rtol, atol, ys_out, ts_out,
     ) {
         Ok(()) => 0,
         Err(e) => {
@@ -124,6 +127,7 @@ pub unsafe extern "C" fn diffsol_solve_f32(
     t_eval_ptr: *const f64,
     n_times: usize,
     method: i32,
+    h0: f64,
     rtol: f64,
     atol: f64,
     ys_out: *mut f32,
@@ -132,7 +136,7 @@ pub unsafe extern "C" fn diffsol_solve_f32(
     err_buf_len: usize,
 ) -> i32 {
     match solve_impl::<f32>(
-        handle, params_ptr, n_params, t_eval_ptr, n_times, method, rtol, atol, ys_out, ts_out,
+        handle, params_ptr, n_params, t_eval_ptr, n_times, method, h0, rtol, atol, ys_out, ts_out,
     ) {
         Ok(()) => 0,
         Err(e) => {

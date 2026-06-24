@@ -104,6 +104,7 @@ class ODEProblem:
         params: Float[Array, " params"],
         t_eval: Float[Array, " times"],
         ode_solver: OdeSolverLike = OdeSolverType.BDF,
+        h0: float = 1.0,
         rtol: float = 1e-5,
         atol: float = 1e-6,
     ) -> Tuple[Float[Array, " times"], Float[Array, "times state"]]:
@@ -115,8 +116,9 @@ class ODEProblem:
             ode_solver: Solver to use - an ``OdeSolverType`` or its name as a
                 string (``"bdf"``, ``"tsit45"``, ``"esdirk34"``, ``"tr_bdf2"``).
                 Defaults to ``OdeSolverType.BDF``.
-            rtol: Relative Tolerance
-            atol: Absolute Tolerance
+            h0: Initial step size
+            rtol: Relative tolerance
+            atol: Absolute tolerance
 
         Returns:
             ``ts`` the time points where the solutions has been evaluted (matches t_eval).
@@ -129,6 +131,6 @@ class ODEProblem:
                 f"construction from y0)"
             )
 
-        code = int(OdeSolverType.coerce(ode_solver))
-        ys, ts = self._solve(code, rtol, atol, params, t_eval)
+        method_code = int(OdeSolverType.coerce(ode_solver))
+        ys, ts = self._solve(method_code, h0, rtol, atol, params, t_eval)
         return ts, ys

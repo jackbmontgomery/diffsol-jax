@@ -31,6 +31,7 @@ def _ffi_solve(
     n_times: int,
     n_state: int,
     method: int,
+    h0: float,
     rtol: float,
     atol: float,
 ):
@@ -51,6 +52,7 @@ def _ffi_solve(
             t_eval,
             handle=handle,
             method=method,
+            h0=h0,
             rtol=rtol,
             atol=atol,
         )
@@ -67,6 +69,7 @@ def _ffi_solve(
             t_eval,
             handle=handle,
             method=method,
+            h0=h0,
             rtol=rtol,
             atol=atol,
         )

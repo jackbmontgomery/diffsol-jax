@@ -34,12 +34,12 @@ $$
 Differentiate the ODE with respect to $p$ and exchange the order of the $t$- and $p$-derivatives:
 
 $$ \frac{\mathrm{d}}{\mathrm{d}t}\,\frac{\partial y}{\partial p} = \frac{\partial f}{\partial
-y}\,\frac{\partial y}{\partial p} - \frac{\partial f}{\partial p}. $$
+y}\,\frac{\partial y}{\partial p} + \frac{\partial f}{\partial p}. $$
 
-So $S$ obeys its the ODE, driven by the Jacobians of $f$:
+So $S$ obeys the ODE, driven by the Jacobians of $f$:
 
 $$ \boxed{\; \frac{\mathrm{d}S}{\mathrm{d}t} = \underbrace{\frac{\partial f}{\partial y}}_{n \times
-n}\, S - \underbrace{\frac{\partial f}{\partial p}}_{n \times m}, \qquad S(t_0) = \frac{\partial
+n}\, S + \underbrace{\frac{\partial f}{\partial p}}_{n \times m}, \qquad S(t_0) = \frac{\partial
 y_0}{\partial p} = 0. \;} $$
 
 The initial condition is **zero** because `y0` is fixed at construction time and does not depend on
@@ -73,7 +73,7 @@ $$
 $$
 
 Each block is produced with a single `jax.jvp`, the augmented RHS is lowered to DiffSL just like any
-other model, and diffsol integrates $z$ with the same solver and tolerances as the forward solve.
+other model, and `diffsol` integrates $z$ with the same solver and tolerances as the forward solve.
 The sensitivity columns are read back out of $z$ and reshaped into the Jacobian
 
 $$

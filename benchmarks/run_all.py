@@ -1,10 +1,6 @@
 import re
 from pathlib import Path
 
-import jax
-
-jax.config.update("jax_enable_x64", True)
-
 import bench_forward
 import bench_grad
 import bench_stiff

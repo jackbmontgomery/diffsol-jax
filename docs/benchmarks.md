@@ -16,10 +16,12 @@ uv run python benchmarks/run_all.py
 200 output times, wall-clock time per solve call after JIT warm-up.
 
 <!-- BENCH:forward:start -->
+
 | System                     | diffsol-jax | diffrax            | Speedup |
 | -------------------------- | ----------- | ------------------ | ------- |
-| Lotka-Volterra (non-stiff) | 0.58 ms | 2.13 ms (Tsit5) | 3.68x |
-| Van der Pol μ=1000 (stiff) | 0.58 ms | 60.3 ms (Kvaerno5) | 103.38x |
+| Lotka-Volterra (non-stiff) | 0.58 ms     | 2.13 ms (Tsit5)    | 3.68x   |
+| Van der Pol μ=1000 (stiff) | 0.58 ms     | 60.3 ms (Kvaerno5) | 103.38x |
+
 <!-- BENCH:forward:end -->
 
 BDF's variable-order stepping gives a large advantage on stiff problems. On non-stiff systems
@@ -35,9 +37,11 @@ uv run python benchmarks/bench_stiff.py
 500 Adam steps, `n_times=50`, Lotka-Volterra with Tsit45 and forward sensitivities.
 
 <!-- BENCH:grad:start -->
-| System                       | diffsol-jax           | diffrax               | Speedup |
-| ---------------------------- | --------------------- | --------------------- | ------- |
-| Lotka-Volterra (Tsit45+sens) | 81.4 ms / 500 steps | 3075.6 ms / 500 steps | 37.78x |
+
+| System                       | diffsol-jax         | diffrax               | Speedup |
+| ---------------------------- | ------------------- | --------------------- | ------- |
+| Lotka-Volterra (Tsit45+sens) | 81.4 ms / 500 steps | 3075.6 ms / 500 steps | 37.78x  |
+
 <!-- BENCH:grad:end -->
 
 Both solvers converge to the same parameters. The speedup comes from diffsol running entirely in

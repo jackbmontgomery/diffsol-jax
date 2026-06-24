@@ -5,6 +5,8 @@ import jax
 import jax.numpy as jnp
 from diffsol_jax import ODEProblem, OdeSolverType
 
+jax.config.update("jax_enable_x64", True)
+
 PARAMS = jnp.array([1.5, 1.0, 0.75, 3.0])
 Y0 = jnp.array([1.0, 0.5])
 N_TIMES = 200

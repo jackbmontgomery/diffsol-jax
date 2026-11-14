@@ -37,8 +37,13 @@ def rhs(x, p, t):
     return jnp.array([-r1, r1 - r2, x[0] + x[1] + x[2] - 1.0])
 
 
-robertson = Model(rhs=rhs, init=lambda p, t: jnp.array([1.0, 0.0, 0.0]),
-                  nstates=3, nparams=3, algebraic=1)
+robertson = Model(
+    rhs=rhs,
+    init=lambda p, t: jnp.array([1.0, 0.0, 0.0]),
+    nstates=3,
+    nparams=3,
+    algebraic=1,
+)
 ```
 
 ## Consistent initial conditions

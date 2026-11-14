@@ -85,12 +85,21 @@ Requirements: Python ≥ 3.12, a Rust toolchain, cmake and a C++20 compiler, and
 3. Get a CPU PJRT plugin. jaxlib does not ship one; a prebuilt plugin for linux/amd64 is inside
    [gopjrt](https://github.com/gomlx/gopjrt)'s `gomlx_xlabuilder_linux_amd64.tar.gz` release
    asset (`lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so`), or build `pjrt_c_api_cpu_plugin.so` from
-   [openxla/xla](https://github.com/openxla/xla).
+   [openxla/xla](https://github.com/openxla/xla). Put it in `~/.local/share/pjrt/` (found
+   automatically), or point `DIFFSOL_JAX_PJRT_PLUGIN` at it.
 
-4. Run the tests:
+4. Make the package importable from the venv (once per venv):
 
    ```sh
-   export DIFFSOL_JAX_PJRT_PLUGIN=/path/to/pjrt_c_api_cpu_plugin.so
+   echo "$PWD/python" > "$(.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/diffsol_jax_dev.pth"
+   ```
+
+   After this, `uv run python` and `.venv/bin/python` import `diffsol_jax` from `python/`, with
+   the native library from `build/` — no `sys.path` changes needed in scripts.
+
+5. Run the tests:
+
+   ```sh
    .venv/bin/python -m pytest tests
    ```
 

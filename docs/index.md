@@ -66,7 +66,9 @@ def loss(p):
 
 
 grad = jax.grad(loss)(params)  # adjoint gradient w.r.t. the parameters
-many = jax.vmap(model.solve, (0, None))(jnp.stack([params] * 64), t_eval)  # one solve, 64 lanes
+many = jax.vmap(model.solve, (0, None))(
+    jnp.stack([params] * 64), t_eval
+)  # one solve, 64 lanes
 ```
 
 ## Sharp bits :knife

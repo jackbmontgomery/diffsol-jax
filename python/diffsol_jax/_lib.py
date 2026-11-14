@@ -31,22 +31,42 @@ def _default_lib_path() -> Path:
     return Path(__file__).resolve().parents[2] / "build" / f"libdiffsol_jax{ext}"
 
 
+def _find_plugin() -> str:
+    """The CPU PJRT plugin: `DIFFSOL_JAX_PJRT_PLUGIN`, or the first `pjrt_c_api_cpu_plugin.so`
+    found next to this module (a bundled plugin), in `~/.local/share/pjrt`, or in `.pjrt` at the
+    repository root (a development checkout)."""
+    env = os.environ.get("DIFFSOL_JAX_PJRT_PLUGIN")
+    if env:
+        return env
+    name = "pjrt_c_api_cpu_plugin.so"
+    here = Path(__file__).resolve()
+    for candidate in (
+        here.parent / name,
+        Path.home() / ".local" / "share" / "pjrt" / name,
+        here.parents[2] / ".pjrt" / name,
+    ):
+        if candidate.exists():
+            return str(candidate)
+    raise DiffsolJaxError(
+        "no CPU PJRT plugin found: set DIFFSOL_JAX_PJRT_PLUGIN to the path of "
+        f"{name}, or put it in ~/.local/share/pjrt"
+    )
+
+
 def lib() -> ctypes.CDLL:
     """The library, loaded and set up on the first call.
 
     Environment variables:
-    - `DIFFSOL_JAX_LIB`: the path of `libdiffsol_jax` (default: `examples/diffsol-jax/build`).
-    - `DIFFSOL_JAX_PJRT_PLUGIN`: the path of the CPU PJRT plugin (`pjrt_c_api_cpu_plugin.so`).
+    - `DIFFSOL_JAX_LIB`: the path of `libdiffsol_jax` (default: bundled, else `build/` at the
+      repository root).
+    - `DIFFSOL_JAX_PJRT_PLUGIN`: the path of the CPU PJRT plugin (`pjrt_c_api_cpu_plugin.so`;
+      default: bundled, else `~/.local/share/pjrt`, else `.pjrt` at the repository root).
     """
     global _lib
     if _lib is not None:
         return _lib
     path = os.environ.get("DIFFSOL_JAX_LIB", str(_default_lib_path()))
-    plugin = os.environ.get("DIFFSOL_JAX_PJRT_PLUGIN")
-    if not plugin:
-        raise DiffsolJaxError(
-            "set DIFFSOL_JAX_PJRT_PLUGIN to the path of the CPU PJRT plugin"
-        )
+    plugin = _find_plugin()
     so = ctypes.CDLL(path)
 
     c = ctypes

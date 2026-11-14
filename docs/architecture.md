@@ -5,16 +5,18 @@ in `jax.jit`, `jax.vmap`, `jax.grad`, `jax.jacfwd` and `jax.jacrev`.
 
 ```python
 import jax, jax.numpy as jnp
+
 jax.config.update("jax_enable_x64", True)
 from diffsol_jax import Model
 
 model = Model(
-    rhs=lambda x, p, t: p[0] * x * (1.0 - x),   # one lane: x [nstates], p [nparams]
+    rhs=lambda x, p, t: p[0] * x * (1.0 - x),  # one lane: x [nstates], p [nparams]
     init=lambda p, t: jnp.array([0.1]),
-    nstates=1, nparams=1,
+    nstates=1,
+    nparams=1,
 )
 t = jnp.linspace(0.0, 5.0, 11)
-ys = model.solve(jnp.array([1.0]), t)                     # [nt, nstates]
+ys = model.solve(jnp.array([1.0]), t)  # [nt, nstates]
 ys = jax.vmap(model.solve, (0, None))(jnp.ones((64, 1)), t)  # one solve with 64 lanes
 g = jax.grad(lambda p: model.solve(p, t).sum())(jnp.array([1.0]))
 ```

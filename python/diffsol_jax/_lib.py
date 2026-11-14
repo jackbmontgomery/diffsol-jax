@@ -44,17 +44,23 @@ def lib() -> ctypes.CDLL:
     path = os.environ.get("DIFFSOL_JAX_LIB", str(_default_lib_path()))
     plugin = os.environ.get("DIFFSOL_JAX_PJRT_PLUGIN")
     if not plugin:
-        raise DiffsolJaxError("set DIFFSOL_JAX_PJRT_PLUGIN to the path of the CPU PJRT plugin")
+        raise DiffsolJaxError(
+            "set DIFFSOL_JAX_PJRT_PLUGIN to the path of the CPU PJRT plugin"
+        )
     so = ctypes.CDLL(path)
 
     c = ctypes
     so.diffsol_jax_init.argtypes = [c.c_char_p, c.c_char_p, c.c_size_t]
     so.diffsol_jax_init.restype = c.c_int
-    so.diffsol_jax_model_new.argtypes = [c.c_size_t] * 3 + [c.c_int32] * 3 + [
-        c.c_size_t,
-        c.c_char_p,
-        c.c_size_t,
-    ]
+    so.diffsol_jax_model_new.argtypes = (
+        [c.c_size_t] * 3
+        + [c.c_int32] * 3
+        + [
+            c.c_size_t,
+            c.c_char_p,
+            c.c_size_t,
+        ]
+    )
     so.diffsol_jax_model_new.restype = c.c_int64
     so.diffsol_jax_model_free.argtypes = [c.c_int64]
     so.diffsol_jax_model_free.restype = None
@@ -71,7 +77,12 @@ def lib() -> ctypes.CDLL:
         c.c_size_t,
     ]
     so.diffsol_jax_model_add_variant.restype = c.c_int
-    so.diffsol_jax_model_has_variant.argtypes = [c.c_int64, c.c_size_t, c.c_int32, c.c_size_t]
+    so.diffsol_jax_model_has_variant.argtypes = [
+        c.c_int64,
+        c.c_size_t,
+        c.c_int32,
+        c.c_size_t,
+    ]
     so.diffsol_jax_model_has_variant.restype = c.c_int
     so.diffsol_jax_model_clear_checkpoints.argtypes = [c.c_int64]
     so.diffsol_jax_model_clear_checkpoints.restype = None

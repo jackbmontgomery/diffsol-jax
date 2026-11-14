@@ -53,7 +53,7 @@ only to trace the RHS and set the default parameter values:
 
 ```python
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
-y0     = jnp.array([1.0, 0.5])
+y0 = jnp.array([1.0, 0.5])
 
 problem = ODEProblem(lotka_volterra, y0=y0, params=params)
 ```
@@ -82,7 +82,8 @@ ts, ys = jax.jit(lambda p: problem.solve(p, t_eval))(params)
 ```python
 def loss(p):
     _, ys = problem.solve(p, t_eval)
-    return jnp.sum(ys ** 2)
+    return jnp.sum(ys**2)
+
 
 grad = jax.grad(loss)(params)
 ```

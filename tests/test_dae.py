@@ -11,7 +11,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from diffsol_jax import DiffsolJaxError, Model  # noqa: E402
+from diffsol_jax import DiffsolJaxError, Model
 
 T_EVAL = jnp.array([0.0, 0.5, 1.0, 2.0, 3.0])
 P = jnp.array([0.7, 2.0])
@@ -49,7 +49,9 @@ def test_dae_matches_analytic(solver):
 
 def test_algebraic_shortcut_matches_mass():
     ys = linear_dae().solve(P, T_EVAL)
-    np.testing.assert_allclose(linear_dae(mass=None, algebraic=1).solve(P, T_EVAL), ys, rtol=1e-9)
+    np.testing.assert_allclose(
+        linear_dae(mass=None, algebraic=1).solve(P, T_EVAL), ys, rtol=1e-9
+    )
     np.testing.assert_allclose(
         linear_dae(mass=None, algebraic=[False, True]).solve(P, T_EVAL), ys, rtol=1e-9
     )
@@ -72,21 +74,23 @@ def test_inconsistent_init_is_projected():
 @pytest.mark.parametrize("ad", ["adjoint", "forward"])
 def test_dae_grad_matches_finite_difference(ad):
     model = linear_dae(ad=ad)
-    loss = lambda p: model.solve(p, T_EVAL).sum()  # noqa: E731
+    loss = lambda p: model.solve(p, T_EVAL).sum()
     grad = jax.jit(jax.grad(loss))(P)
     np.testing.assert_allclose(grad, finite_difference(loss, P), rtol=1e-5)
 
 
 def test_dae_jacfwd_matches_jacrev():
     model = linear_dae()
-    f = lambda p: model.solve(p, T_EVAL)  # noqa: E731
-    np.testing.assert_allclose(jax.jacfwd(f)(P), jax.jacrev(f)(P), rtol=1e-6, atol=1e-10)
+    f = lambda p: model.solve(p, T_EVAL)
+    np.testing.assert_allclose(
+        jax.jacfwd(f)(P), jax.jacrev(f)(P), rtol=1e-6, atol=1e-10
+    )
 
 
 def test_dae_vmap_of_grad_matches_loop():
     model = linear_dae()
     params = jnp.array([[0.7, 2.0], [1.1, 0.5], [0.3, 3.0]])
-    loss = lambda p: model.solve(p, T_EVAL).sum()  # noqa: E731
+    loss = lambda p: model.solve(p, T_EVAL).sum()
     grads = jax.jit(jax.vmap(jax.grad(loss)))(params)
     loop = jnp.stack([jax.grad(loss)(p) for p in params])
     np.testing.assert_allclose(grads, loop, rtol=1e-6)
@@ -120,9 +124,11 @@ def test_robertson_dae_matches_ode_form():
     np.testing.assert_allclose(dae.solve(p, t), ode.solve(p, t), rtol=1e-6, atol=1e-10)
     # the adjoint of the DAE form against the adjoint of the ODE form; y2 is of order 1e-5,
     # so the gradient entries span many orders of magnitude
-    loss = lambda m: lambda q: (m.solve(q * p, t)[:, 1] * 1e4).sum()  # noqa: E731
+    loss = lambda m: lambda q: (m.solve(q * p, t)[:, 1] * 1e4).sum()
     one = jnp.ones(3)
-    np.testing.assert_allclose(jax.grad(loss(dae))(one), jax.grad(loss(ode))(one), rtol=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(loss(dae))(one), jax.grad(loss(ode))(one), rtol=1e-4
+    )
 
 
 def test_time_dependent_mass():
@@ -138,7 +144,7 @@ def test_time_dependent_mass():
     )
     ys = model.solve(P, T_EVAL)
     np.testing.assert_allclose(ys[:, 0], (1.0 + T_EVAL) ** -P[0], rtol=1e-6)
-    loss = lambda p: model.solve(p, T_EVAL).sum()  # noqa: E731
+    loss = lambda p: model.solve(p, T_EVAL).sum()
     np.testing.assert_allclose(jax.grad(loss)(P), finite_difference(loss, P), rtol=1e-5)
 
 

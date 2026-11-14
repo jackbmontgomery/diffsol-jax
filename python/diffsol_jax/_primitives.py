@@ -19,7 +19,14 @@ import math
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.experimental.hijax import HiPrim, ShapedArray, Zero, bdims_at_front, vjp_from_jvp
+from jax.experimental.hijax import (
+    HiPrim,
+    ShapedArray,
+    Zero,
+    bdims_at_front,
+    vjp_from_jvp,
+)
+
 
 def _ffi(target, out_avals, *args, model, rtol, atol):
     out_types = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in out_avals]
@@ -43,11 +50,11 @@ class _LaneOp(HiPrim):
     def __init__(self, params_aval, t_eval_aval, *, model, rtol, atol):
         self.in_avals = (params_aval, t_eval_aval)
         self.out_aval = self._out_aval(params_aval, t_eval_aval, model)
-        self.params = dict(_model=model, rtol=rtol, atol=atol)
+        self.params = {"_model": model, "rtol": rtol, "atol": atol}
         super().__init__()
 
     def _kw(self):
-        return dict(model=self._model, rtol=self.rtol, atol=self.atol)
+        return {"model": self._model, "rtol": self.rtol, "atol": self.atol}
 
     def _nbatch(self):
         return math.prod(self.in_avals[0].shape[:-1])
@@ -69,11 +76,16 @@ class _VjpFwdOp(_LaneOp):
     `handle` names it in the registry."""
 
     def _out_aval(self, params_aval, t_eval_aval, model):
-        return (_ys_aval(params_aval, t_eval_aval, model), ShapedArray(params_aval.shape[:-1], jnp.int64))
+        return (
+            _ys_aval(params_aval, t_eval_aval, model),
+            ShapedArray(params_aval.shape[:-1], jnp.int64),
+        )
 
     def expand(self, params, t_eval):
         self._model.ensure_callbacks("vjp_fwd", self._nbatch())
-        ys, handle = _ffi("diffsol_solve_vjp_fwd", self.out_aval, params, t_eval, **self._kw())
+        ys, handle = _ffi(
+            "diffsol_solve_vjp_fwd", self.out_aval, params, t_eval, **self._kw()
+        )
         return ys, handle
 
 
@@ -82,11 +94,16 @@ class _FwdSensOp(_LaneOp):
 
     def _out_aval(self, params_aval, t_eval_aval, model):
         ys = _ys_aval(params_aval, t_eval_aval, model)
-        return (ys, _f64(params_aval.shape[:-1] + (params_aval.shape[-1],) + ys.shape[-2:]))
+        return (
+            ys,
+            _f64(params_aval.shape[:-1] + (params_aval.shape[-1],) + ys.shape[-2:]),
+        )
 
     def expand(self, params, t_eval):
         self._model.ensure_callbacks("fwd_sens", self._nbatch())
-        ys, sens = _ffi("diffsol_solve_fwd_sens", self.out_aval, params, t_eval, **self._kw())
+        ys, sens = _ffi(
+            "diffsol_solve_fwd_sens", self.out_aval, params, t_eval, **self._kw()
+        )
         return ys, sens
 
 
@@ -98,14 +115,18 @@ class _Solve(_LaneOp):
 
     def expand(self, params, t_eval):
         self._model.ensure_callbacks("dense", self._nbatch())
-        (ys,) = _ffi("diffsol_solve_dense", [self.out_aval], params, t_eval, **self._kw())
+        (ys,) = _ffi(
+            "diffsol_solve_dense", [self.out_aval], params, t_eval, **self._kw()
+        )
         return ys
 
     def jvp(self, primals, tangents):
         params, t_eval = primals
         dparams, dt = tangents
         if not isinstance(dt, Zero):
-            raise NotImplementedError("diffsol_jax: no derivative with respect to t_eval")
+            raise NotImplementedError(
+                "diffsol_jax: no derivative with respect to t_eval"
+            )
         op = _FwdSensOp(jax.typeof(params), jax.typeof(t_eval), **self._kw())
         ys, sens = op(params, t_eval)
         return ys, jnp.einsum("...jtk,...j->...tk", sens, dparams)
@@ -127,7 +148,10 @@ class SolveAdjoint(_Solve):
             return (None, None)
         handle, params, t_eval = res
         prim = VjpBkwd(
-            jax.typeof(handle), jax.typeof(params), jax.typeof(t_eval), jax.typeof(g),
+            jax.typeof(handle),
+            jax.typeof(params),
+            jax.typeof(t_eval),
+            jax.typeof(g),
             **self._kw(),
         )
         return prim(handle, params, t_eval, g), None
@@ -144,27 +168,38 @@ class VjpBkwd(HiPrim):
     -> grad [*B, *D, np]. The axes of `dgdu` between the lanes and the last two are directions:
     the backward solve does all the directions together."""
 
-    def __init__(self, handle_aval, params_aval, t_eval_aval, dgdu_aval, *, model, rtol, atol):
+    def __init__(
+        self, handle_aval, params_aval, t_eval_aval, dgdu_aval, *, model, rtol, atol
+    ):
         self.in_avals = (handle_aval, params_aval, t_eval_aval, dgdu_aval)
         self.out_aval = _f64(dgdu_aval.shape[:-2] + (params_aval.shape[-1],))
-        self.params = dict(_model=model, rtol=rtol, atol=atol)
+        self.params = {"_model": model, "rtol": rtol, "atol": atol}
         super().__init__()
 
     def _kw(self):
-        return dict(model=self._model, rtol=self.rtol, atol=self.atol)
+        return {"model": self._model, "rtol": self.rtol, "atol": self.atol}
 
     def expand(self, handle, params, t_eval, dgdu):
         nbatch = math.prod(handle.shape)
         ndirections = math.prod(dgdu.shape[handle.ndim : -2])
         self._model.ensure_callbacks("vjp_bkwd", nbatch, ndirections)
         (grad,) = _ffi(
-            "diffsol_solve_vjp_bkwd", [self.out_aval], handle, params, t_eval, dgdu, **self._kw()
+            "diffsol_solve_vjp_bkwd",
+            [self.out_aval],
+            handle,
+            params,
+            t_eval,
+            dgdu,
+            **self._kw(),
         )
         return grad
 
     def _bind(self, handle, params, t_eval, dgdu):
         prim = VjpBkwd(
-            jax.typeof(handle), jax.typeof(params), jax.typeof(t_eval), jax.typeof(dgdu),
+            jax.typeof(handle),
+            jax.typeof(params),
+            jax.typeof(t_eval),
+            jax.typeof(dgdu),
             **self._kw(),
         )
         return prim(handle, params, t_eval, dgdu)

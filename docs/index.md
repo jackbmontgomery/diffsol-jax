@@ -41,7 +41,7 @@ import jax
 import jax.numpy as jnp
 from diffsol_jax import ODEProblem
 
-jax.config.update("jax_enable_x64", True) # Using f64 is recommended
+jax.config.update("jax_enable_x64", True)  # Using f64 is recommended
 
 
 def lotka_volterra(t, y, p):

@@ -1,24 +1,24 @@
 # diffsol-jax
 
 diffsol-jax is a [JAX](https://docs.jax.dev/) wrapper around
-[diffsol](https://github.com/martinjrobins/diffsol), a fast Rust ODE solver library.
+[diffsol](https://github.com/martinjrobins/diffsol), a fast Rust ODE/DAE solver library.
 
-You write an ODE right-hand side as an ordinary `jax.numpy` function. diffsol-jax traces it, lowers
-it to [DiffSL](https://martinjrobins.github.io/diffsl/), and JIT-compiles it with
-[Cranelift](https://cranelift.dev/) into native code that diffsol runs. The result is a `solve`
-callable that plugs straight into the JAX ecosystem:
+You write the ODE equations as ordinary `jax.numpy` functions. diffsol-jax derives every callback
+the solver needs (the right-hand side, its Jacobian action, the adjoint, the sensitivities, ...)
+with JAX's own transformations, lowers each to StableHLO, and executes them natively through the
+PJRT C API — the same compiler and runtime JAX itself uses. The solves run in diffsol and are
+exposed to JAX as XLA FFI custom calls. The result is a `solve` that plugs straight into the JAX
+ecosystem:
 
 - it runs inside `jax.jit`;
-- it differentiates under `jax.grad`, `jax.jvp`, `jax.jacfwd`, and `jax.vjp`;
-- it batches under `jax.vmap`.
+- it differentiates under `jax.grad`, `jax.jacrev`, `jax.jvp`, and `jax.jacfwd`;
+- it batches under `jax.vmap` — a vmapped axis becomes more lanes in a single batched solve,
+  not a loop of solves;
+- it solves **DAEs** (singular mass matrices), which pure-JAX solvers do not support.
 
-The solver loop itself lives entirely in compiled Rust, so there is no Python or XLA tracing
-overhead per step. On stiff problems this is often **orders of magnitude** faster than pure-JAX
-solvers.
-
-`diffsol-jax` is built for **fast forward solves and fast parameter gradient descent for small ODE
-systems running on CPU.** If you are fitting the parameters of a small, stiff or non-stiff system,
-this is the library for you.
+There is no translation of your Python into another language: anything JAX can trace works as an
+equation, including neural networks. The solver loop itself lives in compiled Rust, so stiff
+problems avoid XLA's per-step tracing overhead entirely.
 
 ## Installation
 
@@ -32,60 +32,68 @@ or with [uv](https://docs.astral.sh/uv/):
 uv add diffsol-jax
 ```
 
-Requires Python $\geq$ 3.11 and JAX.
+Requires Python $\geq$ 3.12 and JAX $\geq$ 0.12, plus a CPU PJRT plugin (see
+[Getting started](getting-started.md)).
 
 ## Quick example
 
 ```python
 import jax
 import jax.numpy as jnp
-from diffsol_jax import ODEProblem
+from diffsol_jax import Model
 
-jax.config.update("jax_enable_x64", True)  # Using f64 is recommended
+jax.config.update("jax_enable_x64", True)  # the solver uses f64
 
 
-def lotka_volterra(t, y, p):
-    x, yy = y[0], y[1]
-    alpha, beta, delta, gamma = p[0], p[1], p[2], p[3]
-    return jnp.array([alpha * x - beta * x * yy, delta * x * yy - gamma * yy])
+def lotka_volterra(x, p, t):
+    alpha, beta, delta, gamma = p
+    return jnp.array(
+        [alpha * x[0] - beta * x[0] * x[1], delta * x[0] * x[1] - gamma * x[1]]
+    )
 
+
+model = Model(
+    rhs=lotka_volterra,
+    init=lambda p, t: jnp.array([1.0, 0.5]),
+    nstates=2,
+    nparams=4,
+)
 
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
-y0 = jnp.array([1.0, 0.5])
-
-problem = ODEProblem(lotka_volterra, y0=y0, params=params)
-
 t_eval = jnp.linspace(0.0, 10.0, 200)
-ts, ys = problem.solve(params, t_eval)
+ys = model.solve(params, t_eval)  # [200, 2]
 
 
 def loss(p):
-    _, ys = problem.solve(p, t_eval)
-    return jnp.sum(ys**2)
+    return jnp.sum(model.solve(p, t_eval) ** 2)
 
 
-grad = jax.grad(loss)(params)  # gradient w.r.t. parameters
+grad = jax.grad(loss)(params)  # adjoint gradient w.r.t. the parameters
+many = jax.vmap(model.solve, (0, None))(jnp.stack([params] * 64), t_eval)  # one solve, 64 lanes
 ```
 
 ## Sharp bits :knife:
 
-- **Use `f64`.** diffsol is built for `f64` like most scientific solvers; JAX defaults to `f32`.
-  Enable x64 (`jax.config.update("jax_enable_x64", True)`). This is also significantly faster than
-  the native-JAX solvers.
-- **No higher-order derivatives.** `grad(grad(solve(...)))` does not work in general.
-- **`y0` is fixed.** The initial state is baked into the compiled problem at construction time and
-  cannot change between `solve` calls; gradients are not taken w.r.t. `y0`.
-- **Neural ODEs** are not supported since this requires operations that are not currently supported
-  by the lowering.
-- **Only CPU is supported**.
+- **`f64` is required.** diffsol is built for `f64` like most scientific solvers; enable x64
+  (`jax.config.update("jax_enable_x64", True)`) before creating a model.
+- **A CPU PJRT plugin is required.** jaxlib does not ship one; set `DIFFSOL_JAX_PJRT_PLUGIN` to
+  its path (see [Getting started](getting-started.md)).
+- **No higher-order derivatives.** `grad(grad(solve(...)))` does not work.
+- **No derivative with respect to `t_eval`.** Output times are constants.
+- **CPU only, for now.** The PJRT C API is backend-agnostic, so GPU arrives with diffsol's GPU
+  backend by loading the CUDA PJRT plugin instead.
+- **Small non-stiff systems are not the sweet spot.** Each solver callback costs ~2.5 µs of fixed
+  PJRT overhead; an explicit method on a tiny system is often faster in pure JAX (diffrax). Stiff
+  or batched problems are where diffsol-jax wins — see [Benchmarks](benchmarks.md).
 
 ## Next steps
 
 - [Getting started](getting-started.md): install, first forward solve, first gradient.
-- [Computing gradients](gradients.md): the forward-sensitivity maths behind `jax.grad`.
-- [From Python to DiffSL](lowering.md): how your `jax.numpy` RHS becomes a compiled solver.
-- [Benchmarks](benchmarks.md): forward and gradient timing vs diffrax.
-- [API reference](api/index.md): `ODEProblem`, solver options, type aliases.
+- [Computing gradients](gradients.md): the adjoint and forward-sensitivity maths behind
+  `jax.grad` and `jax.jacfwd`.
+- [DAEs](dae.md): singular mass matrices and algebraic constraints.
+- [Architecture](architecture.md): how the pieces fit together, with benchmarks.
+- [API reference](api/index.md): `Model` and its options.
 
 ## See also
 

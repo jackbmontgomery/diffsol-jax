@@ -1,118 +1,85 @@
 # Computing gradients
 
-`jax.grad`, `jax.jvp`, `jax.jacfwd`, and `jax.vjp` all work on `problem.solve`. This page explains
-the maths behind them.
+`jax.grad`, `jax.jacrev`, `jax.jvp`, and `jax.jacfwd` all work on `model.solve`. This page
+explains the maths behind them.
 
 ## TL;DR
 
-`diffsol-jax` differentiates by solving an augmented **forward-sensitivity** system with the same
-solver as the forward pass so there is no separate adjoint solve. This means it is extremely fast
-for small to medium sized parameter and state spaces. But the advantage reduces as we increase the
-dimensionality.
+Forward mode (`jax.jvp`, `jax.jacfwd`) always uses diffsol **forward sensitivities**: an
+augmented system solved alongside the state, efficient when the number of parameters is small to
+moderate. Reverse mode (`jax.grad`, `jax.jacrev`) depends on the model's `ad=` option:
+
+- `ad="adjoint"` (the default) solves the diffsol **adjoint** equations backwards in time — one
+  backward solve per cotangent regardless of the number of parameters;
+- `ad="forward"` transposes the forward sensitivities — cheaper for few parameters and many
+  outputs, and it avoids the backward solve entirely.
+
+Both are exact derivatives of the numerical scheme's continuous problem, computed to the solver
+tolerances. The derivative functions themselves (`∂f/∂u` actions, `∂f/∂p` actions, and their
+transposes) are derived from your `rhs`, `init` and `out` with `jax.jvp` and `jax.vjp` — you
+never write a Jacobian.
 
 ## The problem
 
-`ODEProblem` integrates an initial value problem
+`Model` integrates an initial value problem
 
 $$
-\frac{\mathrm{d}y}{\mathrm{d}t} = f(t, y, p), \qquad y(t_0) = y_0,
+M \frac{\mathrm{d}u}{\mathrm{d}t} = f(u, p, t), \qquad u(t_0) = u_0(p),
 $$
 
-where $y(t) \in \mathbb{R}^{n}$ is the state, $p \in \mathbb{R}^{m}$ the parameters, and $f$ the
-right-hand side you wrote in Python. `solve` returns the solution sampled at the times in `t_eval`.
+where $u(t) \in \mathbb{R}^{n}$ is the state, $p \in \mathbb{R}^{m}$ the parameters, and $M$ an
+optional [mass matrix](dae.md) (the identity by default). `solve` returns the solution — or the
+output function $g(u, p, t)$ if the model has one — sampled at the times in `t_eval`.
 
-For training and fitting we need the derivative of the solution with respect to the parameters. At a
-fixed time $t$ define the **sensitivity matrix**
+## Forward sensitivities
 
-$$
-S(t) \;=\; \frac{\partial y(t)}{\partial p} \;\in\; \mathbb{R}^{n \times m},
-\qquad S_{ij} = \frac{\partial y_i(t)}{\partial p_j}.
-$$
-
-## The sensitivity equations
-
-Differentiate the ODE with respect to $p$ and exchange the order of the $t$- and $p$-derivatives:
-
-$$ \frac{\mathrm{d}}{\mathrm{d}t}\,\frac{\partial y}{\partial p} = \frac{\partial f}{\partial
-y}\,\frac{\partial y}{\partial p} + \frac{\partial f}{\partial p}. $$
-
-So $S$ obeys the ODE, driven by the Jacobians of $f$:
-
-$$ \boxed{\; \frac{\mathrm{d}S}{\mathrm{d}t} = \underbrace{\frac{\partial f}{\partial y}}_{n \times
-n}\, S + \underbrace{\frac{\partial f}{\partial p}}_{n \times m}, \qquad S(t_0) = \frac{\partial
-y_0}{\partial p} = 0. \;} $$
-
-The initial condition is **zero** because `y0` is fixed at construction time and does not depend on
-$p$. (This is also why gradients w.r.t. `y0` are not available.)
-
-## The augmented system
-
-The state ODE and the sensitivity ODE are solved together as one augmented system. Stacking $y$ with
-the columns $S_{:,j}$ of the sensitivity matrix gives a state of length $n(1 + m)$:
+At a fixed time define the sensitivity matrix $S(t) = \partial u(t) / \partial p \in
+\mathbb{R}^{n \times m}$. Differentiating the ODE with respect to $p$:
 
 $$
-z = \begin{bmatrix} y \\ S_{:,0} \\ \vdots \\ S_{:,m-1} \end{bmatrix},
-\qquad
-\frac{\mathrm{d}z}{\mathrm{d}t} =
-\begin{bmatrix}
-f(t, y, p) \\
-\dfrac{\partial f}{\partial y} S_{:,0} + \dfrac{\partial f}{\partial p}\, e_0 \\
-\vdots \\
-\dfrac{\partial f}{\partial y} S_{:,m-1} + \dfrac{\partial f}{\partial p}\, e_{m-1}
-\end{bmatrix},
+M \frac{\mathrm{d}S}{\mathrm{d}t}
+= \frac{\partial f}{\partial u}\, S + \frac{\partial f}{\partial p},
+\qquad S(t_0) = \frac{\partial u_0}{\partial p}.
 $$
 
-where $e_j$ is the $j$-th unit vector in parameter space. `diffsol-jax` never forms the Jacobians
-$\partial f/\partial y$ and $\partial f/\partial p$ explicitly. Instead it notes that the $j$-th
-sensitivity block is exactly a **Jacobian–vector product** of $f$ in the direction $(S_{:,j},\,
-e_j)$:
+diffsol solves this augmented system together with the state, using the same solver and
+tolerances. The Jacobians are never formed: the $j$-th column of the right-hand side is a single
+Jacobian–vector product of $f$, which diffsol-jax derives from your `rhs` with `jax.jvp` and
+compiles like any other callback. The initial condition comes from differentiating `init`, so
+parameters of the initial state are included. Given a parameter tangent $\dot p$, forward mode
+returns $\dot u = S \dot p$.
+
+## The adjoint
+
+For `jax.grad` of a scalar loss built from the solution, the adjoint method solves
 
 $$
-\frac{\partial f}{\partial y} S_{:,j} + \frac{\partial f}{\partial p}\, e_j
-= \mathrm{jvp}\big(f;\,(y, p),\,(S_{:,j}, e_j)\big).
+M^{\top} \frac{\mathrm{d}\lambda}{\mathrm{d}t} = -\frac{\partial f}{\partial u}^{\top} \lambda,
 $$
 
-Each block is produced with a single `jax.jvp`, the augmented RHS is lowered to DiffSL just like any
-other model, and `diffsol` integrates $z$ with the same solver and tolerances as the forward solve.
-The sensitivity columns are read back out of $z$ and reshaped into the Jacobian
+backwards from $t_N$ to $t_0$, with $\lambda$ receiving a jump $\partial g_i/\partial u$ at each
+output time $t_i$ (the cotangent that JAX propagates in). The parameter gradient accumulates the
+quadrature of $\partial f/\partial p^{\top} \lambda$ along the way, plus the initial-state term
+$\partial u_0/\partial p^{\top} \lambda(t_0)$. One backward solve produces the gradient with
+respect to **all** parameters; `jax.jacrev` batches the cotangent directions through a single
+backward solve.
 
-$$
-J(t) = \frac{\partial y(t)}{\partial p} \in \mathbb{R}^{n \times m}.
-$$
+The transposed Jacobian actions are derived from your functions with `jax.vjp`, lowered, and run
+natively — exactly like the forward callbacks.
 
-## Forward and reverse mode
+### Checkpointing
 
-With $J$ in hand, both AD directions are simple linear algebra applied at each output time.
-
-**Forward mode** (`jax.jvp`, `jax.jacfwd`). Given a parameter tangent $\dot p$, the directional
-derivative of the solution is the matrix–vector product
-
-$$
-\dot y = J\,\dot p.
-$$
-
-**Reverse mode** (`jax.grad`, `jax.vjp`). The map $\dot p \mapsto J\,\dot p$ is linear, so JAX
-obtains the vector–Jacobian product for free by automatically transposing it:
-
-$$
-\bar p = J^{\top}\,\bar y.
-$$
-
-`diffsol-jax` only defines the forward (`custom_jvp`) rule; JAX's
-[automatic transposition](https://docs.jax.dev/en/latest/notebooks/Custom_derivative_rules_for_Python_code.html)
-derives reverse mode from it. This is why `jax.grad` works without a hand-written adjoint.
-
-!!! note "Cost"
-
-    The augmented state has length $n(1 + m)$, so the forward-sensitivity solve scales with the
-    number of parameters $m$. This is efficient when $m$ is small to moderate. The augmented solver
-    is compiled and cached on first differentiation, so repeated gradient steps pay no further
-    compilation cost.
+The backward solve needs the forward trajectory. The forward pass keeps a checkpoint in C++ and
+hands JAX an opaque `int64` handle; the backward solve interpolates from the checkpoint. A model
+keeps at most `max_checkpoints` checkpoints. The backward solve also receives `params` and
+`t_eval`, so if its checkpoint has been evicted (for example in `jax.grad` of a `lax.scan` with
+many solves) it **re-runs the forward solve** and the gradient is unchanged: `max_checkpoints`
+controls memory, never correctness. `Model.num_recomputes()` counts these recomputations.
 
 ## Limitations
 
-- **No higher-order derivatives.** `grad(grad(...))` is not supported in general — the sensitivity
-  solve itself is not re-differentiated.
-- **No gradient w.r.t. `y0`.** The initial state is baked into the compiled DiffSL source, fixing
-  $S(t_0) = 0$.
-- **No gradient w.r.t. `t_eval`.** Output times are treated as constants; their tangents are zero.
+- **No higher-order derivatives.** `grad(grad(...))` is not supported — the sensitivity and
+  adjoint solves are not themselves differentiated.
+- **No gradient with respect to `t_eval`.** Output times are constants; their cotangent is a
+  symbolic zero.
+- **No `dM/dp`.** A mass matrix must not depend on the parameters — see [DAEs](dae.md).

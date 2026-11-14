@@ -1,4 +1,10 @@
-# diffsol-jax (prototype)
+# Architecture
+
+!!! note
+
+    This page is the design document of the PJRT architecture, vendored from the
+    [diffsol `diffsol-jax2` example](https://github.com/martinjrobins/diffsol/tree/diffsol-jax2/examples/diffsol-jax)
+    that this library is built on. The measurements are from that branch (Apple M-series, CPU).
 
 Use diffsol solves as JAX operations. Write the ODE equations as JAX functions. Use the solves
 in `jax.jit`, `jax.vmap`, `jax.grad`, `jax.jacfwd` and `jax.jacrev`.
@@ -163,15 +169,15 @@ Limits of the prototype: CPU only, `f64` only, no `root`/`reset`, no derivative 
 3. libdiffsol_jax (needs `jax` in the active Python, for the XLA FFI header):
 
    ```sh
-   cmake -S examples/diffsol-jax -B examples/diffsol-jax/build -DCMAKE_BUILD_TYPE=Release
-   cmake --build examples/diffsol-jax/build
+   cmake -S . -B ./build -DCMAKE_BUILD_TYPE=Release
+   cmake --build ./build
    ```
 
 4. Run the tests:
 
    ```sh
    export DIFFSOL_JAX_PJRT_PLUGIN=/path/to/xla/bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so
-   python -m pytest examples/diffsol-jax/tests
+   python -m pytest ./tests
    ```
 
 5. Run the benchmark (needs `pip install diffrax`, and diffsol-c built with the LLVM diffsl
@@ -179,10 +185,10 @@ Limits of the prototype: CPU only, `f64` only, no `root`/`reset`, no derivative 
    --features diffsl-llvm17`):
 
    ```sh
-   clang -O3 -shared -fPIC -I target/release/include examples/diffsol-jax/bench/models_native.c \
-     -o examples/diffsol-jax/build/libmodels_native.dylib
-   python examples/diffsol-jax/bench/bench.py target/release/deps/libdiffsol_c.dylib \
-     examples/diffsol-jax/build/libmodels_native.dylib [--models robertson,lotka_volterra,oscillators]
+   clang -O3 -shared -fPIC -I target/release/include ./bench/models_native.c \
+     -o ./build/libmodels_native.dylib
+   python ./bench/bench.py target/release/deps/libdiffsol_c.dylib \
+     ./build/libmodels_native.dylib [--models robertson,lotka_volterra,oscillators]
    ```
 
    Load `target/release/deps/libdiffsol_c.dylib`: it is the path that `libdiffsol_jax` links

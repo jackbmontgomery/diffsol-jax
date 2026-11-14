@@ -67,6 +67,14 @@ def lib() -> ctypes.CDLL:
         return _lib
     path = os.environ.get("DIFFSOL_JAX_LIB", str(_default_lib_path()))
     plugin = _find_plugin()
+    # the plugin's XLA logs spurious error-level messages on every compilation (for example
+    # "library_matcher.h: Unsupported fusion type"); solver failures reach the user through
+    # DiffsolJaxError, so quieten the plugin's stderr. jax sets TF_CPP_MIN_LOG_LEVEL to "1" when
+    # it is unset, so treat unset and "1" as "not chosen" and raise them; leave any other value
+    # (for example "0" to see the logs) as the user's deliberate choice. This runs before the
+    # plugin is loaded (at the first solve), which is when the level is read.
+    if os.environ.get("TF_CPP_MIN_LOG_LEVEL") in (None, "1"):
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     so = ctypes.CDLL(path)
 
     c = ctypes

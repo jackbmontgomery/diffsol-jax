@@ -35,6 +35,30 @@ Reverse mode (`ad="adjoint"`, the default) uses the diffsol adjoint with checkpo
 mode (`ad="forward"`) uses diffsol forward sensitivities. A `jax.vmap` over `params` becomes more
 lanes in a single batched solve, not a loop of solves.
 
+## DAEs
+
+A singular mass matrix gives a semi-explicit index-1 DAE, solved with the implicit solvers
+(`bdf`, the default, `esdirk34` or `tr_bdf2`) and differentiable like any other model. Write the
+algebraic equations as rows of `rhs` and mark them with `algebraic=` (an int: the last states
+are algebraic; or a boolean mask):
+
+```python
+# y' = -p0 * y   and   0 = z - p1 * y
+model = Model(
+    rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
+    init=lambda p, t: jnp.array([1.0, p[1]]),
+    nstates=2, nparams=2,
+    algebraic=1,
+)
+```
+
+The initial state is projected onto the algebraic constraints automatically (diffsol solves the
+algebraic variables at `t0`), and the gradients account for it. For a general (time-dependent)
+mass matrix, give `mass=lambda v, p, t: ...`, the action `M(t) v`, which must be linear in `v`
+and must not use `p` (the diffsol sensitivities have no `dM/dp` term, so a parameter-dependent
+mass would give a wrong gradient and is rejected — fold such parameters into `rhs` instead).
+Higher-index DAEs must be reduced to index 1 first.
+
 ## Building (development)
 
 Requirements: Python ≥ 3.12, a Rust toolchain, cmake and a C++20 compiler, and a CPU PJRT plugin.

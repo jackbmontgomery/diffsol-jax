@@ -15,12 +15,14 @@
 The functions act on one lane. diffsol calls the callbacks (compiled with the PJRT C API) for
 all the lanes of a solve together. `jax.vmap` over `params` gives more lanes in one solve.
 
-Reverse mode (`ad="adjoint"`, the default) uses the diffsol VJP: the forward solve keeps a
-checkpoint in C++, and gives an int64 handle to the backward solve. The model keeps at most
-`max_checkpoints` checkpoints. A backward solve whose checkpoint was freed runs the forward
-solve again (from the `params` and `t_eval` that it also gets), so it gives the same gradient;
-`max_checkpoints` controls only the memory.
-Forward mode (`ad="forward"`) uses diffsol forward sensitivities; `jax.grad` also works with it.
+The solve is a `jax.experimental.hijax.HiPrim` (see `_primitives`). Forward mode (`jax.jvp`,
+`jax.jacfwd`) uses diffsol forward sensitivities on every model. Reverse mode (`jax.grad`,
+`jax.jacrev`) depends on `ad`: with `ad="adjoint"` (the default) it uses the diffsol adjoint
+(the forward solve keeps a checkpoint in C++ and gives an int64 handle to the backward solve;
+the model keeps at most `max_checkpoints` checkpoints, and a backward solve whose checkpoint
+was freed runs the forward solve again from the `params` and `t_eval` that it also gets, so
+`max_checkpoints` controls only the memory); with `ad="forward"` it is the transpose of the
+forward sensitivities.
 
 There is no derivative with respect to `t_eval`.
 """
@@ -82,7 +84,6 @@ class Model:
         )
         self._finalizer = weakref.finalize(self, so.diffsol_jax_model_free, self.id)
         self._compile_options = None
-        _primitives.MODELS[self.id] = self
         self.solve = self._make_solve()
 
     # ---- callbacks ----------------------------------------------------------------------------
@@ -159,7 +160,10 @@ class Model:
     # ---- solve --------------------------------------------------------------------------------
 
     def _make_solve(self):
-        kw = dict(model_id=self.id, rtol=self.rtol, atol=self.atol)
+        kw = dict(model=self, rtol=self.rtol, atol=self.atol)
+        prim_cls = (
+            _primitives.SolveAdjoint if self.ad == "adjoint" else _primitives.SolveForward
+        )
 
         def check(params, t_eval):
             params = jnp.asarray(params, jnp.float64)
@@ -170,40 +174,11 @@ class Model:
                 raise DiffsolJaxError("t_eval must have one axis")
             return params, t_eval
 
-        if self.ad == "adjoint":
-
-            @jax.custom_vjp
-            def solve(params, t_eval):
-                return _primitives.solve_dense_p.bind(params, t_eval, **kw)
-
-            def fwd(params, t_eval):
-                ys, handle = _primitives.solve_vjp_fwd_p.bind(params, t_eval, **kw)
-                # params and t_eval let the backward solve run the forward solve again if the
-                # registry has freed the checkpoint
-                return ys, (handle, params, t_eval)
-
-            def bwd(res, ct):
-                handle, params, t_eval = res
-                grad = _primitives.solve_vjp_bkwd_p.bind(handle, params, t_eval, ct, **kw)
-                return grad, jnp.zeros_like(t_eval)
-
-            solve.defvjp(fwd, bwd)
-        else:
-
-            @jax.custom_jvp
-            def solve(params, t_eval):
-                return _primitives.solve_dense_p.bind(params, t_eval, **kw)
-
-            @solve.defjvp
-            def _(primals, tangents):
-                params, t_eval = primals
-                dparams, _ = tangents
-                ys, sens = _primitives.solve_fwd_sens_p.bind(params, t_eval, **kw)
-                return ys, jnp.einsum("...jtk,...j->...tk", sens, dparams)
-
         def run(params, t_eval):
             """Solve for each lane of `params [..., nparams]` at the times `t_eval [nt]`.
             Return `ys [..., nt, nout]` (`nout = nstates` if the model has no `out`)."""
-            return solve(*check(params, t_eval))
+            params, t_eval = check(params, t_eval)
+            prim = prim_cls(jax.typeof(params), jax.typeof(t_eval), **kw)
+            return prim(params, t_eval)
 
         return run

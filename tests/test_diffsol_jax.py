@@ -130,6 +130,25 @@ def test_forward_and_adjoint_jacobians_agree():
     np.testing.assert_allclose(rev, fwd, rtol=1e-6, atol=1e-10)
 
 
+def test_jacobians_with_either_ad_mode():
+    # one primitive carries both AD rules: jacfwd works on an adjoint model (the forward
+    # sensitivities), and jacrev on a forward model (their transpose)
+    p = jnp.array([1.2, 1.5])
+    fwd = jax.jacfwd(lambda p: logistic("adjoint").solve(p, T_EVAL))(p)
+    rev = jax.jacrev(lambda p: logistic("forward").solve(p, T_EVAL))(p)
+    np.testing.assert_allclose(rev, fwd, rtol=1e-6, atol=1e-10)
+
+
+def test_vmap_of_jacrev():
+    # the vmapped lane axis and the jacrev direction axis go through one backward solve
+    model = logistic()
+    params = jnp.array([[0.5, 1.0], [1.0, 1.0], [2.0, 1.5]])
+    f = lambda p: model.solve(p, T_EVAL)  # noqa: E731
+    jac = jax.jit(jax.vmap(jax.jacrev(f)))(params)
+    loop = jnp.stack([jax.jacrev(f)(p) for p in params])
+    np.testing.assert_allclose(jac, loop, rtol=1e-6, atol=1e-10)
+
+
 def test_vmap_of_grad():
     model = logistic()
     params = jnp.array([[0.5, 1.0], [1.0, 1.0], [2.0, 1.5]])
@@ -191,15 +210,19 @@ def _bkwd(model, handle, params, ct):
     """Call the backward primitive directly, as a wrong residual would reach it."""
     from diffsol_jax import _primitives
 
-    kw = dict(model_id=model.id, rtol=model.rtol, atol=model.atol)
-    return _primitives.solve_vjp_bkwd_p.bind(handle, params, T_EVAL, ct, **kw)
+    kw = dict(model=model, rtol=model.rtol, atol=model.atol)
+    prim = _primitives.VjpBkwd(
+        jax.typeof(handle), jax.typeof(params), jax.typeof(T_EVAL), jax.typeof(ct), **kw
+    )
+    return prim(handle, params, T_EVAL, ct)
 
 
 def _fwd(model, params):
     from diffsol_jax import _primitives
 
-    kw = dict(model_id=model.id, rtol=model.rtol, atol=model.atol)
-    return _primitives.solve_vjp_fwd_p.bind(params, T_EVAL, **kw)
+    kw = dict(model=model, rtol=model.rtol, atol=model.atol)
+    prim = _primitives._VjpFwdOp(jax.typeof(params), jax.typeof(T_EVAL), **kw)
+    return prim(params, T_EVAL)
 
 
 def test_handle_with_other_params_is_not_used():

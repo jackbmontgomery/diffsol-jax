@@ -38,3 +38,11 @@ target_compile_options(diffsol_jax PRIVATE -Wall -Wextra)
 set_target_properties(diffsol_jax PROPERTIES
   BUILD_RPATH "${DIFFSOL_C_DIR}"
   INSTALL_RPATH "$<IF:$<PLATFORM_ID:Darwin>,@loader_path,$ORIGIN>")
+
+# A wheel build (scikit-build-core) bundles libdiffsol_jax and libdiffsol_c in the package,
+# next to the Python modules that load them.
+if(SKBUILD)
+  install(TARGETS diffsol_jax LIBRARY DESTINATION diffsol_jax)
+  file(GLOB DIFFSOL_C_SHARED "${DIFFSOL_C_DIR}/libdiffsol_c.*")
+  install(FILES ${DIFFSOL_C_SHARED} DESTINATION diffsol_jax)
+endif()

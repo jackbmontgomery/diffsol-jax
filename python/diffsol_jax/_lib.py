@@ -24,6 +24,10 @@ class DiffsolJaxError(RuntimeError):
 
 def _default_lib_path() -> Path:
     ext = ".dylib" if sys.platform == "darwin" else ".so"
+    bundled = Path(__file__).resolve().parent / f"libdiffsol_jax{ext}"
+    if bundled.exists():
+        return bundled
+    # a development build: cmake -S . -B build at the repository root
     return Path(__file__).resolve().parents[2] / "build" / f"libdiffsol_jax{ext}"
 
 

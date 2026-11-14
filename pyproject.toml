@@ -1,13 +1,13 @@
 [build-system]
-requires = ["maturin>=1.5", "jax>=0.10.2"]
-build-backend = "maturin"
+requires = ["scikit-build-core>=0.11", "jax>=0.12"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "diffsol-jax"
-version = "0.0.2"
-description = "JAX bindings for the diffsol Rust ODE solver, callable inside jax.jit and differentiable with jax.grad."
+version = "0.1.0"
+description = "diffsol solves as JAX operations: write the ODE equations as JAX functions, use them in jax.jit, jax.vmap and jax.grad."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Jack Montgomery", email = "jackbmontgomery2001@gmail.com" }]
 keywords = ["jax", "ode", "differential-equations", "diffsol", "scientific-computing", "autodiff"]
@@ -17,14 +17,12 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dependencies = [
-    "jax>=0.10.2",
+    "jax>=0.12",
 ]
 
 [project.urls]
@@ -32,11 +30,16 @@ Homepage = "https://github.com/jackbmontgomery/diffsol-jax"
 Repository = "https://github.com/jackbmontgomery/diffsol-jax"
 Issues = "https://github.com/jackbmontgomery/diffsol-jax/issues"
 
+[tool.scikit-build]
+wheel.packages = ["python/diffsol_jax"]
+cmake.version = ">=3.20"
+# DIFFSOL_C_DIR must point at a built diffsol-c (libdiffsol_c + include/diffsol.h),
+# e.g. CMAKE_ARGS="-DDIFFSOL_C_DIR=/path/to/diffsol/target/release" pip wheel .
 
-[tool.maturin]
-features = ["pyo3/extension-module"]
-python-source = "python"
-module-name = "diffsol_jax._rust"
+[tool.uv]
+# The native library is built with cmake outside of uv (see docs/architecture.md);
+# uv manages only the Python environment.
+package = false
 
 [tool.ruff.lint]
 ignore = ["F722"]
@@ -46,9 +49,6 @@ bench = [
     "diffrax>=0.7.2",
 ]
 dev = [
-    "diffrax>=0.7.2",
-    "ipython>=9.12.0",
-    "optax>=0.2.8",
     "pytest>=9.0.3",
     "scipy>=1.17.1",
 ]

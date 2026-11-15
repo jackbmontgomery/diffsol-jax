@@ -12,7 +12,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from diffsol_jax import Model  # noqa: E402
+from diffsol_jax import Model
 
 T_EVAL = jnp.array([0.0, 0.5, 1.0, 2.0, 4.0])
 X0 = 0.1
@@ -118,7 +118,9 @@ def test_grad(ad):
     model = logistic(ad)
     p = jnp.array([1.2, 1.5])
     grad = jax.jit(jax.grad(lambda p: loss(model, p)))(p)
-    np.testing.assert_allclose(grad, finite_difference(lambda p: loss(model, p), p), rtol=1e-5)
+    np.testing.assert_allclose(
+        grad, finite_difference(lambda p: loss(model, p), p), rtol=1e-5
+    )
 
 
 def test_forward_and_adjoint_jacobians_agree():
@@ -143,7 +145,7 @@ def test_vmap_of_jacrev():
     # the vmapped lane axis and the jacrev direction axis go through one backward solve
     model = logistic()
     params = jnp.array([[0.5, 1.0], [1.0, 1.0], [2.0, 1.5]])
-    f = lambda p: model.solve(p, T_EVAL)  # noqa: E731
+    f = lambda p: model.solve(p, T_EVAL)
     jac = jax.jit(jax.vmap(jax.jacrev(f)))(params)
     loop = jnp.stack([jax.jacrev(f)(p) for p in params])
     np.testing.assert_allclose(jac, loop, rtol=1e-6, atol=1e-10)
@@ -162,7 +164,7 @@ def test_vmap_of_grad():
 def test_robertson_grad():
     model = robertson()
     t = jnp.array([0.0, 1.0, 10.0, 40.0])
-    f = lambda logp: jnp.sum(model.solve(jnp.exp(logp), t)[:, 0])  # noqa: E731
+    f = lambda logp: jnp.sum(model.solve(jnp.exp(logp), t)[:, 0])
     logp = jnp.log(ROBERTSON_P)
     grad = jax.jit(jax.grad(f))(logp)
     np.testing.assert_allclose(grad, finite_difference(f, logp, 1e-5), rtol=1e-3)
@@ -210,7 +212,7 @@ def _bkwd(model, handle, params, ct):
     """Call the backward primitive directly, as a wrong residual would reach it."""
     from diffsol_jax import _primitives
 
-    kw = dict(model=model, rtol=model.rtol, atol=model.atol)
+    kw = {"model": model, "rtol": model.rtol, "atol": model.atol}
     prim = _primitives.VjpBkwd(
         jax.typeof(handle), jax.typeof(params), jax.typeof(T_EVAL), jax.typeof(ct), **kw
     )
@@ -220,7 +222,7 @@ def _bkwd(model, handle, params, ct):
 def _fwd(model, params):
     from diffsol_jax import _primitives
 
-    kw = dict(model=model, rtol=model.rtol, atol=model.atol)
+    kw = {"model": model, "rtol": model.rtol, "atol": model.atol}
     prim = _primitives._VjpFwdOp(jax.typeof(params), jax.typeof(T_EVAL), **kw)
     return prim(params, T_EVAL)
 

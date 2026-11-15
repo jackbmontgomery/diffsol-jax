@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # diffsol main with the TensorView fix (#453); the diffsol-c 0.9.0 API
+  DIFFSOL_REF: 99f0f3b23705a2c909689de52b72a83ccadf510e
+  GOPJRT_VERSION: v0.10.0
+
 jobs:
   lint:
     name: Lint
@@ -19,74 +24,131 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - name: Ruff check
         run: uvx ruff check .
       - name: Ruff format check
         run: uvx ruff format --check .
-      - name: Cargo fmt
-        run: cargo fmt --all -- --check
-      - name: Install jax (build dependency)
-        run: |
-          uv venv .venv --python 3.11
-          uv pip install --python .venv "jax>=0.4.31"
-      - name: Cargo clippy
-        env:
-          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: cargo clippy --all-targets -- -D warnings
 
-  wheels:
-    name: Wheels (${{ matrix.platform.runner }})
-    runs-on: ${{ matrix.platform.runner }}
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - runner: ubuntu-22.04
-            target: x86_64
-          - runner: macos-14
-            target: arm64
-          - runner: windows-latest
-            target: AMD64
+        include:
+          - os: ubuntu-22.04
+            plugin_asset: gomlx_xlabuilder_linux_amd64.tar.gz
+            plugin_path: lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so
+          - os: macos-14
+            plugin_asset: gopjrt_cpu_darwin_arm64.tar.gz
+            plugin_path: pjrt_c_api_cpu_plugin.so
     steps:
       - uses: actions/checkout@v4
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21.3
+      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout diffsol
+        uses: actions/checkout@v4
+        with:
+          repository: martinjrobins/diffsol
+          ref: ${{ env.DIFFSOL_REF }}
+          path: diffsol
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: diffsol
+      - name: Build diffsol-c
+        working-directory: diffsol
+        run: cargo build -p diffsol-c --release
+      - name: Cache PJRT CPU plugin
+        id: plugin-cache
+        uses: actions/cache@v4
+        with:
+          path: .pjrt
+          key: pjrt-${{ matrix.os }}-${{ env.GOPJRT_VERSION }}
+      - name: Download PJRT CPU plugin
+        if: steps.plugin-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .pjrt
+          curl -sL -o plugin.tar.gz \
+            "https://github.com/gomlx/gopjrt/releases/download/${{ env.GOPJRT_VERSION }}/${{ matrix.plugin_asset }}"
+          tar -xzf plugin.tar.gz "${{ matrix.plugin_path }}"
+          cp "${{ matrix.plugin_path }}" .pjrt/pjrt_c_api_cpu_plugin.so
+          rm -rf plugin.tar.gz lib
+      - name: Install Python environment
+        run: uv sync --group dev
+      - name: Build libdiffsol_jax
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DDIFFSOL_C_DIR="$GITHUB_WORKSPACE/diffsol/target/release" \
+            -DXLA_FFI_INCLUDE_DIR="$(.venv/bin/python -c 'import jax.ffi; print(jax.ffi.include_dir())')"
+          cmake --build build -j4
+      - name: Run tests
         env:
-          CIBW_BUILD: "cp311-* cp312-* cp313-*"
-          CIBW_SKIP: "*-musllinux_*"
-          CIBW_ARCHS_LINUX: ${{ matrix.platform.target }}
-          CIBW_ARCHS_MACOS: ${{ matrix.platform.target }}
-          CIBW_ARCHS_WINDOWS: ${{ matrix.platform.target }}
-          CIBW_BUILD_VERBOSITY: "1"
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
-          CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain stable -y"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin" RUSTFLAGS="-C linker-features=-lld"'
-          CIBW_ENVIRONMENT_MACOS: 'PATH="$PATH:$HOME/.cargo/bin" MACOSX_DEPLOYMENT_TARGET=14.0'
-      - name: Upload wheels
+          DIFFSOL_JAX_PJRT_PLUGIN: ${{ github.workspace }}/.pjrt/pjrt_c_api_cpu_plugin.so
+        run: .venv/bin/python -m pytest tests -q
+
+  wheels:
+    name: Wheel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            plugin_asset: gomlx_xlabuilder_linux_amd64.tar.gz
+            plugin_path: lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so
+          - os: macos-14
+            plugin_asset: gopjrt_cpu_darwin_arm64.tar.gz
+            plugin_path: pjrt_c_api_cpu_plugin.so
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout diffsol
+        uses: actions/checkout@v4
+        with:
+          repository: martinjrobins/diffsol
+          ref: ${{ env.DIFFSOL_REF }}
+          path: diffsol
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: diffsol
+      - name: Build diffsol-c
+        working-directory: diffsol
+        run: cargo build -p diffsol-c --release
+      - name: Build wheel
+        env:
+          CMAKE_ARGS: -DDIFFSOL_C_DIR=${{ github.workspace }}/diffsol/target/release
+        run: uv build --wheel --out-dir dist
+      - name: Cache PJRT CPU plugin
+        id: plugin-cache
+        uses: actions/cache@v4
+        with:
+          path: .pjrt
+          key: pjrt-${{ matrix.os }}-${{ env.GOPJRT_VERSION }}
+      - name: Download PJRT CPU plugin
+        if: steps.plugin-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .pjrt
+          curl -sL -o plugin.tar.gz \
+            "https://github.com/gomlx/gopjrt/releases/download/${{ env.GOPJRT_VERSION }}/${{ matrix.plugin_asset }}"
+          tar -xzf plugin.tar.gz "${{ matrix.plugin_path }}"
+          cp "${{ matrix.plugin_path }}" .pjrt/pjrt_c_api_cpu_plugin.so
+          rm -rf plugin.tar.gz lib
+      - name: Test wheel
+        # the tests run from outside the repository, so that `import diffsol_jax` resolves to
+        # the installed wheel (with its bundled libdiffsol_jax and libdiffsol_c), not to python/
+        env:
+          DIFFSOL_JAX_PJRT_PLUGIN: ${{ github.workspace }}/.pjrt/pjrt_c_api_cpu_plugin.so
+        run: |
+          uv venv wheel-venv --python 3.13
+          uv pip install --python wheel-venv/bin/python dist/*.whl pytest
+          cp -r tests "$RUNNER_TEMP/tests"
+          "$GITHUB_WORKSPACE/wheel-venv/bin/python" -m pytest "$RUNNER_TEMP/tests" -q
+      - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
-          path: ./wheelhouse/*.whl
-      - uses: astral-sh/setup-uv@v5
-      - name: Test wheel (cp311)
-        shell: bash
-        run: |
-          uv venv .venv --python 3.11
-          uv pip install --python .venv "$(echo ./wheelhouse/*cp311*.whl)"
-          uv pip install --python .venv --group dev
-          if [ -d .venv/bin ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python; fi
-          "$PY" -m pytest -s -v
-      - name: Test wheel (cp313)
-        shell: bash
-        run: |
-          uv venv .venv313 --python 3.13
-          uv pip install --python .venv313 "$(echo ./wheelhouse/*cp313*.whl)"
-          uv pip install --python .venv313 --group dev
-          if [ -d .venv313/bin ]; then PY=.venv313/bin/python; else PY=.venv313/Scripts/python; fi
-          "$PY" -m pytest -s -v
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl
 
   sdist:
     name: Source distribution
@@ -103,10 +165,12 @@ jobs:
           path: dist
 
   release:
+    # TODO before the first PyPI release: build the linux wheel in a manylinux container
+    # (PyPI rejects plain linux_x86_64 wheels) and audit the bundled libraries.
     name: Release
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [lint, wheels, sdist]
+    needs: [lint, test, wheels, sdist]
     environment: pypi
     permissions:
       id-token: write

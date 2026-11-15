@@ -1,7 +1,3 @@
-# Rust
-target/
-Cargo.lock
-
 # Python
 __pycache__/
 *.py[oc]
@@ -9,9 +5,12 @@ __pycache__/
 dist/
 build/
 wheels/
+*.whl
 .venv/
 .python-version
 .cache/
+.pytest_cache/
+.ruff_cache/
 
 # C++
 *.o
@@ -21,12 +20,11 @@ wheels/
 *.dSYM/
 compile_commands.json
 
-# maturin / mixed builds
-*.whl
-
 # editor
 .DS_Store
 
 # site
 site/
+
+# PJRT CPU plugin (dev)
 .pjrt/

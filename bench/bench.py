@@ -39,7 +39,7 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-from diffsol_jax import Model  # noqa: E402
+from diffsol_jax import Model
 
 RTOL, ATOL = 1e-6, 1e-8
 SOLVER_IDS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
@@ -112,63 +112,69 @@ def lane_scale(B):
 
 def models(oscillator_sizes):
     out = {
-        "robertson": dict(
-            nstates=3,
-            nparams=3,
-            rhs=robertson_rhs,
-            y0=np.array([1.0, 0.0, 0.0]),
-            params=lambda B: np.stack(
+        "robertson": {
+            "nstates": 3,
+            "nparams": 3,
+            "rhs": robertson_rhs,
+            "y0": np.array([1.0, 0.0, 0.0]),
+            "params": lambda B: np.stack(
                 [0.04 * lane_scale(B), 3e7 * np.ones(B), 1e4 * lane_scale(B)], axis=-1
             ),
-            t_eval=np.concatenate([[0.0], np.logspace(-4, 4, 40)]),
-            solver="bdf",
-            diffrax_solver=diffrax.Kvaerno5(),
-            dt0=1e-6,
-            diffsl=b"""
+            "t_eval": np.concatenate([[0.0], np.logspace(-4, 4, 40)]),
+            "solver": "bdf",
+            "diffrax_solver": diffrax.Kvaerno5(),
+            "dt0": 1e-6,
+            "diffsl": b"""
 in_i { k1 = 0.04, k2 = 30000000.0, k3 = 10000.0 }
 u_i { x = 1.0, y = 0.0, z = 0.0 }
 F_i { -k1 * x + k3 * y * z, k1 * x - k2 * y * y - k3 * y * z, k2 * y * y }
 out_i { x, y, z }
 """,
-            native=("robertson_desc", None),
-        ),
-        "lotka_volterra": dict(
-            nstates=2,
-            nparams=4,
-            rhs=lv_rhs,
-            y0=np.array([10.0, 5.0]),
-            params=lambda B: np.stack(
-                [1.5 * lane_scale(B), np.ones(B), 0.1 * np.ones(B), 3.0 * lane_scale(B)], axis=-1
+            "native": ("robertson_desc", None),
+        },
+        "lotka_volterra": {
+            "nstates": 2,
+            "nparams": 4,
+            "rhs": lv_rhs,
+            "y0": np.array([10.0, 5.0]),
+            "params": lambda B: np.stack(
+                [
+                    1.5 * lane_scale(B),
+                    np.ones(B),
+                    0.1 * np.ones(B),
+                    3.0 * lane_scale(B),
+                ],
+                axis=-1,
             ),
-            t_eval=np.linspace(0.0, 20.0, 41),
-            solver="tsit45",
-            diffrax_solver=diffrax.Tsit5(),
-            dt0=None,
-            diffsl=b"""
+            "t_eval": np.linspace(0.0, 20.0, 41),
+            "solver": "tsit45",
+            "diffrax_solver": diffrax.Tsit5(),
+            "dt0": None,
+            "diffsl": b"""
 in_i { a = 1.5, b = 1.0, c = 0.1, d = 3.0 }
 u_i { x = 10.0, y = 5.0 }
 F_i { a * x - b * x * y, c * x * y - d * y }
 out_i { x, y }
 """,
-            native=("lotka_volterra_desc", None),
-        ),
+            "native": ("lotka_volterra_desc", None),
+        },
     }
     for n in oscillator_sizes:
-        out[f"oscillators_{n}"] = dict(
-            nstates=2 * n,
-            nparams=3,
-            rhs=osc_rhs,
-            y0=osc_init(n),
-            params=lambda B: np.stack(
+        out[f"oscillators_{n}"] = {
+            "nstates": 2 * n,
+            "nparams": 3,
+            "rhs": osc_rhs,
+            "y0": osc_init(n),
+            "params": lambda B: np.stack(
                 [lane_scale(B), 0.1 * np.ones(B), 0.05 * np.ones(B)], axis=-1
             ),
-            t_eval=np.linspace(0.0, 20.0, 41),
-            solver="tsit45",
-            diffrax_solver=diffrax.Tsit5(),
-            dt0=None,
-            diffsl=osc_diffsl(n),
-            native=("oscillators_desc", n),
-        )
+            "t_eval": np.linspace(0.0, 20.0, 41),
+            "solver": "tsit45",
+            "diffrax_solver": diffrax.Tsit5(),
+            "dt0": None,
+            "diffsl": osc_diffsl(n),
+            "native": ("oscillators_desc", n),
+        }
     return out
 
 
@@ -202,12 +208,31 @@ class DiffsolC:
         lib.diffsol_jit_backend_type_count.restype = sz
         lib.diffsol_jit_backend_type_name.argtypes = [c.c_int32]
         lib.diffsol_jit_backend_type_name.restype = c.c_char_p
-        lib.diffsol_ode_new_callbacks_f64.argtypes = [vp, c.c_int32, c.c_int32, c.c_int32, sz]
+        lib.diffsol_ode_new_callbacks_f64.argtypes = [
+            vp,
+            c.c_int32,
+            c.c_int32,
+            c.c_int32,
+            sz,
+        ]
         lib.diffsol_ode_new_callbacks_f64.restype = vp
-        lib.diffsol_ode_set_rtol.argtypes = lib.diffsol_ode_set_atol.argtypes = [vp, c.c_double]
+        lib.diffsol_ode_set_rtol.argtypes = lib.diffsol_ode_set_atol.argtypes = [
+            vp,
+            c.c_double,
+        ]
         lib.diffsol_ode_solve_dense.argtypes = [vp, dp, sz, sz, dp, sz, c.POINTER(vp)]
-        lib.diffsol_ode_solve_vjp_fwd.argtypes = [vp, dp, sz, sz, dp, sz] + [c.POINTER(vp)] * 2
-        lib.diffsol_ode_solve_vjp_bkwd.argtypes = [vp, vp, dp, sz, sz, sz, c.POINTER(vp)]
+        lib.diffsol_ode_solve_vjp_fwd.argtypes = [vp, dp, sz, sz, dp, sz] + [
+            c.POINTER(vp)
+        ] * 2
+        lib.diffsol_ode_solve_vjp_bkwd.argtypes = [
+            vp,
+            vp,
+            dp,
+            sz,
+            sz,
+            sz,
+            c.POINTER(vp),
+        ]
         lib.diffsol_solution_wrapper_get_ys.argtypes = [vp, c.POINTER(vp)]
         lib.diffsol_tensor_ptr.argtypes = [vp]
         lib.diffsol_tensor_ptr.restype = c.POINTER(c.c_double)
@@ -246,7 +271,9 @@ class DiffsolC:
 
     def diffsl_ode(self, code, solver):
         backend = self.jit_backend("llvm")
-        return self._ode(self.lib.diffsol_ode_new_jit(code, backend, 0, 0, SOLVER_IDS[solver]))
+        return self._ode(
+            self.lib.diffsol_ode_new_jit(code, backend, 0, 0, SOLVER_IDS[solver])
+        )
 
     def native_ode(self, native, solver, B):
         fn, n = native
@@ -257,7 +284,9 @@ class DiffsolC:
             n_ref = c.c_size_t(n)
             self._keep.append(n_ref)  # user_data: must outlive the ODE
             getattr(self.native, fn)(desc, c.byref(n_ref))
-        return self._ode(self.lib.diffsol_ode_new_callbacks_f64(desc, 0, 0, SOLVER_IDS[solver], B))
+        return self._ode(
+            self.lib.diffsol_ode_new_callbacks_f64(desc, 0, 0, SOLVER_IDS[solver], B)
+        )
 
     @staticmethod
     def ptr(a):
@@ -273,7 +302,9 @@ class DiffsolC:
             )
         )
         self.check(lib.diffsol_solution_wrapper_get_ys(sol, c.byref(ys)))
-        out = np.ctypeslib.as_array(lib.diffsol_tensor_ptr(ys), (lanes * nt * nout,)).copy()
+        out = np.ctypeslib.as_array(
+            lib.diffsol_tensor_ptr(ys), (lanes * nt * nout,)
+        ).copy()
         lib.diffsol_tensor_free(ys)
         lib.diffsol_solution_wrapper_free(sol)
         return out.reshape(lanes, nt, nout)
@@ -285,7 +316,14 @@ class DiffsolC:
         nt, npar = len(t_eval), p.shape[-1]
         self.check(
             lib.diffsol_ode_solve_vjp_fwd(
-                ode, self.ptr(p), npar, lanes, self.ptr(t_eval), nt, c.byref(sol), c.byref(ckpt)
+                ode,
+                self.ptr(p),
+                npar,
+                lanes,
+                self.ptr(t_eval),
+                nt,
+                c.byref(sol),
+                c.byref(ckpt),
             )
         )
         dgdu = np.zeros((lanes, nt, nout))
@@ -295,7 +333,9 @@ class DiffsolC:
                 ode, ckpt, self.ptr(dgdu), nout, nt, lanes, c.byref(grad)
             )
         )
-        out = np.ctypeslib.as_array(lib.diffsol_tensor_ptr(grad), (lanes * npar,)).copy()
+        out = np.ctypeslib.as_array(
+            lib.diffsol_tensor_ptr(grad), (lanes * npar,)
+        ).copy()
         lib.diffsol_tensor_free(grad)
         lib.diffsol_vjp_checkpoint_free(ckpt)
         lib.diffsol_solution_wrapper_free(sol)
@@ -391,8 +431,12 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
             t_ng = bench(lambda: dc.grad(nat, p, t_eval, B, nst))
         dc.lib.diffsol_ode_free(nat)
 
-        ys_dsl = np.stack([dc.solve(diffsl, p[b].copy(), t_eval, 1, nst)[0] for b in range(B)])
-        t_ds = bench(lambda: [dc.solve(diffsl, p[b].copy(), t_eval, 1, nst) for b in range(B)])
+        ys_dsl = np.stack(
+            [dc.solve(diffsl, p[b].copy(), t_eval, 1, nst)[0] for b in range(B)]
+        )
+        t_ds = bench(
+            lambda: [dc.solve(diffsl, p[b].copy(), t_eval, 1, nst) for b in range(B)]
+        )
         t_dg = nan
         if do_grad:
             t_dg = bench(
@@ -406,34 +450,36 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
 
         scale = float(np.max(np.abs(ys)))
         gscale = float(np.max(np.abs(g_jax))) if do_grad else nan
-        row = dict(
-            model=name,
-            B=B,
-            solve=dict(jax=t_js, native=t_ns, diffsl=t_ds, diffrax=t_xs),
-            grad=dict(jax=t_jg, native=t_ng, diffsl=t_dg, diffrax=t_xg),
-            callbacks_per_solve=ncalls,
-            diffrax_steps=nsteps,
+        row = {
+            "model": name,
+            "B": B,
+            "solve": {"jax": t_js, "native": t_ns, "diffsl": t_ds, "diffrax": t_xs},
+            "grad": {"jax": t_jg, "native": t_ng, "diffsl": t_dg, "diffrax": t_xg},
+            "callbacks_per_solve": ncalls,
+            "diffrax_steps": nsteps,
             # agreement with diffsol-jax, relative to max |y| and max |grad|
-            ys_diff=dict(
-                native=float(np.max(np.abs(ys_nat - ys))) / scale,
-                diffsl=float(np.max(np.abs(ys_dsl - ys))) / scale,
-                diffrax=float(np.max(np.abs(ys_dfx - ys))) / scale,
+            "ys_diff": {
+                "native": float(np.max(np.abs(ys_nat - ys))) / scale,
+                "diffsl": float(np.max(np.abs(ys_dsl - ys))) / scale,
+                "diffrax": float(np.max(np.abs(ys_dfx - ys))) / scale,
+            },
+            "grad_diff_native": (
+                float(np.max(np.abs(g_nat - g_jax.reshape(B, npar)))) / gscale
+                if do_grad
+                else nan
             ),
-            grad_diff_native=(
-                float(np.max(np.abs(g_nat - g_jax.reshape(B, npar)))) / gscale if do_grad else nan
-            ),
-            tape_gib_estimate=est,
-        )
+            "tape_gib_estimate": est,
+        }
         rows.append(row)
         # one line per row at once, so a crash does not lose the finished rows
         out.write(json.dumps(row) + "\n")
         out.flush()
         s, g, d = row["solve"], row["grad"], row["ys_diff"]
         print(
-            f"{name:16s} B={B:5d} | solve ms: jax {s['jax']*1e3:8.2f} native "
-            f"{s['native']*1e3:8.2f} diffsl {s['diffsl']*1e3:8.2f} diffrax {s['diffrax']*1e3:8.2f}"
-            f" | grad ms: jax {g['jax']*1e3:8.2f} native {g['native']*1e3:8.2f} diffsl "
-            f"{g['diffsl']*1e3:8.2f} diffrax {g['diffrax']*1e3:8.2f} | callbacks {ncalls}, "
+            f"{name:16s} B={B:5d} | solve ms: jax {s['jax'] * 1e3:8.2f} native "
+            f"{s['native'] * 1e3:8.2f} diffsl {s['diffsl'] * 1e3:8.2f} diffrax {s['diffrax'] * 1e3:8.2f}"
+            f" | grad ms: jax {g['jax'] * 1e3:8.2f} native {g['native'] * 1e3:8.2f} diffsl "
+            f"{g['diffsl'] * 1e3:8.2f} diffrax {g['diffrax'] * 1e3:8.2f} | callbacks {ncalls}, "
             f"diffrax steps {nsteps} | ys diff: native {d['native']:.1e} diffsl "
             f"{d['diffsl']:.1e} diffrax {d['diffrax']:.1e}; grad diff native "
             f"{row['grad_diff_native']:.1e}",
@@ -451,7 +497,7 @@ def markdown(rows):
     ]
 
     def ms(x):
-        return "skipped" if x != x else f"{x*1e3:.3g}"
+        return "skipped" if x != x else f"{x * 1e3:.3g}"
 
     for r in rows:
         s, g = r["solve"], r["grad"]
@@ -478,7 +524,9 @@ def main():
     )
     ap.add_argument(
         "--out",
-        default=str(Path(__file__).resolve().parents[1] / "build" / "bench_results.jsonl"),
+        default=str(
+            Path(__file__).resolve().parents[1] / "build" / "bench_results.jsonl"
+        ),
         help="append one JSON line per result row",
     )
     args = ap.parse_args()
@@ -487,7 +535,9 @@ def main():
     all_models = models(sizes)
     names = []
     for name in args.models.split(","):
-        names += [f"oscillators_{n}" for n in sizes] if name == "oscillators" else [name]
+        names += (
+            [f"oscillators_{n}" for n in sizes] if name == "oscillators" else [name]
+        )
     dc = DiffsolC(args.libdiffsol_c, args.libmodels_native)
     rows = []
     with open(args.out, "a") as out:

@@ -10,8 +10,8 @@ The `P` axis is only on `v` and `y`: the other inputs are the same for each `P`.
 """
 
 import enum
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -57,9 +57,9 @@ class Equations:
     init: Callable
     nstates: int
     nparams: int
-    out: Optional[Callable] = None
+    out: Callable | None = None
     nout: int = 0
-    mass: Optional[Callable] = None
+    mass: Callable | None = None
 
     def available(self):
         """The callbacks of this model."""
@@ -103,8 +103,18 @@ def _lane_fn(eq: Equations, cb: CallbackId):
     table = {
         C.RHS: ("fn", lambda x, p, t: f(x, p, t), 0, n),
         C.RHS_JAC: ("mul", lambda x, p, t, v: _jvp(lambda x: f(x, p, t), x, v), n, n),
-        C.RHS_SENS: ("mul", lambda x, p, t, v: _jvp(lambda p: f(x, p, t), p, v), npar, n),
-        C.RHS_ADJOINT: ("mul", lambda x, p, t, v: _neg_vjp(lambda x: f(x, p, t), x, v), n, n),
+        C.RHS_SENS: (
+            "mul",
+            lambda x, p, t, v: _jvp(lambda p: f(x, p, t), p, v),
+            npar,
+            n,
+        ),
+        C.RHS_ADJOINT: (
+            "mul",
+            lambda x, p, t, v: _neg_vjp(lambda x: f(x, p, t), x, v),
+            n,
+            n,
+        ),
         C.RHS_SENS_ADJOINT: (
             "mul",
             lambda x, p, t, v: _neg_vjp(lambda p: f(x, p, t), p, v),
@@ -112,7 +122,12 @@ def _lane_fn(eq: Equations, cb: CallbackId):
             npar,
         ),
         C.INIT: ("init", lambda p, t: g(p, t), 0, n),
-        C.INIT_SENS: ("initmul", lambda p, t, v: _jvp(lambda p: g(p, t), p, v), npar, n),
+        C.INIT_SENS: (
+            "initmul",
+            lambda p, t, v: _jvp(lambda p: g(p, t), p, v),
+            npar,
+            n,
+        ),
         C.INIT_SENS_ADJOINT: (
             "initmul",
             lambda p, t, v: _neg_vjp(lambda p: g(p, t), p, v),
@@ -125,13 +140,20 @@ def _lane_fn(eq: Equations, cb: CallbackId):
         table[C.MASS_ADJOINT] = (
             "mass",
             # M^T v (not negative), from the VJP of the linear map v -> M v
-            lambda v, p, t, beta, y: jax.vjp(lambda u: m(u, p, t), v)[1](v)[0] + beta * y,
+            lambda v, p, t, beta, y: (
+                jax.vjp(lambda u: m(u, p, t), v)[1](v)[0] + beta * y
+            ),
             n,
             n,
         )
     if h is not None:
         table[C.OUT] = ("fn", lambda x, p, t: h(x, p, t), 0, no)
-        table[C.OUT_JAC] = ("mul", lambda x, p, t, v: _jvp(lambda x: h(x, p, t), x, v), n, no)
+        table[C.OUT_JAC] = (
+            "mul",
+            lambda x, p, t, v: _jvp(lambda x: h(x, p, t), x, v),
+            n,
+            no,
+        )
         table[C.OUT_SENS] = (
             "mul",
             lambda x, p, t, v: _jvp(lambda p: h(x, p, t), p, v),

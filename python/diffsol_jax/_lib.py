@@ -31,30 +31,64 @@ def _default_lib_path() -> Path:
     return Path(__file__).resolve().parents[2] / "build" / f"libdiffsol_jax{ext}"
 
 
+def _find_plugin() -> str:
+    """The CPU PJRT plugin: `DIFFSOL_JAX_PJRT_PLUGIN`, or the first `pjrt_c_api_cpu_plugin.so`
+    found next to this module (a bundled plugin), in `~/.local/share/pjrt`, or in `.pjrt` at the
+    repository root (a development checkout)."""
+    env = os.environ.get("DIFFSOL_JAX_PJRT_PLUGIN")
+    if env:
+        return env
+    name = "pjrt_c_api_cpu_plugin.so"
+    here = Path(__file__).resolve()
+    for candidate in (
+        here.parent / name,
+        Path.home() / ".local" / "share" / "pjrt" / name,
+        here.parents[2] / ".pjrt" / name,
+    ):
+        if candidate.exists():
+            return str(candidate)
+    raise DiffsolJaxError(
+        "no CPU PJRT plugin found: set DIFFSOL_JAX_PJRT_PLUGIN to the path of "
+        f"{name}, or put it in ~/.local/share/pjrt"
+    )
+
+
 def lib() -> ctypes.CDLL:
     """The library, loaded and set up on the first call.
 
     Environment variables:
-    - `DIFFSOL_JAX_LIB`: the path of `libdiffsol_jax` (default: `examples/diffsol-jax/build`).
-    - `DIFFSOL_JAX_PJRT_PLUGIN`: the path of the CPU PJRT plugin (`pjrt_c_api_cpu_plugin.so`).
+    - `DIFFSOL_JAX_LIB`: the path of `libdiffsol_jax` (default: bundled, else `build/` at the
+      repository root).
+    - `DIFFSOL_JAX_PJRT_PLUGIN`: the path of the CPU PJRT plugin (`pjrt_c_api_cpu_plugin.so`;
+      default: bundled, else `~/.local/share/pjrt`, else `.pjrt` at the repository root).
     """
     global _lib
     if _lib is not None:
         return _lib
     path = os.environ.get("DIFFSOL_JAX_LIB", str(_default_lib_path()))
-    plugin = os.environ.get("DIFFSOL_JAX_PJRT_PLUGIN")
-    if not plugin:
-        raise DiffsolJaxError("set DIFFSOL_JAX_PJRT_PLUGIN to the path of the CPU PJRT plugin")
+    plugin = _find_plugin()
+    # the plugin's XLA logs spurious error-level messages on every compilation (for example
+    # "library_matcher.h: Unsupported fusion type"); solver failures reach the user through
+    # DiffsolJaxError, so quieten the plugin's stderr. jax sets TF_CPP_MIN_LOG_LEVEL to "1" when
+    # it is unset, so treat unset and "1" as "not chosen" and raise them; leave any other value
+    # (for example "0" to see the logs) as the user's deliberate choice. This runs before the
+    # plugin is loaded (at the first solve), which is when the level is read.
+    if os.environ.get("TF_CPP_MIN_LOG_LEVEL") in (None, "1"):
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     so = ctypes.CDLL(path)
 
     c = ctypes
     so.diffsol_jax_init.argtypes = [c.c_char_p, c.c_char_p, c.c_size_t]
     so.diffsol_jax_init.restype = c.c_int
-    so.diffsol_jax_model_new.argtypes = [c.c_size_t] * 3 + [c.c_int32] * 3 + [
-        c.c_size_t,
-        c.c_char_p,
-        c.c_size_t,
-    ]
+    so.diffsol_jax_model_new.argtypes = (
+        [c.c_size_t] * 3
+        + [c.c_int32] * 3
+        + [
+            c.c_size_t,
+            c.c_char_p,
+            c.c_size_t,
+        ]
+    )
     so.diffsol_jax_model_new.restype = c.c_int64
     so.diffsol_jax_model_free.argtypes = [c.c_int64]
     so.diffsol_jax_model_free.restype = None
@@ -71,7 +105,12 @@ def lib() -> ctypes.CDLL:
         c.c_size_t,
     ]
     so.diffsol_jax_model_add_variant.restype = c.c_int
-    so.diffsol_jax_model_has_variant.argtypes = [c.c_int64, c.c_size_t, c.c_int32, c.c_size_t]
+    so.diffsol_jax_model_has_variant.argtypes = [
+        c.c_int64,
+        c.c_size_t,
+        c.c_int32,
+        c.c_size_t,
+    ]
     so.diffsol_jax_model_has_variant.restype = c.c_int
     so.diffsol_jax_model_clear_checkpoints.argtypes = [c.c_int64]
     so.diffsol_jax_model_clear_checkpoints.restype = None

@@ -32,6 +32,9 @@ Issues = "https://github.com/jackbmontgomery/diffsol-jax/issues"
 
 [tool.scikit-build]
 wheel.packages = ["python/diffsol_jax"]
+# the package calls the native library with ctypes (no CPython ABI), so one py3 wheel per
+# platform covers every Python version
+wheel.py-api = "py3"
 cmake.version = ">=3.20"
 # DIFFSOL_C_DIR must point at a built diffsol-c (libdiffsol_c + include/diffsol.h),
 # e.g. CMAKE_ARGS="-DDIFFSOL_C_DIR=/path/to/diffsol/target/release" pip wheel .
@@ -44,13 +47,23 @@ package = false
 [tool.ruff.lint]
 ignore = ["F722"]
 
+[tool.ruff.lint.per-file-ignores]
+# the vendored benchmark: x != x is a NaN check, and the loop captures are deliberate
+"bench/bench.py" = ["B023", "PLR0124", "ISC004"]
+
 [dependency-groups]
 bench = [
     "diffrax>=0.7.2",
 ]
 dev = [
+    "equinox>=0.13.7",
+    "ipython>=9.18.1",
+    "matplotlib>=3.11.2",
+    "optax>=0.2.9",
+    "pandas>=3.1.1",
     "pytest>=9.0.3",
     "scipy>=1.17.1",
+    "tqdm>=4.70.1",
 ]
 docs = [
     "mkdocstrings-python>=2.0.3",

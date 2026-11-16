@@ -1,18 +1,11 @@
-"""Tests of diffsol_jax. Needs `DIFFSOL_JAX_PJRT_PLUGIN` (the CPU PJRT plugin), and
-`libdiffsol_jax` in `examples/diffsol-jax/build` (or `DIFFSOL_JAX_LIB`)."""
-
-import sys
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-jax.config.update("jax_enable_x64", True)
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
 from diffsol_jax import Model
+
+jax.config.update("jax_enable_x64", True)
 
 T_EVAL = jnp.array([0.0, 0.5, 1.0, 2.0, 4.0])
 X0 = 0.1

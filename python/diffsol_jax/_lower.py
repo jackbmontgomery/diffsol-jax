@@ -1,14 +1,3 @@
-"""Make the diffsol callbacks from the user functions with JAX AD, and lower them to StableHLO.
-
-The user functions act on one lane: `rhs(x[nstates], p[nparams], t)`, `init(p, t)`,
-`out(x, p, t)` and `mass(v, p, t)` (which must be linear in `v`).
-
-Each executable acts on all the lanes, with the row-major layouts that the C++ trampolines give
-(see `src/callbacks.h`):
-    x: [B, nstates]   p: [B, nparams]   v: [B, P, nv]   y: [B, P, ny]   t, beta: []
-The `P` axis is only on `v` and `y`: the other inputs are the same for each `P`.
-"""
-
 import enum
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,8 +27,7 @@ class CallbackId(enum.IntEnum):
 
 
 # The callbacks that diffsol calls with more than one lane on `P`: in a forward sensitivity solve
-# (`P = nparams`) and in a VJP backward solve (`P = ndirections`). See the diffsol-c test
-# `lane_layout_rule`.
+# (`P = nparams`) and in a VJP backward solve (`P = ndirections`).
 FWD_SENS_MULTI_P = (CallbackId.RHS_JAC, CallbackId.OUT_JAC, CallbackId.MASS)
 VJP_BKWD_MULTI_P = (
     CallbackId.RHS_ADJOINT,

@@ -1,5 +1,3 @@
-"""Load `libdiffsol_jax`, start the PJRT runtime, and register the XLA FFI targets."""
-
 import ctypes
 import os
 import sys

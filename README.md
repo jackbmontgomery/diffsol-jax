@@ -37,6 +37,38 @@ Reverse mode (`ad="adjoint"`, the default) uses the diffsol adjoint with checkpo
 mode (`ad="forward"`) uses diffsol forward sensitivities. A `jax.vmap` over `params` becomes more
 lanes in a single batched solve, not a loop of solves.
 
+## Neural ODEs
+
+For ML, define the problem as one `System`: the fields are the differentiable inputs (a frozen
+dataclass pytree — an initial state, a network, rate constants) and the methods are the
+equations. `jax.grad` returns a pytree of the same structure, so optax updates it directly:
+
+```python
+from diffsol_jax import Model, System
+
+class WeatherSystem(System):
+    y0: jax.Array    # the initial state, trained with everything else
+    net: eqx.Module  # any pytree of weights
+
+    def init(self, t):
+        return self.y0
+
+    def __call__(self, x, t):
+        return self.net(x)
+
+system = WeatherSystem(y0=y0, net=net)
+model = Model(system, ode_solver="tsit45")  # nstates inferred
+
+loss = lambda s: jnp.sum((model.solve(s, t_eval) - data) ** 2)
+grads = jax.grad(loss)(system)              # a WeatherSystem of gradients
+system = optax.apply_updates(system, optimizer.update(grads, opt_state, system)[0])
+```
+
+Float-array fields are trainable; everything else is fixed at model construction. See
+[examples/neural-ode-weather-prediction](examples/neural-ode-weather-prediction) for a full
+training loop, and the docs for the rules (static fields, `out`/`mass` overrides, batching by
+`jax.vmap` over leaves).
+
 ## DAEs
 
 A singular mass matrix gives a semi-explicit index-1 DAE, solved with the implicit solvers

@@ -1,52 +1,15 @@
-"""diffsol solves as JAX operations, with the ODE equations given as JAX functions.
-
-    import jax, jax.numpy as jnp
-    jax.config.update("jax_enable_x64", True)
-    from diffsol_jax import Model
-
-    model = Model(
-        rhs=lambda x, p, t: -p[0] * x,
-        init=lambda p, t: jnp.ones(2),
-        nstates=2, nparams=1,
-    )
-    ys = model.solve(params, t_eval)       # params [..., nparams] -> ys [..., nt, nout]
-    jax.grad(lambda p: model.solve(p, t_eval).sum())(params)
-
-The functions act on one lane. diffsol calls the callbacks (compiled with the PJRT C API) for
-all the lanes of a solve together. `jax.vmap` over `params` gives more lanes in one solve.
-
-The solve is a `jax.experimental.hijax.HiPrim` (see `_primitives`). Forward mode (`jax.jvp`,
-`jax.jacfwd`) uses diffsol forward sensitivities on every model. Reverse mode (`jax.grad`,
-`jax.jacrev`) depends on `ad`: with `ad="adjoint"` (the default) it uses the diffsol adjoint
-(the forward solve keeps a checkpoint in C++ and gives an int64 handle to the backward solve;
-the model keeps at most `max_checkpoints` checkpoints, and a backward solve whose checkpoint
-was freed runs the forward solve again from the `params` and `t_eval` that it also gets, so
-`max_checkpoints` controls only the memory); with `ad="forward"` it is the transpose of the
-forward sensitivities.
-
-A model with a mass matrix solves `M(t) u' = f(u, p, t)`: `mass(v, p, t)` is the action `M v`,
-linear in `v` and independent of `p` (the diffsol sensitivities have no dM/dp term, so a
-parameter-dependent mass is rejected). A singular `M` gives a semi-explicit index-1 DAE;
-`algebraic=` (an int or a boolean mask) is a shortcut for the diagonal mass with zeros on the
-algebraic states. The
-initial state is projected onto the algebraic constraints (diffsol solves the algebraic
-variables at `t0`), the gradients account for it, and a DAE needs an implicit solver
-(`bdf`, `esdirk34` or `tr_bdf2`). Higher-index DAEs must be reduced to index 1 first.
-
-There is no derivative with respect to `t_eval`.
-"""
-
 import weakref
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from . import _lib, _lower, _primitives
+from . import _lib, _lower, _params, _primitives
 from ._lib import DiffsolJaxError
 from ._lower import CallbackId, Equations
+from ._params import System
 
-__all__ = ["CallbackId", "DiffsolJaxError", "Model"]
+__all__ = ["CallbackId", "DiffsolJaxError", "Model", "System"]
 
 _ODE_SOLVERS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
 _LINEAR_SOLVERS = {"default": 0, "lu": 1, "klu": 2}
@@ -54,9 +17,11 @@ _MATRIX_TYPES = {"nalgebra_dense": 0, "faer_dense": 1, "faer_sparse": 2}
 
 
 def _diagonal_mass(algebraic, nstates):
-    """The diagonal mass of `algebraic`: an int (the last `algebraic` states are algebraic) or a
-    boolean mask of length `nstates` (True marks an algebraic state)."""
-    if isinstance(algebraic, (int, jnp.integer)) and not isinstance(algebraic, bool):
+    """The diagonal mass of `algebraic`: an int meaning that last `algebraic` states are algebraic
+    or a boolean mask of length `nstates` with True denoting an algebraic state."""
+    if isinstance(algebraic, bool):
+        raise DiffsolJaxError("algebraic must be an int or a boolean mask, not a bool")
+    if isinstance(algebraic, (int, jnp.integer)):
         if not 0 < algebraic < nstates:
             raise DiffsolJaxError(
                 f"algebraic must be in [1, {nstates - 1}], got {algebraic}"
@@ -73,10 +38,7 @@ def _diagonal_mass(algebraic, nstates):
 
 
 def _check_mass_is_linear(mass, nstates, nparams):
-    """`mass(v, p, t)` must be the action of a matrix on `v`: check linearity in `v`, and that
-    the matrix does not depend on `p`, at a random point, once, at model construction. The
-    sensitivity and adjoint equations of diffsol have no dM/dp term, so the gradient of a
-    parameter-dependent mass would silently miss it."""
+    """Check at a random point that `mass(v, p, t)` is linear in `v` and independent of `p`"""
     rng = np.random.default_rng(0)
     v1, v2 = (
         jnp.asarray(rng.standard_normal(nstates)),
@@ -105,16 +67,21 @@ def _check_mass_is_linear(mass, nstates, nparams):
 
 
 class Model:
+    """A diffsol solver for one problem: `Model(system, **options)`, or the functional form
+    `Model(rhs, init, nstates, ...)` with `nparams` (flat parameters) or `variables_like`
+    (pytree parameters). `solve(params, t_eval)` returns `ys [..., nt, nout]`."""
+
     def __init__(
         self,
-        rhs,
-        init,
-        nstates,
-        nparams,
+        rhs=None,
+        init=None,
+        nstates=None,
+        nparams=None,
         out=None,
         nout=0,
         mass=None,
         algebraic=None,
+        variables_like=None,
         ode_solver="bdf",
         linear_solver="default",
         matrix_type="nalgebra_dense",
@@ -124,13 +91,53 @@ class Model:
         max_checkpoints=8,
     ):
         if not jax.config.read("jax_enable_x64"):
-            raise DiffsolJaxError(
-                "diffsol_jax needs jax_enable_x64 (the solver uses f64)"
-            )
+            raise DiffsolJaxError("diffsol_jax needs jax_enable_x64")
+        if isinstance(rhs, _params.System):
+            system = rhs
+            given = {
+                "init": init,
+                "nstates": nstates,
+                "nparams": nparams,
+                "out": out,
+                "mass": mass,
+                "variables_like": variables_like,
+            }
+            extra = [k for k, v in given.items() if v is not None]
+            extra += ["nout"] if nout else []
+            if extra:
+                raise DiffsolJaxError(
+                    "Model(system) takes the equations and sizes from the System: "
+                    f"do not also give {', '.join(extra)}"
+                )
+            rhs = lambda x, v, t: v(x, t)  # noqa: E731
+            init = lambda v, t: v.init(t)  # noqa: E731
+            t0 = jax.ShapeDtypeStruct((), jnp.float64)
+            init_shape = jax.eval_shape(system.init, t0).shape
+            if len(init_shape) != 1:
+                raise DiffsolJaxError(
+                    f"System.init(t) must return a 1-D state, got shape {init_shape}"
+                )
+            nstates = init_shape[0]
+            if type(system).out is not _params.System.out:
+                out = lambda x, v, t: v.out(x, t)  # noqa: E731
+                x0 = jax.ShapeDtypeStruct((nstates,), jnp.float64)
+                nout = jax.eval_shape(system.out, x0, t0).shape[0]
+            if type(system).mass is not _params.System.mass:
+                mass = lambda v, p, t: p.mass(v, t)  # noqa: E731
+            variables_like = system
+        elif rhs is None or init is None or nstates is None:
+            raise DiffsolJaxError("give a System, or rhs, init and nstates")
         if (out is None) != (nout == 0):
             raise DiffsolJaxError("give out and nout > 0 together")
         if ad not in ("adjoint", "forward"):
             raise DiffsolJaxError("ad must be 'adjoint' or 'forward'")
+        if (nparams is None) == (variables_like is None):
+            raise DiffsolJaxError("give exactly one of nparams and variables_like")
+        self.spec = None
+        if variables_like is not None:
+            self.spec = _params.ParamSpec(variables_like)
+            nparams = self.spec.nparams
+            rhs, init, out, mass = self.spec.bind_equations(rhs, init, out, mass)
         if algebraic is not None:
             if mass is not None:
                 raise DiffsolJaxError("give mass or algebraic, not both")
@@ -142,6 +149,7 @@ class Model:
                 "a model with a mass matrix (a DAE) needs an implicit solver: "
                 "ode_solver='bdf', 'esdirk34' or 'tr_bdf2'"
             )
+        assert nparams is not None
         self.eq = Equations(rhs, init, nstates, nparams, out, nout, mass)
         self.nstates, self.nparams, self.nout = nstates, nparams, nout
         self.nsolution = nout if nout > 0 else nstates
@@ -247,19 +255,21 @@ class Model:
         )
 
         def check(params, t_eval):
-            params = jnp.asarray(params, jnp.float64)
             t_eval = jnp.asarray(t_eval, jnp.float64)
+            if t_eval.ndim != 1:
+                raise DiffsolJaxError("t_eval must have one axis")
+            if self.spec is not None:
+                return self.spec.ravel(params), t_eval
+            params = jnp.asarray(params, jnp.float64)
             if params.ndim < 1 or params.shape[-1] != self.nparams:
                 raise DiffsolJaxError(
                     f"params must have the shape [..., {self.nparams}]"
                 )
-            if t_eval.ndim != 1:
-                raise DiffsolJaxError("t_eval must have one axis")
             return params, t_eval
 
-        def run(params, t_eval):
-            """Solve for each lane of `params [..., nparams]` at the times `t_eval [nt]`.
-            Return `ys [..., nt, nout]` (`nout = nstates` if the model has no `out`)."""
+        def run(params, t_eval) -> jax.Array:
+            """Solve for `params` (`[..., nparams]`, or the variables pytree) at the times
+            `t_eval [nt]`; returns `ys [..., nt, nout]`."""
             params, t_eval = check(params, t_eval)
             prim = prim_cls(jax.typeof(params), jax.typeof(t_eval), **kw)
             return prim(params, t_eval)

@@ -9,12 +9,19 @@ a `solve` attribute that is compatible with `jax.jit`, `jax.grad`, `jax.jacrev`,
 | Symbol                                                          | Kind      | Description                                   |
 | --------------------------------------------------------------- | --------- | --------------------------------------------- |
 | [`Model`](diffsol_jax.md#diffsol_jax.Model)                     | class     | A compiled model; exposes `solve`.            |
+| [`System`](diffsol_jax.md#diffsol_jax.System)                   | class     | Abstract base: variables as fields, equations as methods — see [Systems](../getting-started.md#systems-classes-instead-of-flat-vectors). |
 | [`DiffsolJaxError`](diffsol_jax.md#diffsol_jax.DiffsolJaxError) | exception | Raised on configuration and solver errors.    |
 
-## The equation functions
+## The equations
 
-All functions act on **one lane**: `x` has shape `[nstates]`, `p` has shape `[nparams]`, and `t`
-is a scalar. Any traceable JAX code is allowed.
+The recommended form is a `System`: `Model(system, **options)` derives the equations from the
+methods `init(self, t)`, `__call__(self, x, t)`, and the optional overrides `out(self, x, t)`
+and `mass(self, v, t)`, with `nstates`/`nout` inferred by shape tracing.
+
+In the functional form, all functions act on **one lane**: `x` has shape `[nstates]`, `p` has
+shape `[nparams]`, and `t` is a scalar. Any traceable JAX code is allowed. With
+`variables_like=` instead of `nparams`, `p` is instead the variables pytree (an `eqx.Module`,
+a dict, ...).
 
 | Function        | Signature      | Required | Description                                             |
 | --------------- | -------------- | -------- | ------------------------------------------------------- |
@@ -26,13 +33,16 @@ is a scalar. Any traceable JAX code is allowed.
 ## Solving
 
 ```python
-model = Model(rhs, init, nstates=2, nparams=4, ode_solver="bdf", rtol=1e-6, atol=1e-6)
+model = Model(system, ode_solver="bdf", rtol=1e-6, atol=1e-6)        # from a System
+model = Model(rhs, init, nstates=2, nparams=4)                       # functional form
 ys = model.solve(params, t_eval)
 ```
 
 `solve(params, t_eval)` takes `params` of shape `[..., nparams]` (leading axes are solved as
 lanes of one batched solve) and `t_eval` of shape `[nt]`, and returns `ys` of shape
-`[..., nt, nout]` (`nout = nstates` if the model has no `out`).
+`[..., nt, nout]` (`nout = nstates` if the model has no `out`). For a `System` model (or
+`variables_like=`), `solve(system, t_eval)` takes the pytree instead — the current field
+values, e.g. mid-training — and batching is by `jax.vmap` over its leaves.
 
 ## Solvers
 

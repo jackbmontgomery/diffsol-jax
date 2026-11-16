@@ -1,10 +1,10 @@
 """
 Neural ODE weather prediction.
 
-A replica of diffsol's Rust `neural-ode-weather-prediction` example: an MLP drives the right
-hand side of an ODE, trained to fit the Delhi monthly climate data (mean temperature, humidity,
-wind speed, mean pressure) with `diffsol_jax.Model`. The training window grows round by round
-(a standard trick to avoid getting stuck fitting noise before the broad trend)
+The MLP drives the right hand side of an ODE, trained to fit the Delhi monthly climate data
+(mean temperature, humidity, wind speed, mean pressure) with `diffsol_jax.Model`. The whole
+problem is one `System`: the initial state and the network as fields (trained together, optax
+updates the instance directly), the equations as methods.
 """
 
 import pathlib
@@ -16,11 +16,9 @@ import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
 import optax
-from jax.flatten_util import ravel_pytree
 from tqdm import trange
 
-from diffsol_jax import Model
-from model import NeuralNetwork
+from diffsol_jax import Model, System
 
 jax.config.update("jax_enable_x64", True)
 
@@ -43,51 +41,61 @@ def load_data():
 
 
 ts, ys = load_data()
-y0 = ys[0]
-
-key = jr.key(0)
-neural_net = NeuralNetwork(data_dim=DATA_DIM, key=key)
-nn_params, static = eqx.partition(neural_net, eqx.is_array)
-nn_p0, unravel_nn_params = ravel_pytree(nn_params)
 
 
-def rhs(x, p, _t):
-    params = unravel_nn_params(p[DATA_DIM:])
-    net = eqx.combine(params, static)
-    return net(x)
+class NeuralNetwork(eqx.Module):
+    layers: list[eqx.nn.Linear]
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        x = jax.nn.silu(self.layers[0](x))
+        x = jax.nn.silu(self.layers[1](x))
+        return self.layers[2](x)
 
 
-model = Model(
-    rhs=rhs,
-    init=lambda p, _t: p[:DATA_DIM],
-    nstates=DATA_DIM,
-    nparams=DATA_DIM + nn_p0.shape[0],
-    ode_solver="tsit45",
-)
+def make_network(data_dim: int, key: jax.Array) -> NeuralNetwork:
+    key1, key2, key3 = jax.random.split(key, 3)
+    return NeuralNetwork(
+        layers=[
+            eqx.nn.Linear(data_dim, 64, key=key1),
+            eqx.nn.Linear(64, 32, key=key2),
+            eqx.nn.Linear(32, data_dim, key=key3),
+        ]
+    )
 
 
-def predict(nn_p, t_eval):
-    full_p = jnp.concatenate([y0, nn_p])
-    return model.solve(full_p, t_eval)
+class WeatherSystem(System):
+    y0: jax.Array
+    net: NeuralNetwork
+
+    def init(self, t: jax.Array) -> jax.Array:
+        return self.y0
+
+    def __call__(self, x: jax.Array, t: jax.Array) -> jax.Array:
+        return self.net(x)
 
 
-def loss_fn(nn_p, ts_batch, ys_batch):
-    return jnp.sum((predict(nn_p, ts_batch) - ys_batch) ** 2)
+system0 = WeatherSystem(y0=ys[0], net=make_network(DATA_DIM, jr.key(0)))
+
+model = Model(system0, ode_solver="tsit45")
+
+
+def loss_fn(system, ts_batch, ys_batch):
+    return jnp.sum((model.solve(system, ts_batch) - ys_batch) ** 2)
 
 
 value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 
 
-def train_one_round(nn_p, ts_batch, ys_batch, round_idx):
+def train_one_round(system, ts_batch, ys_batch, round_idx):
     opt = optax.adamw(LR)
-    opt_state = opt.init(nn_p)
+    opt_state = opt.init(system)
     pbar = trange(STEPS_PER_ROUND, desc=f"round {round_idx}", leave=False)
     for _ in pbar:
-        loss, grads = value_and_grad(nn_p, ts_batch, ys_batch)
-        updates, opt_state = opt.update(grads, opt_state, nn_p)
-        nn_p = optax.apply_updates(nn_p, updates)
+        loss, grads = value_and_grad(system, ts_batch, ys_batch)
+        updates, opt_state = opt.update(grads, opt_state, system)
+        system = optax.apply_updates(system, updates)
         pbar.set_postfix(loss=f"{loss:.4f}")
-    return nn_p
+    return system
 
 
 def plot_round(round_idx, batch_len, predict_ys, path):
@@ -99,7 +107,7 @@ def plot_round(round_idx, batch_len, predict_ys, path):
             ts[batch_len:], predict_ys[batch_len:, i], "--", label=f"{name}_predict"
         )
         ax.set_ylabel(name)
-        ax.legend(loc="upper left", fontsize="small")
+        ax.legend(fontsize="small")
     axes[-1].set_xlabel("month")
     fig.suptitle(f"neural-ode-weather-prediction, round {round_idx}")
     fig.tight_layout()
@@ -109,15 +117,15 @@ def plot_round(round_idx, batch_len, predict_ys, path):
 
 def main():
     PLOT_DIR.mkdir(exist_ok=True)
-    nn_p = nn_p0
+    system = system0
     ntimes = ts.shape[0]
     rounds = trange(1, ntimes // BATCH_STEP, desc="rounds")
     for i in rounds:
         batch_len = i * BATCH_STEP
         rounds.set_postfix(data_points=batch_len)
-        nn_p = train_one_round(nn_p, ts[:batch_len], ys[:batch_len], i)
+        system = train_one_round(system, ts[:batch_len], ys[:batch_len], i)
 
-        predict_ys = predict(nn_p, ts)
+        predict_ys = model.solve(system, ts)
         plot_round(i, batch_len, predict_ys, PLOT_DIR / f"neural-ode-weather_{i}.png")
 
 

@@ -5,17 +5,20 @@ diffsol-jax is a [JAX](https://docs.jax.dev/) wrapper around
 library.
 
 You write the ODE equations as ordinary `jax.numpy` functions. diffsol-jax
-derives every callback the solver needs (the right-hand side, its Jacobian
-action, the adjoint, the sensitivities,...) with JAX's own transformations,
-lowers each to StableHLO, and executes them natively through the PJRT C API. The
-solves run in diffsol and are exposed to JAX as XLA FFI custom calls. The result
-is a `solve` that plugs straight into the JAX ecosystem:
+derives every callback the solver needs with JAX's own transformations, lowers
+each to StableHLO, and executes them natively through the PJRT C API. The solves
+run in diffsol and are exposed to JAX as XLA FFI custom calls. The result is a
+`solve` that plugs straight into the JAX ecosystem:
 
 - it runs inside `jax.jit`;
 - it differentiates under `jax.grad`, `jax.jacrev`, `jax.jvp`, and `jax.jacfwd`;
-- it batches under `jax.vmap` — a vmapped axis becomes more lanes in a single
-  batched solve, not a loop of solves;
-- it solves **DAEs** (singular mass matrices).
+- it batches under `jax.vmap` - a vmapped axis becomes more lanes in a single
+  batched solve;
+- it solves **DAEs**;
+- it takes the parameters as a **pytree**: a
+  [`System`](getting-started.md#systems-classes-instead-of-flat-vectors) class
+  bundles the equations with a network's weights and the initial state, for
+  neural ODEs trained with optax.
 
 ## Installation
 
@@ -71,22 +74,51 @@ many = jax.vmap(model.solve, (0, None))(
 )  # one solve, 64 lanes
 ```
 
+For ML — a neural network inside the ODE, trained by gradient descent — define
+the problem as one class instead:
+
+```python
+from diffsol_jax import Model, System
+
+
+class WeatherSystem(System):
+    y0: jax.Array  # the initial state, trained with everything else
+    net: eqx.Module  # any pytree of weights
+
+    def init(self, t):
+        return self.y0
+
+    def __call__(self, x, t):
+        return self.net(x)
+
+
+system = WeatherSystem(y0=y0, net=net)
+model = Model(system, ode_solver="tsit45")
+grads = jax.grad(loss)(system)  # a WeatherSystem — optax applies directly
+```
+
+See [Systems](getting-started.md#systems-classes-instead-of-flat-vectors) for
+the rules, and the `examples/neural-ode-weather-prediction` example for a full
+training loop.
+
 ## Sharp bits :knife
 
 - **`f64` is required.** diffsol is built for `f64` like most scientific
   solvers; enable x64 (`jax.config.update("jax_enable_x64", True)`) before
   creating a model.
-- **A CPU PJRT plugin is required.** jaxlib does not ship one; set
+- **A CPU PJRT plugin is required.** jaxlib does not ship one; put it in
+  `~/.local/share/pjrt/` (found automatically) or set
   `DIFFSOL_JAX_PJRT_PLUGIN` to its path (see
   [Getting started](getting-started.md)).
 - **No higher-order derivatives.** `grad(grad(solve(...)))` does not work.
 - **No derivative with respect to `t_eval`.** Output times are constants.
 - **CPU only, for now.** The PJRT C API is backend-agnostic, so GPU arrives with
   diffsol's GPU backend by loading the CUDA PJRT plugin instead.
-- **Small non-stiff systems are not the sweet spot.** Each solver callback costs
-  ~2.5 µs of fixed PJRT overhead; an explicit method on a tiny system is often
-  faster in pure JAX (diffrax). Stiff or batched problems are where diffsol-jax
-  wins — see [Benchmarks](benchmarks.md).
+- **Small non-stiff systems are not fast.** Each solver callback costs ~2.5 µs
+  of fixed PJRT overhead; an explicit method on a tiny system is often faster in
+  pure JAX ([diffrax](https://github.com/patrick-kidger/diffrax)). Stiff or
+  batched problems are where diffsol-jax is better suited - see
+  [Benchmarks](benchmarks.md).
 
 ## Next steps
 

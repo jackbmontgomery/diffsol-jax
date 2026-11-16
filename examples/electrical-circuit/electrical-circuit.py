@@ -32,12 +32,12 @@ ALGEBRAIC = [True, False, True, False]
 
 def rhs(x, p, t):
     i_r, i_l, i_c, v = x
-    r, l, c, v0, omega = p
+    r, l_, c, v0, omega = p
     vs = v0 * jnp.sin(omega * t)
     return jnp.array(
         [
             v - r * i_r,
-            (vs - v) / l,
+            (vs - v) / l_,
             i_l - i_r - i_c,
             i_c / c,
         ]

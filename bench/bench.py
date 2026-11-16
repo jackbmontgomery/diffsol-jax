@@ -1,34 +1,6 @@
-"""Benchmark of diffsol-jax against native C callbacks, diffsl and diffrax.
-
-Models (`--models`, comma separated):
-  robertson       stiff, 3 states, 3 params:  diffsol BDF       vs diffrax Kvaerno5
-  lotka_volterra  not stiff, 2 states, 4 params: diffsol tsit45 vs diffrax Tsit5 (same tableau)
-  oscillators     not stiff, N coupled nonlinear oscillators (2N states, 3 params), N = 4, 32,
-                  256: diffsol tsit45 vs diffrax Tsit5. A chain with fixed ends:
-                  dq_i = v_i, dv_i = f(q_{i+1} - q_i) - f(q_i - q_{i-1}) - c v_i,
-                  f(D) = k D + beta D^3, q_i(0) = exp(-(i - (N+1)/2)^2), v_i(0) = 0
-
-Methods:
-  diffsol-jax  JAX callbacks compiled with PJRT, the solve as an XLA FFI custom call;
-  native       hand-written C callbacks (bench/models_native.c) through the same diffsol-c API;
-  diffsl       the diffsl LLVM JIT through the diffsol-c C API (one lane per solve, so B
-               solves). Build diffsol-c with `--features diffsl-llvm17`;
-  diffrax      pure JAX; `jax.vmap` for many lanes; gradient with its default
-               RecursiveCheckpointAdjoint.
-
-The gradient is of `sum(ys[..., 0])` (the first state at all the output times and lanes).
-
-usage: python bench.py <libdiffsol_c> <libmodels_native> [--models ...] [--lanes 1,64,1024]
-                       [--max-tape-gib 2] [--out build/bench_results.jsonl]
-
-The gradients are skipped when the estimated VJP tape is larger than --max-tape-gib (for
-example oscillators with N = 256 and B = 1024): a full run on a 16 GiB machine crashed.
-"""
-
 import argparse
 import ctypes as c
 import json
-import sys
 import time
 from pathlib import Path
 
@@ -37,8 +9,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from diffsol_jax import Model
 
 RTOL, ATOL = 1e-6, 1e-8

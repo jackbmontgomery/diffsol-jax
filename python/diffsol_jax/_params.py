@@ -1,12 +1,14 @@
-"""Pytree variables as a boundary layer over the flat `f64[nparams]` vector.
+"""The `System` class, and pytree variables as a boundary layer over the flat `f64[nparams]`
+vector.
 
-`Variables` is the base class for the differentiable inputs of a solve: subclasses declare
-fields (the initial state, network weights, rate constants, ...) and instances are frozen
-dataclasses registered as pytrees, so `jax.grad`, `jax.vmap` and optax work on them directly.
+`System` is the abstract base for an ODE system: subclasses declare fields (the initial state,
+network weights, rate constants, ...) and define the equations as methods over those fields.
+Instances are frozen dataclasses registered as pytrees, so `jax.grad`, `jax.vmap` and optax
+work on them directly, and `Model(system)` derives the equations and sizes from them.
 
-`ParamSpec(variables_like)` splits the leaves of the example pytree (a `Variables` instance,
-or any other pytree) into trainable (inexact-dtype arrays) and static (everything else, fixed
-at model construction). `ravel` takes a pytree of the same structure to the flat vector at the
+`ParamSpec(variables_like)` splits the leaves of the example pytree (a `System` instance, or
+any other pytree) into trainable (inexact-dtype arrays) and static (everything else, fixed at
+model construction). `ravel` takes a pytree of the same structure to the flat vector at the
 solve boundary; `bind` rebuilds the pytree from the flat vector inside the traced callbacks,
 where its slices and reshapes fuse away. The ravel is built from
 `reshape`/`concatenate`/`astype`, so `jax.grad` returns a pytree of the same structure (each
@@ -14,6 +16,7 @@ leaf's gradient in that leaf's own dtype) and `jax.vmap` over any leaf batches t
 vector.
 """
 
+import abc
 import dataclasses
 import math
 
@@ -24,23 +27,32 @@ import numpy as np
 from ._lib import DiffsolJaxError
 
 
-class Variables:
-    """The differentiable inputs of a solve, as a frozen dataclass pytree.
+class System(abc.ABC):
+    """An ODE system: its differentiable inputs as fields, its equations as methods.
 
-        class WeatherSystem(Variables):
+        class WeatherSystem(System):
             y0: jax.Array
-            net: NeuralNetwork    # any pytree, e.g. an eqx.Module
+            net: NeuralNetwork              # any pytree, e.g. an eqx.Module
+
+            def init(self, t):
+                return self.y0
+
+            def __call__(self, x, t):
+                return self.net(x)
 
         system = WeatherSystem(y0=y0, net=net)
-        model = Model(rhs=lambda x, v, t: v.net(x), init=lambda v, t: v.y0,
-                      variables_like=system, nstates=4)
+        model = Model(system, ode_solver="tsit45")   # nstates inferred from init
         ys = model.solve(system, t_eval)
 
-    Leaves that are float (or complex) arrays are trainable: `model.solve` differentiates with
-    respect to them and `jax.grad` returns a `WeatherSystem` of gradients, so an optax update
-    applies directly. Every other field (ints, bools, callables) is fixed when the model is
-    built. Mark a field static with `dataclasses.field(metadata={"static": True})` to keep it
-    out of the pytree leaves entirely (it must then be hashable).
+    Subclasses are frozen dataclasses registered as pytrees. `init(t)` gives the initial state
+    and `__call__(x, t)` the right-hand side; override `out(x, t)` for an output function and
+    `mass(v, t)` for a mass matrix action (see `Model`). Field leaves that are float (or
+    complex) arrays are trainable: `model.solve` differentiates with respect to them and
+    `jax.grad` returns a `WeatherSystem` of gradients, so an optax update applies directly.
+    Every other field (ints, bools, callables) is fixed when the model is built. Mark a field
+    static with `dataclasses.field(metadata={"static": True})` to keep it out of the pytree
+    leaves entirely (it must then be hashable). Field names must not shadow the methods
+    (`init`, `out`, `mass`, `replace`).
     """
 
     def __init_subclass__(cls, **kwargs):
@@ -54,6 +66,24 @@ class Variables:
     def replace(self, **changes):
         """A copy with the given fields replaced (instances are frozen)."""
         return dataclasses.replace(self, **changes)
+
+    @abc.abstractmethod
+    def init(self, t):
+        """The initial state `[nstates]` at the start time `t`."""
+
+    @abc.abstractmethod
+    def __call__(self, x, t):
+        """The right-hand side `[nstates]` at state `x [nstates]` and time `t`."""
+
+    def out(self, x, t):
+        """Override: the output `[nout]` at state `x` and time `t`."""
+        raise NotImplementedError
+
+    def mass(self, v, t):
+        """Override: the mass matrix action `M(t) v`, linear in `v`. It must not use the
+        trainable fields (checked at model construction): the diffsol sensitivities have no
+        dM/dp term, so the gradient of a trainable mass would be wrong."""
+        raise NotImplementedError
 
 
 def _is_trainable(leaf):

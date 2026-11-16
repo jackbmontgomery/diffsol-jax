@@ -101,53 +101,65 @@ jac = jax.jacfwd(lambda p: model.solve(p, t_eval))(params)
 The maths, the `ad=` option, and checkpointing are described in
 [Computing gradients](gradients.md).
 
-## Variables: pytrees instead of a flat vector
+## Systems: classes instead of flat vectors
 
 For ML — a neural network inside the ODE, trained by gradient descent — a flat parameter
-vector is the wrong currency: you would be raveling modules and hand-computing offsets. Give
-the model `variables_like=` instead of `nparams`, and the equations receive a **pytree**. The
-`Variables` base class declares one as a frozen dataclass; an `eqx.Module` or a plain dict
-works just as well:
+vector is the wrong currency: you would be raveling modules and hand-computing offsets. A
+`System` packages the whole problem in one class: the **fields** are the differentiable
+inputs (a frozen dataclass, registered as a JAX pytree), and the **methods** are the
+equations — `init(t)` for the initial state and `__call__(x, t)` for the right-hand side.
+`Model` then needs nothing else; `nstates` is inferred from `init`:
 
 ```python
 import equinox as eqx
-from diffsol_jax import Model, Variables
+from diffsol_jax import Model, System
 
 
-class System(Variables):
+class WeatherSystem(System):
     y0: jax.Array      # the initial state, trained with everything else
     net: eqx.Module    # any pytree of weights
 
+    def init(self, t):
+        return self.y0
 
-system = System(y0=jnp.zeros(4), net=make_mlp())
+    def __call__(self, x, t):
+        return self.net(x)
 
-model = Model(
-    rhs=lambda x, v, t: v.net(x),
-    init=lambda v, t: v.y0,
-    nstates=4,
-    variables_like=system,
-    ode_solver="tsit45",
-)
 
+system = WeatherSystem(y0=jnp.zeros(4), net=make_mlp())
+model = Model(system, ode_solver="tsit45")
 ys = model.solve(system, t_eval)
 ```
 
-Leaves that are float arrays are trainable; every other leaf (ints, bools, callables) is fixed
-when the model is built. `jax.grad` returns a `System` of gradients — the same structure as the
-input, so an optimizer applies directly, with no ravel/unravel anywhere:
+Field leaves that are float arrays are trainable; every other leaf (ints, bools, callables)
+is fixed when the model is built. `jax.grad` returns a `WeatherSystem` of gradients — the
+same structure as the input, so an optimizer applies directly, with no ravel/unravel
+anywhere:
 
 ```python
-loss = lambda v: jnp.sum((model.solve(v, t_eval) - data) ** 2)
-grads = jax.grad(loss)(system)                      # a System
+loss = lambda s: jnp.sum((model.solve(s, t_eval) - data) ** 2)
+grads = jax.grad(loss)(system)                      # a WeatherSystem
 updates, opt_state = opt.update(grads, opt_state, system)
 system = optax.apply_updates(system, updates)
 ```
+
+A `System` can also override `out(x, t)` (an output function; `nout` is inferred) and
+`mass(v, t)` (a mass matrix action for [DAEs](dae.md) — it must not use the trainable
+fields, which is checked at construction). `algebraic=` combines with a `System` as usual:
+`Model(system, algebraic=1)`.
 
 Batching is by `jax.vmap` over any leaf, and becomes lanes in one batched solve exactly as in
 the flat case. Changing leaf *values* is free; changing the pytree *structure* (a different
 architecture) needs a new `Model`. The
 [neural-ODE example](https://github.com/jackbmontgomery/diffsol-jax/tree/main/examples/neural-ode-weather-prediction)
-trains a `Variables` holding the initial state and an MLP.
+trains a `System` holding the initial state and an MLP.
+
+!!! tip "Pytrees without the class"
+
+    The lower-level `Model(rhs=..., init=..., variables_like=pytree)` form accepts the
+    variables as any pytree (an `eqx.Module`, a dict, ...) with functional equations that
+    receive the pytree in place of the flat `p`. `Model(rhs=..., init=..., nparams=n)` is the
+    fully flat form.
 
 ## Solver options
 

@@ -15,22 +15,32 @@
 The functions act on one lane. diffsol calls the callbacks (compiled with the PJRT C API) for
 all the lanes of a solve together. `jax.vmap` over `params` gives more lanes in one solve.
 
-Instead of `nparams`, `variables_like=` declares the differentiable inputs as a pytree — a
-`Variables` subclass, an `eqx.Module`, a dict, ... — and the functions receive that pytree.
-Leaves that are float arrays are trainable (raveled into the flat parameter vector of the
-solver, so `jax.grad` returns a pytree of the same structure and optax applies directly);
-every other leaf is fixed at model construction. Natural for ML, where the variables are a
-network plus an initial state:
+A `System` packages the equations and their differentiable inputs in one class: the fields
+are the variables (a frozen dataclass pytree) and the methods are the equations — `init(t)`
+the initial state, `__call__(x, t)` the right-hand side, optionally `out(x, t)` and
+`mass(v, t)`. `Model(system)` derives `rhs`, `init`, `nstates` and `nout` from it. Natural
+for ML, where the variables are a network plus an initial state:
 
-    class System(Variables):
+    class Weather(System):
         y0: jax.Array
         net: MLP                           # an eqx.Module
 
-    system = System(y0=y0, net=net)
-    model = Model(rhs=lambda x, v, t: v.net(x), init=lambda v, t: v.y0,
-                  variables_like=system, nstates=4)
+        def init(self, t):
+            return self.y0
+
+        def __call__(self, x, t):
+            return self.net(x)
+
+    system = Weather(y0=y0, net=net)
+    model = Model(system, ode_solver="tsit45")
     ys = model.solve(system, t_eval)       # -> [nt, nout]; batch leaves with jax.vmap
-    grads = jax.grad(lambda v: loss(model.solve(v, t_eval)))(system)   # a System
+    grads = jax.grad(lambda s: loss(model.solve(s, t_eval)))(system)   # a Weather
+
+Leaves that are float arrays are trainable (raveled into the flat parameter vector of the
+solver, so `jax.grad` returns a pytree of the same structure and optax applies directly);
+every other leaf is fixed at model construction. The lower-level `variables_like=` takes the
+variables as any pytree (an `eqx.Module`, a dict, ...) with the functional `rhs`/`init`
+receiving that pytree in place of the flat `p`.
 
 The solve is a `jax.experimental.hijax.HiPrim` (see `_primitives`). Forward mode (`jax.jvp`,
 `jax.jacfwd`) uses diffsol forward sensitivities on every model. Reverse mode (`jax.grad`,
@@ -60,9 +70,9 @@ import numpy as np
 from . import _lib, _lower, _params, _primitives
 from ._lib import DiffsolJaxError
 from ._lower import CallbackId, Equations
-from ._params import Variables
+from ._params import System
 
-__all__ = ["CallbackId", "DiffsolJaxError", "Model", "Variables"]
+__all__ = ["CallbackId", "DiffsolJaxError", "Model", "System"]
 
 _ODE_SOLVERS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
 _LINEAR_SOLVERS = {"default": 0, "lu": 1, "klu": 2}
@@ -123,9 +133,9 @@ def _check_mass_is_linear(mass, nstates, nparams):
 class Model:
     def __init__(
         self,
-        rhs,
-        init,
-        nstates,
+        rhs=None,
+        init=None,
+        nstates=None,
         nparams=None,
         out=None,
         nout=0,
@@ -144,6 +154,41 @@ class Model:
             raise DiffsolJaxError(
                 "diffsol_jax needs jax_enable_x64 (the solver uses f64)"
             )
+        if isinstance(rhs, _params.System):
+            system = rhs
+            given = {
+                "init": init,
+                "nstates": nstates,
+                "nparams": nparams,
+                "out": out,
+                "mass": mass,
+                "variables_like": variables_like,
+            }
+            extra = [k for k, v in given.items() if v is not None]
+            extra += ["nout"] if nout else []
+            if extra:
+                raise DiffsolJaxError(
+                    "Model(system) takes the equations and sizes from the System: "
+                    f"do not also give {', '.join(extra)}"
+                )
+            rhs = lambda x, v, t: v(x, t)
+            init = lambda v, t: v.init(t)
+            t0 = jax.ShapeDtypeStruct((), jnp.float64)
+            init_shape = jax.eval_shape(system.init, t0).shape
+            if len(init_shape) != 1:
+                raise DiffsolJaxError(
+                    f"System.init(t) must return a 1-D state, got shape {init_shape}"
+                )
+            nstates = init_shape[0]
+            if type(system).out is not _params.System.out:
+                out = lambda x, v, t: v.out(x, t)
+                x0 = jax.ShapeDtypeStruct((nstates,), jnp.float64)
+                nout = jax.eval_shape(system.out, x0, t0).shape[0]
+            if type(system).mass is not _params.System.mass:
+                mass = lambda v, p, t: p.mass(v, t)
+            variables_like = system
+        elif rhs is None or init is None or nstates is None:
+            raise DiffsolJaxError("give a System, or rhs, init and nstates")
         if (out is None) != (nout == 0):
             raise DiffsolJaxError("give out and nout > 0 together")
         if ad not in ("adjoint", "forward"):

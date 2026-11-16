@@ -2,9 +2,9 @@
 Neural ODE weather prediction.
 
 The MLP drives the right hand side of an ODE, trained to fit the Delhi monthly climate data
-(mean temperature, humidity, wind speed, mean pressure) with `diffsol_jax.Model`. The
-trainable state is a `Variables` subclass holding the initial state and the network; optax
-updates it directly, and `model.solve` takes it as is.
+(mean temperature, humidity, wind speed, mean pressure) with `diffsol_jax.Model`. The whole
+problem is one `System`: the initial state and the network as fields (trained together, optax
+updates the instance directly), the equations as methods.
 """
 
 import pathlib
@@ -17,7 +17,7 @@ import numpy as np
 import optax
 from tqdm import trange
 
-from diffsol_jax import Model, Variables
+from diffsol_jax import Model, System
 from model import NeuralNetwork
 
 jax.config.update("jax_enable_x64", True)
@@ -43,20 +43,20 @@ def load_data():
 ts, ys = load_data()
 
 
-class WeatherSystem(Variables):
+class WeatherSystem(System):
     y0: jax.Array
     net: NeuralNetwork
+
+    def init(self, t):
+        return self.y0
+
+    def __call__(self, x, t):
+        return self.net(x)
 
 
 system0 = WeatherSystem(y0=ys[0], net=NeuralNetwork(data_dim=DATA_DIM, key=jr.key(0)))
 
-model = Model(
-    rhs=lambda x, v, _t: v.net(x),
-    init=lambda v, _t: v.y0,
-    nstates=DATA_DIM,
-    variables_like=system0,
-    ode_solver="tsit45",
-)
+model = Model(system0, ode_solver="tsit45")
 
 
 def loss_fn(system, ts_batch, ys_batch):

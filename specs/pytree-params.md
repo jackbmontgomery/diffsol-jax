@@ -40,40 +40,50 @@ construction with an example (`variables_like=`, replacing `nparams`), and passe
 `solve`. The user functions receive the pytree; gradients come back as a pytree of the same
 structure, so optax works on it directly.
 
-The blessed convention is the exported `Variables` base class — a frozen dataclass registered
-as a pytree, so that "equations + variables" is the visible design of the library. It is
-deliberately thin: an `eqx.Module` or a plain dict works identically.
+The recommended form is the exported abstract `System` class — a frozen dataclass registered
+as a pytree whose **fields are the variables** and whose **methods are the equations**, so
+that "equations + variables" is the visible design of the library. `Model(system)` derives
+everything from it:
 
 ```python
-class WeatherSystem(Variables):
+class WeatherSystem(System):
     y0: jax.Array                                  # the initial state, trained too
     net: NeuralNetwork                             # an eqx.Module — already a pytree
 
+    def init(self, t):                             # required
+        return self.y0
+
+    def __call__(self, x, t):                      # required: the rhs
+        return self.net(x)
+
 
 system = WeatherSystem(y0=ys[0], net=NeuralNetwork(data_dim=4, key=key))
-
-model = Model(
-    rhs=lambda x, v, t: v.net(x),
-    init=lambda v, t: v.y0,
-    variables_like=system,                         # replaces nparams
-    nstates=DATA_DIM,
-    ode_solver="tsit45",
-)
+model = Model(system, ode_solver="tsit45")         # nstates inferred from init
 
 ys = model.solve(system, t_eval)                   # [nt, nout]
-loss = lambda v: jnp.sum((model.solve(v, t_eval) - data) ** 2)
+loss = lambda s: jnp.sum((model.solve(s, t_eval) - data) ** 2)
 grads = jax.grad(loss)(system)                     # a WeatherSystem of gradients
 updates, opt_state = opt.update(grads, opt_state, system)
 system = optax.apply_updates(system, updates)      # no ravel/unravel anywhere
 ```
 
-`Variables` provides `__init_subclass__` (dataclass + `jax.tree_util.register_dataclass`,
-with `dataclasses.field(metadata={"static": True})` for fields kept out of the leaves) and
-`replace`. Nothing else — filtering, serialization, and richer module features stay equinox's
-job; the library only needs the pytree protocol.
+`System` enforces the two **methods** (`init(t)` and `__call__(x, t)`, via `abc`), not any
+field names: the fields are the user's variables, named freely. A trainable initial state is
+the one-field pattern above; a fixed one is `def init(self, t): return Y0`. The optional
+overrides `out(self, x, t)` (output function, `nout` inferred) and `mass(self, v, t)` (mass
+matrix action — it must not use the trainable fields, which the construction-time linearity
+check enforces) complete the equation set; `algebraic=` stays a `Model` kwarg and combines
+with a `System`. `nstates`/`nout` are inferred with `jax.eval_shape` on `init`/`out`.
 
-`nparams=<int>` stays as the flat case, and the flat API keeps working unchanged. Exactly one
-of `nparams` / `variables_like` must be given.
+Beyond that, `System` provides only `__init_subclass__` (dataclass +
+`jax.tree_util.register_dataclass`, with `dataclasses.field(metadata={"static": True})` for
+fields kept out of the leaves) and `replace`. Nothing else — filtering, serialization, and
+richer module features stay equinox's job; the library only needs the pytree protocol.
+
+Two lower-level forms remain: `Model(rhs=..., init=..., nstates=..., variables_like=pytree)`
+takes the variables as **any pytree** (an `eqx.Module`, a dict, ...) with functional
+equations receiving the pytree, and `nparams=<int>` stays as the flat case, unchanged.
+Exactly one of a `System`, `variables_like`, or `nparams` must be given.
 
 ## Design
 
@@ -164,20 +174,20 @@ but the API is designed so it bolts on without breaking anything.
 `examples/neural-ode-weather-prediction/main.py` loses all of its plumbing:
 
 ```python
-class WeatherSystem(Variables):
+class WeatherSystem(System):
     y0: jax.Array
     net: NeuralNetwork
+
+    def init(self, t):
+        return self.y0
+
+    def __call__(self, x, t):
+        return self.net(x)
 
 
 system0 = WeatherSystem(y0=ys[0], net=NeuralNetwork(data_dim=DATA_DIM, key=jr.key(0)))
 
-model = Model(
-    rhs=lambda x, v, _t: v.net(x),
-    init=lambda v, _t: v.y0,
-    nstates=DATA_DIM,
-    variables_like=system0,
-    ode_solver="tsit45",
-)
+model = Model(system0, ode_solver="tsit45")
 
 def loss_fn(system, ts_batch, ys_batch):
     return jnp.sum((model.solve(system, ts_batch) - ys_batch) ** 2)
@@ -204,15 +214,19 @@ value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 
 ## Implementation
 
-- `python/diffsol_jax/_params.py`: the `Variables` base class, and `ParamSpec` — partition,
-  `ravel` (with treedef/shape validation and key-path errors), `bind`, `bind_equations`.
-- `Model.__init__`: accepts `variables_like` (exactly one of it and `nparams`), wraps the four
-  user functions through `bind` before building `Equations`; `check()` in `_make_solve` ravels
+- `python/diffsol_jax/_params.py`: the abstract `System` base class (`abc` + dataclass +
+  `register_dataclass`), and `ParamSpec` — partition, `ravel` (with treedef/shape validation
+  and key-path errors), `bind`, `bind_equations`.
+- `Model.__init__`: a `System` first argument derives `rhs`/`init`/`out`/`mass` from the
+  methods, infers `nstates`/`nout` with `jax.eval_shape`, and rejects redundant arguments;
+  otherwise it accepts `variables_like` or `nparams` (exactly one mode), wraps the user
+  functions through `bind` before building `Equations`, and `check()` in `_make_solve` ravels
   instead of shape-checking in pytree mode.
 - `_lower.py`, `_primitives.py`, C++: **no changes**.
-- Tests: `tests/test_variables.py` — pytree solve == flat solve; adjoint/forward grad
-  structure and dtypes (f32 leaf → f32 grad); `jacfwd`; vmap over a leaf; dict variables with
-  a static callable leaf; `Variables` static-metadata fields and `replace`; mode and
-  solve-time mismatch errors; a DAE with pytree variables.
-- Docs: the "Variables" section in `docs/getting-started.md`, `docs/api/index.md`, the module
+- Tests: `tests/test_system.py` — system solve == flat solve with `nstates`/`nout` inference;
+  adjoint/forward grad structure and dtypes (f32 leaf → f32 grad); `jacfwd`; vmap over a
+  leaf; an `out` method; dict `variables_like` with a static callable leaf; static-metadata
+  fields and `replace`; abstract-method enforcement; mode and solve-time mismatch errors;
+  DAEs via `algebraic=` and via a `mass` method, and the trainable-`mass` rejection.
+- Docs: the "Systems" section in `docs/getting-started.md`, `docs/api/index.md`, the module
   docstring, and the rewritten neural-ODE example.

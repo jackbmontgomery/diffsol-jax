@@ -9,12 +9,14 @@ a `solve` attribute that is compatible with `jax.jit`, `jax.grad`, `jax.jacrev`,
 | Symbol                                                          | Kind      | Description                                   |
 | --------------------------------------------------------------- | --------- | --------------------------------------------- |
 | [`Model`](diffsol_jax.md#diffsol_jax.Model)                     | class     | A compiled model; exposes `solve`.            |
+| [`Variables`](diffsol_jax.md#diffsol_jax.Variables)             | class     | Base class for pytree variables — see [Variables](../getting-started.md#variables-pytrees-instead-of-a-flat-vector). |
 | [`DiffsolJaxError`](diffsol_jax.md#diffsol_jax.DiffsolJaxError) | exception | Raised on configuration and solver errors.    |
 
 ## The equation functions
 
 All functions act on **one lane**: `x` has shape `[nstates]`, `p` has shape `[nparams]`, and `t`
-is a scalar. Any traceable JAX code is allowed.
+is a scalar. Any traceable JAX code is allowed. With `variables_like=` instead of `nparams`, `p`
+is instead the variables pytree (a `Variables` instance, an `eqx.Module`, a dict, ...).
 
 | Function        | Signature      | Required | Description                                             |
 | --------------- | -------------- | -------- | ------------------------------------------------------- |
@@ -32,7 +34,9 @@ ys = model.solve(params, t_eval)
 
 `solve(params, t_eval)` takes `params` of shape `[..., nparams]` (leading axes are solved as
 lanes of one batched solve) and `t_eval` of shape `[nt]`, and returns `ys` of shape
-`[..., nt, nout]` (`nout = nstates` if the model has no `out`).
+`[..., nt, nout]` (`nout = nstates` if the model has no `out`). With `variables_like=`,
+`solve(variables, t_eval)` takes the pytree instead, and batching is by `jax.vmap` over its
+leaves.
 
 ## Solvers
 

@@ -1,6 +1,6 @@
-# Spec: pytree parameters
+# Spec: pytree variables
 
-Status: draft, 2026-11-16
+Status: implemented on this branch, 2026-11-16
 
 ## Problem
 
@@ -35,31 +35,45 @@ per-module learning rates) is lost too.
 
 ## Proposal
 
-Let the parameters be **any pytree**, declared once at model construction with an example, and
-passed as-is to `solve`. The user functions receive the pytree; gradients come back as a pytree
-of the same structure, so optax works on it directly.
+Let the differentiable inputs of a solve be **any pytree**, declared once at model
+construction with an example (`variables_like=`, replacing `nparams`), and passed as-is to
+`solve`. The user functions receive the pytree; gradients come back as a pytree of the same
+structure, so optax works on it directly.
+
+The blessed convention is the exported `Variables` base class — a frozen dataclass registered
+as a pytree, so that "equations + variables" is the visible design of the library. It is
+deliberately thin: an `eqx.Module` or a plain dict works identically.
 
 ```python
-net = NeuralNetwork(data_dim=4, key=key)          # an eqx.Module — already a pytree
-params = {"y0": ys[0], "net": net}
+class WeatherSystem(Variables):
+    y0: jax.Array                                  # the initial state, trained too
+    net: NeuralNetwork                             # an eqx.Module — already a pytree
+
+
+system = WeatherSystem(y0=ys[0], net=NeuralNetwork(data_dim=4, key=key))
 
 model = Model(
-    rhs=lambda x, p, t: p["net"](x),
-    init=lambda p, t: p["y0"],
-    params_like=params,                           # replaces nparams
+    rhs=lambda x, v, t: v.net(x),
+    init=lambda v, t: v.y0,
+    variables_like=system,                         # replaces nparams
     nstates=DATA_DIM,
     ode_solver="tsit45",
 )
 
-ys = model.solve(params, t_eval)                  # [..., nt, nout], unchanged
-loss = lambda p: jnp.sum((model.solve(p, t_eval) - data) ** 2)
-grads = jax.grad(loss)(params)                    # same pytree structure as params
-updates, opt_state = opt.update(grads, opt_state, params)
-params = optax.apply_updates(params, updates)     # no ravel/unravel anywhere
+ys = model.solve(system, t_eval)                   # [nt, nout]
+loss = lambda v: jnp.sum((model.solve(v, t_eval) - data) ** 2)
+grads = jax.grad(loss)(system)                     # a WeatherSystem of gradients
+updates, opt_state = opt.update(grads, opt_state, system)
+system = optax.apply_updates(system, updates)      # no ravel/unravel anywhere
 ```
 
-`nparams=<int>` stays as the degenerate case: it means `params_like=f64[nparams]`, and the flat
-API keeps working unchanged. Exactly one of `nparams` / `params_like` must be given.
+`Variables` provides `__init_subclass__` (dataclass + `jax.tree_util.register_dataclass`,
+with `dataclasses.field(metadata={"static": True})` for fields kept out of the leaves) and
+`replace`. Nothing else — filtering, serialization, and richer module features stay equinox's
+job; the library only needs the pytree protocol.
+
+`nparams=<int>` stays as the flat case, and the flat API keeps working unchanged. Exactly one
+of `nparams` / `variables_like` must be given.
 
 ## Design
 
@@ -68,7 +82,7 @@ The key observation is that nothing below `Model.__init__` has to change. The so
 that is the right representation for the callbacks, the sensitivity lanes (`P = nparams`), and
 the FFI. The pytree is a **thin boundary layer** in `Model`:
 
-1. **Partition at construction.** Split the leaves of `params_like` into *trainable* —
+1. **Partition at construction.** Split the leaves of `variables_like` into *trainable* —
    inexact-dtype arrays (`jnp.issubdtype(dtype, jnp.inexact)` after `jnp.asarray`) — and
    *static* — everything else: ints, bools, strings, activation callables, the treedef itself.
    This is `eqx.partition(…, eqx.is_inexact_array)` in spirit, implemented with
@@ -88,7 +102,7 @@ the FFI. The pytree is a **thin boundary layer** in `Model`:
    slice/reshape ops fuse into the compiled callback.
 
 3. **Ravel at the solve boundary.** `solve(params, t_eval)` validates that the treedef and the
-   trainable leaf shapes/dtypes match `params_like`, ravels the trainable leaves to
+   trainable leaf shapes/dtypes match `variables_like`, ravels the trainable leaves to
    `f64[nparams]`, and calls the existing primitive. The ravel is built from
    `reshape`/`concatenate`, so JAX AD and `vmap` compose through it for free:
    - `jax.grad` / `jax.jacrev` / `jax.jvp`: the cotangent of the ravel is the unravel — the
@@ -113,33 +127,33 @@ bool masks) are static by definition and pass through `bind` untouched.
 
 ### `mass` linearity check
 
-`_check_mass_is_linear` draws random flat vectors today. With `params_like` it draws the random
-`p1, p2` as pytrees via `bind` of random flat vectors — no behavior change, two lines in the
-helper.
+`_check_mass_is_linear` draws random flat vectors. The user's `mass` is wrapped through `bind`
+*before* the check runs, so the existing helper applies unchanged to the wrapped flat
+function.
 
 ### Validation and errors
 
-- `params_like` with **zero** trainable leaves: error at construction ("the model has no
+- `variables_like` with **zero** trainable leaves: error at construction ("the model has no
   trainable parameters; mark at least one leaf as an inexact array").
 - `solve` called with a mismatched treedef or leaf shape: error naming the offending leaf path
   (`jax.tree_util.keystr`).
-- `nparams` and `params_like` both given, or neither: error at construction.
+- `nparams` and `variables_like` both given, or neither: error at construction.
 
 ### Out of scope (unchanged)
 
 - Batching by stacking a leading axis on the raw flat vector keeps working in `nparams` mode;
-  in `params_like` mode batching is via `jax.vmap` only — that is the JAX-idiomatic spelling
+  in `variables_like` mode batching is via `jax.vmap` only — that is the JAX-idiomatic spelling
   and avoids guessing which leaf axes are batch axes.
 - `t_eval`, tolerances, solver choice: untouched.
 - Higher-order AD, grad w.r.t. `t_eval`: same limitations as today.
 
 ## Follow-up (separate change): infer `nstates` and `nout`
 
-With `params_like` in hand, `init` can be shape-traced at construction:
+With `variables_like` in hand, `init` can be shape-traced at construction:
 
 ```python
-nstates = jax.eval_shape(init, params_like, 0.0).shape[0]
-nout    = jax.eval_shape(out, jax.ShapeDtypeStruct((nstates,), f64), params_like, 0.0).shape[0]
+nstates = jax.eval_shape(init, variables_like, 0.0).shape[0]
+nout    = jax.eval_shape(out, jax.ShapeDtypeStruct((nstates,), f64), variables_like, 0.0).shape[0]
 ```
 
 making `nstates=`/`nout=` optional. Kept out of this spec's first PR to keep the diff reviewable,
@@ -150,22 +164,26 @@ but the API is designed so it bolts on without breaking anything.
 `examples/neural-ode-weather-prediction/main.py` loses all of its plumbing:
 
 ```python
-net = NeuralNetwork(data_dim=DATA_DIM, key=key)
-params = {"y0": ys[0], "net": net}
+class WeatherSystem(Variables):
+    y0: jax.Array
+    net: NeuralNetwork
+
+
+system0 = WeatherSystem(y0=ys[0], net=NeuralNetwork(data_dim=DATA_DIM, key=jr.key(0)))
 
 model = Model(
-    rhs=lambda x, p, t: p["net"](x),
-    init=lambda p, t: p["y0"],
-    params_like=params,
+    rhs=lambda x, v, _t: v.net(x),
+    init=lambda v, _t: v.y0,
     nstates=DATA_DIM,
+    variables_like=system0,
     ode_solver="tsit45",
 )
 
-def loss_fn(params, ts_batch, ys_batch):
-    return jnp.sum((model.solve(params, ts_batch) - ys_batch) ** 2)
+def loss_fn(system, ts_batch, ys_batch):
+    return jnp.sum((model.solve(system, ts_batch) - ys_batch) ** 2)
 
 value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
-# optax runs on the dict; the y0 leaf trains together with the net, or freeze it
+# optax runs on the WeatherSystem; y0 trains together with the net, or freeze it
 # with optax.masked / eqx.tree_at — standard tools, nothing diffsol-specific.
 ```
 
@@ -184,15 +202,17 @@ value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 - **Ship only a helper** (`diffsol_jax.ravel(params) -> (flat, unravel)`): smallest diff, but
   it fixes none of the `solve`/`grad`/optimizer ergonomics, which is the actual complaint.
 
-## Implementation sketch
+## Implementation
 
-- `python/diffsol_jax/_params.py` (~60 lines): partition, ravel, `bind`, treedef validation
-  with key paths.
-- `Model.__init__`: accept `params_like`, wrap the four user functions before building
-  `Equations`; `check()` in `_make_solve` ravels instead of shape-checking when in pytree mode.
+- `python/diffsol_jax/_params.py`: the `Variables` base class, and `ParamSpec` — partition,
+  `ravel` (with treedef/shape validation and key-path errors), `bind`, `bind_equations`.
+- `Model.__init__`: accepts `variables_like` (exactly one of it and `nparams`), wraps the four
+  user functions through `bind` before building `Equations`; `check()` in `_make_solve` ravels
+  instead of shape-checking in pytree mode.
 - `_lower.py`, `_primitives.py`, C++: **no changes**.
-- Tests: pytree solve == flat solve on the same values; grad structure and dtypes; vmap over a
-  leaf; treedef-mismatch error; eqx module with a static (callable) leaf; mass model with
-  pytree params.
-- Docs: a short "ML parameters" section in `docs/getting-started.md`, and the rewritten
-  neural-ODE example.
+- Tests: `tests/test_variables.py` — pytree solve == flat solve; adjoint/forward grad
+  structure and dtypes (f32 leaf → f32 grad); `jacfwd`; vmap over a leaf; dict variables with
+  a static callable leaf; `Variables` static-metadata fields and `replace`; mode and
+  solve-time mismatch errors; a DAE with pytree variables.
+- Docs: the "Variables" section in `docs/getting-started.md`, `docs/api/index.md`, the module
+  docstring, and the rewritten neural-ODE example.

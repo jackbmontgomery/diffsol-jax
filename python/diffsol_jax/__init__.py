@@ -15,6 +15,23 @@
 The functions act on one lane. diffsol calls the callbacks (compiled with the PJRT C API) for
 all the lanes of a solve together. `jax.vmap` over `params` gives more lanes in one solve.
 
+Instead of `nparams`, `variables_like=` declares the differentiable inputs as a pytree — a
+`Variables` subclass, an `eqx.Module`, a dict, ... — and the functions receive that pytree.
+Leaves that are float arrays are trainable (raveled into the flat parameter vector of the
+solver, so `jax.grad` returns a pytree of the same structure and optax applies directly);
+every other leaf is fixed at model construction. Natural for ML, where the variables are a
+network plus an initial state:
+
+    class System(Variables):
+        y0: jax.Array
+        net: MLP                           # an eqx.Module
+
+    system = System(y0=y0, net=net)
+    model = Model(rhs=lambda x, v, t: v.net(x), init=lambda v, t: v.y0,
+                  variables_like=system, nstates=4)
+    ys = model.solve(system, t_eval)       # -> [nt, nout]; batch leaves with jax.vmap
+    grads = jax.grad(lambda v: loss(model.solve(v, t_eval)))(system)   # a System
+
 The solve is a `jax.experimental.hijax.HiPrim` (see `_primitives`). Forward mode (`jax.jvp`,
 `jax.jacfwd`) uses diffsol forward sensitivities on every model. Reverse mode (`jax.grad`,
 `jax.jacrev`) depends on `ad`: with `ad="adjoint"` (the default) it uses the diffsol adjoint
@@ -32,8 +49,6 @@ algebraic states. The
 initial state is projected onto the algebraic constraints (diffsol solves the algebraic
 variables at `t0`), the gradients account for it, and a DAE needs an implicit solver
 (`bdf`, `esdirk34` or `tr_bdf2`). Higher-index DAEs must be reduced to index 1 first.
-
-There is no derivative with respect to `t_eval`.
 """
 
 import weakref
@@ -42,11 +57,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from . import _lib, _lower, _primitives
+from . import _lib, _lower, _params, _primitives
 from ._lib import DiffsolJaxError
 from ._lower import CallbackId, Equations
+from ._params import Variables
 
-__all__ = ["CallbackId", "DiffsolJaxError", "Model"]
+__all__ = ["CallbackId", "DiffsolJaxError", "Model", "Variables"]
 
 _ODE_SOLVERS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
 _LINEAR_SOLVERS = {"default": 0, "lu": 1, "klu": 2}
@@ -110,11 +126,12 @@ class Model:
         rhs,
         init,
         nstates,
-        nparams,
+        nparams=None,
         out=None,
         nout=0,
         mass=None,
         algebraic=None,
+        variables_like=None,
         ode_solver="bdf",
         linear_solver="default",
         matrix_type="nalgebra_dense",
@@ -131,6 +148,13 @@ class Model:
             raise DiffsolJaxError("give out and nout > 0 together")
         if ad not in ("adjoint", "forward"):
             raise DiffsolJaxError("ad must be 'adjoint' or 'forward'")
+        if (nparams is None) == (variables_like is None):
+            raise DiffsolJaxError("give exactly one of nparams and variables_like")
+        self.spec = None
+        if variables_like is not None:
+            self.spec = _params.ParamSpec(variables_like)
+            nparams = self.spec.nparams
+            rhs, init, out, mass = self.spec.bind_equations(rhs, init, out, mass)
         if algebraic is not None:
             if mass is not None:
                 raise DiffsolJaxError("give mass or algebraic, not both")
@@ -247,19 +271,24 @@ class Model:
         )
 
         def check(params, t_eval):
-            params = jnp.asarray(params, jnp.float64)
             t_eval = jnp.asarray(t_eval, jnp.float64)
+            if t_eval.ndim != 1:
+                raise DiffsolJaxError("t_eval must have one axis")
+            if self.spec is not None:
+                return self.spec.ravel(params), t_eval
+            params = jnp.asarray(params, jnp.float64)
             if params.ndim < 1 or params.shape[-1] != self.nparams:
                 raise DiffsolJaxError(
                     f"params must have the shape [..., {self.nparams}]"
                 )
-            if t_eval.ndim != 1:
-                raise DiffsolJaxError("t_eval must have one axis")
             return params, t_eval
 
         def run(params, t_eval):
-            """Solve for each lane of `params [..., nparams]` at the times `t_eval [nt]`.
-            Return `ys [..., nt, nout]` (`nout = nstates` if the model has no `out`)."""
+            """Solve for `params` at the times `t_eval [nt]` and return
+            `ys [..., nt, nout]` (`nout = nstates` if the model has no `out`). With
+            `nparams`, `params` is `[..., nparams]` and solves each lane; with
+            `variables_like`, it is a pytree of that structure and batching is by
+            `jax.vmap` over its leaves."""
             params, t_eval = check(params, t_eval)
             prim = prim_cls(jax.typeof(params), jax.typeof(t_eval), **kw)
             return prim(params, t_eval)

@@ -138,7 +138,8 @@ def test_vmap_of_jacrev():
     # the vmapped lane axis and the jacrev direction axis go through one backward solve
     model = logistic()
     params = jnp.array([[0.5, 1.0], [1.0, 1.0], [2.0, 1.5]])
-    f = lambda p: model.solve(p, T_EVAL)
+    def f(p):
+        return model.solve(p, T_EVAL)
     jac = jax.jit(jax.vmap(jax.jacrev(f)))(params)
     loop = jnp.stack([jax.jacrev(f)(p) for p in params])
     np.testing.assert_allclose(jac, loop, rtol=1e-6, atol=1e-10)
@@ -157,7 +158,8 @@ def test_vmap_of_grad():
 def test_robertson_grad():
     model = robertson()
     t = jnp.array([0.0, 1.0, 10.0, 40.0])
-    f = lambda logp: jnp.sum(model.solve(jnp.exp(logp), t)[:, 0])
+    def f(logp):
+        return jnp.sum(model.solve(jnp.exp(logp), t)[:, 0])
     logp = jnp.log(ROBERTSON_P)
     grad = jax.jit(jax.grad(f))(logp)
     np.testing.assert_allclose(grad, finite_difference(f, logp, 1e-5), rtol=1e-3)

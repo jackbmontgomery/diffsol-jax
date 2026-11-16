@@ -82,7 +82,9 @@ _MATRIX_TYPES = {"nalgebra_dense": 0, "faer_dense": 1, "faer_sparse": 2}
 def _diagonal_mass(algebraic, nstates):
     """The diagonal mass of `algebraic`: an int (the last `algebraic` states are algebraic) or a
     boolean mask of length `nstates` (True marks an algebraic state)."""
-    if isinstance(algebraic, (int, jnp.integer)) and not isinstance(algebraic, bool):
+    if isinstance(algebraic, bool):
+        raise DiffsolJaxError("algebraic must be an int or a boolean mask, not a bool")
+    if isinstance(algebraic, (int, jnp.integer)):
         if not 0 < algebraic < nstates:
             raise DiffsolJaxError(
                 f"algebraic must be in [1, {nstates - 1}], got {algebraic}"
@@ -171,8 +173,8 @@ class Model:
                     "Model(system) takes the equations and sizes from the System: "
                     f"do not also give {', '.join(extra)}"
                 )
-            rhs = lambda x, v, t: v(x, t)
-            init = lambda v, t: v.init(t)
+            rhs = lambda x, v, t: v(x, t)  # noqa: E731
+            init = lambda v, t: v.init(t)  # noqa: E731
             t0 = jax.ShapeDtypeStruct((), jnp.float64)
             init_shape = jax.eval_shape(system.init, t0).shape
             if len(init_shape) != 1:
@@ -181,11 +183,11 @@ class Model:
                 )
             nstates = init_shape[0]
             if type(system).out is not _params.System.out:
-                out = lambda x, v, t: v.out(x, t)
+                out = lambda x, v, t: v.out(x, t)  # noqa: E731
                 x0 = jax.ShapeDtypeStruct((nstates,), jnp.float64)
                 nout = jax.eval_shape(system.out, x0, t0).shape[0]
             if type(system).mass is not _params.System.mass:
-                mass = lambda v, p, t: p.mass(v, t)
+                mass = lambda v, p, t: p.mass(v, t)  # noqa: E731
             variables_like = system
         elif rhs is None or init is None or nstates is None:
             raise DiffsolJaxError("give a System, or rhs, init and nstates")
@@ -211,6 +213,7 @@ class Model:
                 "a model with a mass matrix (a DAE) needs an implicit solver: "
                 "ode_solver='bdf', 'esdirk34' or 'tr_bdf2'"
             )
+        assert nparams is not None  # the mode checks above guarantee it
         self.eq = Equations(rhs, init, nstates, nparams, out, nout, mass)
         self.nstates, self.nparams, self.nout = nstates, nparams, nout
         self.nsolution = nout if nout > 0 else nstates
@@ -328,7 +331,7 @@ class Model:
                 )
             return params, t_eval
 
-        def run(params, t_eval):
+        def run(params, t_eval) -> jax.Array:
             """Solve for `params` at the times `t_eval [nt]` and return
             `ys [..., nt, nout]` (`nout = nstates` if the model has no `out`). With
             `nparams`, `params` is `[..., nparams]` and solves each lane; with

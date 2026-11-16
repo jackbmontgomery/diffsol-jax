@@ -9,6 +9,7 @@ updates the instance directly), the equations as methods.
 
 import pathlib
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -18,7 +19,6 @@ import optax
 from tqdm import trange
 
 from diffsol_jax import Model, System
-from model import NeuralNetwork
 
 jax.config.update("jax_enable_x64", True)
 
@@ -43,18 +43,38 @@ def load_data():
 ts, ys = load_data()
 
 
+class NeuralNetwork(eqx.Module):
+    layers: list[eqx.nn.Linear]
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        x = jax.nn.silu(self.layers[0](x))  # Swish = SiLU
+        x = jax.nn.silu(self.layers[1](x))
+        return self.layers[2](x)
+
+
+def make_network(data_dim: int, key: jax.Array) -> NeuralNetwork:
+    key1, key2, key3 = jax.random.split(key, 3)
+    return NeuralNetwork(
+        layers=[
+            eqx.nn.Linear(data_dim, 64, key=key1),
+            eqx.nn.Linear(64, 32, key=key2),
+            eqx.nn.Linear(32, data_dim, key=key3),
+        ]
+    )
+
+
 class WeatherSystem(System):
     y0: jax.Array
     net: NeuralNetwork
 
-    def init(self, t):
+    def init(self, t: jax.Array) -> jax.Array:
         return self.y0
 
-    def __call__(self, x, t):
+    def __call__(self, x: jax.Array, t: jax.Array) -> jax.Array:
         return self.net(x)
 
 
-system0 = WeatherSystem(y0=ys[0], net=NeuralNetwork(data_dim=DATA_DIM, key=jr.key(0)))
+system0 = WeatherSystem(y0=ys[0], net=make_network(DATA_DIM, jr.key(0)))
 
 model = Model(system0, ode_solver="tsit45")
 

@@ -19,6 +19,7 @@ vector.
 import abc
 import dataclasses
 import math
+from typing import Any, Self, cast, dataclass_transform
 
 import jax
 import jax.numpy as jnp
@@ -27,6 +28,7 @@ import numpy as np
 from ._lib import DiffsolJaxError
 
 
+@dataclass_transform(frozen_default=True, field_specifiers=(dataclasses.field,))
 class System(abc.ABC):
     """An ODE system: its differentiable inputs as fields, its equations as methods.
 
@@ -57,29 +59,29 @@ class System(abc.ABC):
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        dataclasses.dataclass(frozen=True)(cls)
-        fields = dataclasses.fields(cls)
+        datacls: Any = dataclasses.dataclass(frozen=True)(cls)
+        fields = dataclasses.fields(datacls)
         static = [f.name for f in fields if f.metadata.get("static", False)]
         data = [f.name for f in fields if not f.metadata.get("static", False)]
         jax.tree_util.register_dataclass(cls, data_fields=data, meta_fields=static)
 
-    def replace(self, **changes):
+    def replace(self, **changes: Any) -> Self:
         """A copy with the given fields replaced (instances are frozen)."""
-        return dataclasses.replace(self, **changes)
+        return dataclasses.replace(cast(Any, self), **changes)
 
     @abc.abstractmethod
-    def init(self, t):
+    def init(self, t: jax.Array) -> jax.Array:
         """The initial state `[nstates]` at the start time `t`."""
 
     @abc.abstractmethod
-    def __call__(self, x, t):
+    def __call__(self, x: jax.Array, t: jax.Array) -> jax.Array:
         """The right-hand side `[nstates]` at state `x [nstates]` and time `t`."""
 
-    def out(self, x, t):
+    def out(self, x: jax.Array, t: jax.Array) -> jax.Array:
         """Override: the output `[nout]` at state `x` and time `t`."""
         raise NotImplementedError
 
-    def mass(self, v, t):
+    def mass(self, v: jax.Array, t: jax.Array) -> jax.Array:
         """Override: the mass matrix action `M(t) v`, linear in `v`. It must not use the
         trainable fields (checked at model construction): the diffsol sensitivities have no
         dM/dp term, so the gradient of a trainable mass would be wrong."""
@@ -152,10 +154,13 @@ class ParamSpec:
                 return None
             return lambda x, p, t: jnp.asarray(f(x, self.bind(p), t), jnp.float64)
 
+        def rhs_flat(x, p, t):
+            return jnp.asarray(rhs(x, self.bind(p), t), jnp.float64)
+
         def init_flat(p, t):
             return jnp.asarray(init(self.bind(p), t), jnp.float64)
 
-        return wrap(rhs), init_flat, wrap(out), wrap(mass)
+        return rhs_flat, init_flat, wrap(out), wrap(mass)
 
     def bind(self, flat):
         """The pytree of `f64[nparams]`: the trainable leaves carved out of `flat`, the
@@ -163,6 +168,7 @@ class ParamSpec:
         leaves, i = [], 0
         for t, shape, static in zip(self.trainable, self.shapes, self.statics):
             if t:
+                assert shape is not None  # set for every trainable leaf
                 n = math.prod(shape)
                 leaves.append(flat[i : i + n].reshape(shape))
                 i += n

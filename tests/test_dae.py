@@ -1,17 +1,13 @@
 """Tests of DAE support: a singular mass matrix gives a semi-explicit index-1 DAE."""
 
-import sys
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-jax.config.update("jax_enable_x64", True)
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
 from diffsol_jax import DiffsolJaxError, Model
+
+jax.config.update("jax_enable_x64", True)
 
 T_EVAL = jnp.array([0.0, 0.5, 1.0, 2.0, 3.0])
 P = jnp.array([0.7, 2.0])

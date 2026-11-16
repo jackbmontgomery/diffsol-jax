@@ -1,18 +1,13 @@
-"""Tests of `System` (`Model(system)`) and the lower-level `Model(variables_like=...)`."""
-
 import dataclasses
-import sys
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-jax.config.update("jax_enable_x64", True)
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
 from diffsol_jax import DiffsolJaxError, Model, System
+
+jax.config.update("jax_enable_x64", True)
 
 T_EVAL = jnp.array([0.0, 0.5, 1.0, 2.0, 4.0])
 TOL = {"rtol": 1e-10, "atol": 1e-10}

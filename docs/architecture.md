@@ -2,30 +2,10 @@
 
 !!! note
 
-    This page is the design document of the PJRT architecture, vendored from the
-    [diffsol `diffsol-jax2` example](https://github.com/martinjrobins/diffsol/tree/diffsol-jax2/examples/diffsol-jax)
-    that this library is built on.
-
-Use diffsol solves as JAX operations. Write the ODE equations as JAX functions.
-Use the solves in `jax.jit`, `jax.vmap`, `jax.grad`, `jax.jacfwd` and
-`jax.jacrev`.
-
-```python
-import jax, jax.numpy as jnp
-
-jax.config.update("jax_enable_x64", True)
-from diffsol_jax import Model
-
-model = Model(
-    rhs=lambda x, p, t: p[0] * x * (1.0 - x),  # one lane: x [nstates], p [nparams]
-    init=lambda p, t: jnp.array([0.1]),
-    nstates=1,
-    nparams=1,
-)
-t = jnp.linspace(0.0, 5.0, 11)
-ys = model.solve(jnp.array([1.0]), t)  # [nt, nstates]
-ys = jax.vmap(model.solve, (0, None))(jnp.ones((64, 1)), t)  # one solve with 64 lanes
-g = jax.grad(lambda p: model.solve(p, t).sum())(jnp.array([1.0]))
+```text
+This page is the design document of the PJRT architecture, vendored from the
+[diffsol `diffsol-jax2` example](https://github.com/martinjrobins/diffsol/tree/diffsol-jax2/examples/diffsol-jax)
+that this library is built on.
 ```
 
 ## How it works
@@ -33,7 +13,7 @@ g = jax.grad(lambda p: model.solve(p, t).sum())(jnp.array([1.0]))
 1. Python makes each diffsol callback (`rhs`, `rhs_jac`, `rhs_adjoint`,...) from
    the user functions with JAX AD (`jvp` and `vjp`), and lowers it to StableHLO
    for all the lanes.
-2. `libdiffsol_jax` (C++) compiles the StableHLO with the PJRT C API and puts
+2. `libdiffsol_jax` compiles the StableHLO with the PJRT C API and puts
    the executables behind the function pointers of
    `diffsol_ode_new_callbacks_f64`.
 3. `libdiffsol_jax` also gives the diffsol-c solves as XLA FFI custom calls:
@@ -41,20 +21,18 @@ g = jax.grad(lambda p: model.solve(p, t).sum())(jnp.array([1.0]))
    `diffsol_solve_vjp_bkwd`.
 
 The callback inputs go to PJRT with no copy: PJRT gets views of the diffsol
-memory (`PJRT_Client_CreateViewOfDeviceBuffer`). The XLA CPU client accepts a
-view only of 64-byte aligned memory. An input that is not aligned is copied into
-a persistent aligned staging buffer (no allocation after the first call). The
-output is copied into the diffsol output vector with `memcpy` from the PJRT
-output buffer (CPU: host memory). `PJRT_Buffer_ToHostBuffer` is the fallback; it
-costs about 9 µs more per call. One copy of the output, with no host allocation.
-There is no allocation of data memory in a callback. The PJRT C API makes a
-small output `PJRT_Buffer` and `PJRT_Event` objects in each call (and a view
-when the view cache misses); these are the only allocations.
+memory. The XLA CPU client accepts a view only of 64-byte aligned memory. An
+input that is not aligned is copied into a persistent aligned staging buffer (no
+allocation after the first call). The output is copied into the diffsol output
+vector with `memcpy` from the PJRT output buffer (CPU: host memory).
+`PJRT_Buffer_ToHostBuffer` is the fallback; it costs about 9 µs more per call.
+One copy of the output, with no host allocation. There is no allocation of data
+memory in a callback. The PJRT C API makes a small output `PJRT_Buffer` and
+`PJRT_Event` objects in each call (and a view when the view cache misses); these
+are the only allocations.
 
 Measured cost (Apple M-series, CPU plugin): about 2.5 µs for each callback call,
-for a small model (execute and wait about 2.0 µs, copy out 0.1 µs; with the view
-cache, almost no view is made). Output aliasing with a donated view of `y` does
-not work with the CPU client.
+for a small model.
 
 Benchmark (`bench/bench.py`, Apple M-series, 16 GiB): rtol 1e-6, atol 1e-8, 41
 output times. Times in ms (median). The gradient is of `sum(ys[..., 0])`.
@@ -163,9 +141,9 @@ The executables depend on the number of lanes `B`. `B` is known only after
 ## Pytree variables
 
 The solver core works on a flat `f64[B, nparams]` parameter buffer — the right
-representation for the callbacks, the sensitivity lanes, and the FFI. The
-pytree API (`System` and `variables_like`, in `_params.py`) is a thin boundary
-layer over it:
+representation for the callbacks, the sensitivity lanes, and the FFI. The pytree
+API (`System` and `variables_like`, in `_params.py`) is a thin boundary layer
+over it:
 
 - At model construction the leaves of the example pytree are split into
   **trainable** (float or complex arrays) and **static** (everything else,

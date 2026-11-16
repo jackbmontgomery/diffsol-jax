@@ -1,19 +1,3 @@
-"""The diffsol solves as JAX primitives (`jax.experimental.hijax.HiPrim`).
-
-`SolveAdjoint` and `SolveForward` are the primitives of `Model.solve`: `expand` is the
-implementation, `jvp` the forward sensitivities, `vjp_fwd`/`vjp_bwd_retval` the reverse mode
-(the diffsol adjoint, or the transpose of the forward sensitivities), and `batch` the vmap rule
-(a vmapped axis of `params` becomes more lanes in one solve).
-
-The bodies of the AD rules must themselves work under `jax.vmap` (in `jax.vmap` of `jax.grad`,
-the rules run on batched tracers), so each FFI call the rules make is also a primitive with a
-`batch` rule: `_VjpFwdOp`, `_FwdSensOp` and `VjpBkwd`.
-
-The callback executables depend on the number of lanes `B`, which is known only after all the
-batching, so each `expand` compiles the callbacks that are missing for its `B` before the FFI
-call (`expand` runs with the final shapes, in eager evaluation and in lowering).
-"""
-
 import math
 
 import jax

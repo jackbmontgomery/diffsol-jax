@@ -1,26 +1,3 @@
-"""diffsol solves as JAX operations.
-
-Define the equations as a `System` (fields are the differentiable inputs, methods are the
-equations) or as plain JAX functions:
-
-    class Weather(System):
-        y0: jax.Array
-        net: MLP
-
-        def init(self, t):
-            return self.y0
-
-        def __call__(self, x, t):
-            return self.net(x)
-
-    model = Model(Weather(y0=y0, net=net), ode_solver="tsit45")
-    model = Model(rhs=lambda x, p, t: -p[0] * x, init=lambda p, t: y0, nstates=2, nparams=1)
-
-`model.solve(params, t_eval)` works under `jax.jit`, `jax.grad`, `jax.jacfwd`, `jax.jacrev`
-and `jax.vmap`. See the documentation for the full story: getting started, gradients, DAEs,
-and architecture.
-"""
-
 import weakref
 
 import jax
@@ -40,8 +17,8 @@ _MATRIX_TYPES = {"nalgebra_dense": 0, "faer_dense": 1, "faer_sparse": 2}
 
 
 def _diagonal_mass(algebraic, nstates):
-    """The diagonal mass of `algebraic`: an int (the last `algebraic` states are algebraic) or a
-    boolean mask of length `nstates` (True marks an algebraic state)."""
+    """The diagonal mass of `algebraic`: an int meaning that last `algebraic` states are algebraic
+    or a boolean mask of length `nstates` with True denoting an algebraic state."""
     if isinstance(algebraic, bool):
         raise DiffsolJaxError("algebraic must be an int or a boolean mask, not a bool")
     if isinstance(algebraic, (int, jnp.integer)):
@@ -61,8 +38,7 @@ def _diagonal_mass(algebraic, nstates):
 
 
 def _check_mass_is_linear(mass, nstates, nparams):
-    """Check at a random point that `mass(v, p, t)` is linear in `v` and independent of `p`
-    (see the DAEs documentation for why)."""
+    """Check at a random point that `mass(v, p, t)` is linear in `v` and independent of `p`"""
     rng = np.random.default_rng(0)
     v1, v2 = (
         jnp.asarray(rng.standard_normal(nstates)),
@@ -115,9 +91,7 @@ class Model:
         max_checkpoints=8,
     ):
         if not jax.config.read("jax_enable_x64"):
-            raise DiffsolJaxError(
-                "diffsol_jax needs jax_enable_x64 (the solver uses f64)"
-            )
+            raise DiffsolJaxError("diffsol_jax needs jax_enable_x64")
         if isinstance(rhs, _params.System):
             system = rhs
             given = {

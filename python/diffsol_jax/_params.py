@@ -1,6 +1,3 @@
-"""The `System` base class, and the pytree boundary layer over the solver's flat parameter
-vector (see the architecture documentation)."""
-
 import abc
 import dataclasses
 import math
@@ -17,22 +14,8 @@ from ._lib import DiffsolJaxError
 class System(abc.ABC):
     """An ODE system: the differentiable inputs as fields, the equations as methods.
 
-        class WeatherSystem(System):
-            y0: jax.Array
-            net: NeuralNetwork
-
-            def init(self, t):
-                return self.y0
-
-            def __call__(self, x, t):
-                return self.net(x)
-
-        model = Model(WeatherSystem(y0=y0, net=net), ode_solver="tsit45")
-
     Subclasses are frozen dataclasses registered as pytrees. Field leaves that are float (or
-    complex) arrays are trainable; every other field is fixed when the model is built. See
-    the getting-started documentation for the full rules.
-    """
+    complex) arrays are trainable; every other field is fixed when the model is built."""
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -43,7 +26,7 @@ class System(abc.ABC):
         jax.tree_util.register_dataclass(cls, data_fields=data, meta_fields=static)
 
     def replace(self, **changes: Any) -> Self:
-        """A copy with the given fields replaced (instances are frozen)."""
+        """A copy with the given fields replaced."""
         return dataclasses.replace(cast(Any, self), **changes)
 
     @abc.abstractmethod
@@ -60,7 +43,7 @@ class System(abc.ABC):
 
     def mass(self, v: jax.Array, t: jax.Array) -> jax.Array:
         """Override: the mass matrix action `M(t) v`, linear in `v` and not using the
-        trainable fields (see the DAEs documentation)."""
+        trainable fields."""
         raise NotImplementedError
 
 

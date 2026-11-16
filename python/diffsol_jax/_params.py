@@ -1,20 +1,5 @@
-"""The `System` class, and pytree variables as a boundary layer over the flat `f64[nparams]`
-vector.
-
-`System` is the abstract base for an ODE system: subclasses declare fields (the initial state,
-network weights, rate constants, ...) and define the equations as methods over those fields.
-Instances are frozen dataclasses registered as pytrees, so `jax.grad`, `jax.vmap` and optax
-work on them directly, and `Model(system)` derives the equations and sizes from them.
-
-`ParamSpec(variables_like)` splits the leaves of the example pytree (a `System` instance, or
-any other pytree) into trainable (inexact-dtype arrays) and static (everything else, fixed at
-model construction). `ravel` takes a pytree of the same structure to the flat vector at the
-solve boundary; `bind` rebuilds the pytree from the flat vector inside the traced callbacks,
-where its slices and reshapes fuse away. The ravel is built from
-`reshape`/`concatenate`/`astype`, so `jax.grad` returns a pytree of the same structure (each
-leaf's gradient in that leaf's own dtype) and `jax.vmap` over any leaf batches the flat
-vector.
-"""
+"""The `System` base class, and the pytree boundary layer over the solver's flat parameter
+vector (see the architecture documentation)."""
 
 import abc
 import dataclasses
@@ -30,11 +15,11 @@ from ._lib import DiffsolJaxError
 
 @dataclass_transform(frozen_default=True, field_specifiers=(dataclasses.field,))
 class System(abc.ABC):
-    """An ODE system: its differentiable inputs as fields, its equations as methods.
+    """An ODE system: the differentiable inputs as fields, the equations as methods.
 
         class WeatherSystem(System):
             y0: jax.Array
-            net: NeuralNetwork              # any pytree, e.g. an eqx.Module
+            net: NeuralNetwork
 
             def init(self, t):
                 return self.y0
@@ -42,19 +27,11 @@ class System(abc.ABC):
             def __call__(self, x, t):
                 return self.net(x)
 
-        system = WeatherSystem(y0=y0, net=net)
-        model = Model(system, ode_solver="tsit45")   # nstates inferred from init
-        ys = model.solve(system, t_eval)
+        model = Model(WeatherSystem(y0=y0, net=net), ode_solver="tsit45")
 
-    Subclasses are frozen dataclasses registered as pytrees. `init(t)` gives the initial state
-    and `__call__(x, t)` the right-hand side; override `out(x, t)` for an output function and
-    `mass(v, t)` for a mass matrix action (see `Model`). Field leaves that are float (or
-    complex) arrays are trainable: `model.solve` differentiates with respect to them and
-    `jax.grad` returns a `WeatherSystem` of gradients, so an optax update applies directly.
-    Every other field (ints, bools, callables) is fixed when the model is built. Mark a field
-    static with `dataclasses.field(metadata={"static": True})` to keep it out of the pytree
-    leaves entirely (it must then be hashable). Field names must not shadow the methods
-    (`init`, `out`, `mass`, `replace`).
+    Subclasses are frozen dataclasses registered as pytrees. Field leaves that are float (or
+    complex) arrays are trainable; every other field is fixed when the model is built. See
+    the getting-started documentation for the full rules.
     """
 
     def __init_subclass__(cls, **kwargs):
@@ -82,9 +59,8 @@ class System(abc.ABC):
         raise NotImplementedError
 
     def mass(self, v: jax.Array, t: jax.Array) -> jax.Array:
-        """Override: the mass matrix action `M(t) v`, linear in `v`. It must not use the
-        trainable fields (checked at model construction): the diffsol sensitivities have no
-        dM/dp term, so the gradient of a trainable mass would be wrong."""
+        """Override: the mass matrix action `M(t) v`, linear in `v` and not using the
+        trainable fields (see the DAEs documentation)."""
         raise NotImplementedError
 
 
@@ -114,9 +90,7 @@ class ParamSpec:
             )
 
     def ravel(self, variables):
-        """The trainable leaves of `variables`, flattened and concatenated to
-        `f64[nparams]`. The values of the static leaves are ignored: they were fixed when
-        the model was built."""
+        """The trainable leaves of `variables` as one `f64[nparams]` vector."""
         leaves, treedef = jax.tree_util.tree_flatten_with_path(variables)
         if treedef != self.treedef:
             raise DiffsolJaxError(
@@ -146,8 +120,7 @@ class ParamSpec:
         return jnp.concatenate(flat)
 
     def bind_equations(self, rhs, init, out, mass):
-        """The user functions over the pytree, as functions of the flat `f64[nparams]`
-        vector, with f64 outputs whatever the leaf dtypes."""
+        """The user functions over the pytree, as functions of the flat vector."""
 
         def wrap(f):
             if f is None:
@@ -163,12 +136,11 @@ class ParamSpec:
         return rhs_flat, init_flat, wrap(out), wrap(mass)
 
     def bind(self, flat):
-        """The pytree of `f64[nparams]`: the trainable leaves carved out of `flat`, the
-        static leaves from construction."""
+        """The pytree rebuilt from the flat `f64[nparams]` vector."""
         leaves, i = [], 0
         for t, shape, static in zip(self.trainable, self.shapes, self.statics):
             if t:
-                assert shape is not None  # set for every trainable leaf
+                assert shape is not None
                 n = math.prod(shape)
                 leaves.append(flat[i : i + n].reshape(shape))
                 i += n

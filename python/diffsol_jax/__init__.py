@@ -1,29 +1,11 @@
-"""diffsol solves as JAX operations, with the ODE equations given as JAX functions.
+"""diffsol solves as JAX operations.
 
-    import jax, jax.numpy as jnp
-    jax.config.update("jax_enable_x64", True)
-    from diffsol_jax import Model
-
-    model = Model(
-        rhs=lambda x, p, t: -p[0] * x,
-        init=lambda p, t: jnp.ones(2),
-        nstates=2, nparams=1,
-    )
-    ys = model.solve(params, t_eval)       # params [..., nparams] -> ys [..., nt, nout]
-    jax.grad(lambda p: model.solve(p, t_eval).sum())(params)
-
-The functions act on one lane. diffsol calls the callbacks (compiled with the PJRT C API) for
-all the lanes of a solve together. `jax.vmap` over `params` gives more lanes in one solve.
-
-A `System` packages the equations and their differentiable inputs in one class: the fields
-are the variables (a frozen dataclass pytree) and the methods are the equations — `init(t)`
-the initial state, `__call__(x, t)` the right-hand side, optionally `out(x, t)` and
-`mass(v, t)`. `Model(system)` derives `rhs`, `init`, `nstates` and `nout` from it. Natural
-for ML, where the variables are a network plus an initial state:
+Define the equations as a `System` (fields are the differentiable inputs, methods are the
+equations) or as plain JAX functions:
 
     class Weather(System):
         y0: jax.Array
-        net: MLP                           # an eqx.Module
+        net: MLP
 
         def init(self, t):
             return self.y0
@@ -31,34 +13,12 @@ for ML, where the variables are a network plus an initial state:
         def __call__(self, x, t):
             return self.net(x)
 
-    system = Weather(y0=y0, net=net)
-    model = Model(system, ode_solver="tsit45")
-    ys = model.solve(system, t_eval)       # -> [nt, nout]; batch leaves with jax.vmap
-    grads = jax.grad(lambda s: loss(model.solve(s, t_eval)))(system)   # a Weather
+    model = Model(Weather(y0=y0, net=net), ode_solver="tsit45")
+    model = Model(rhs=lambda x, p, t: -p[0] * x, init=lambda p, t: y0, nstates=2, nparams=1)
 
-Leaves that are float arrays are trainable (raveled into the flat parameter vector of the
-solver, so `jax.grad` returns a pytree of the same structure and optax applies directly);
-every other leaf is fixed at model construction. The lower-level `variables_like=` takes the
-variables as any pytree (an `eqx.Module`, a dict, ...) with the functional `rhs`/`init`
-receiving that pytree in place of the flat `p`.
-
-The solve is a `jax.experimental.hijax.HiPrim` (see `_primitives`). Forward mode (`jax.jvp`,
-`jax.jacfwd`) uses diffsol forward sensitivities on every model. Reverse mode (`jax.grad`,
-`jax.jacrev`) depends on `ad`: with `ad="adjoint"` (the default) it uses the diffsol adjoint
-(the forward solve keeps a checkpoint in C++ and gives an int64 handle to the backward solve;
-the model keeps at most `max_checkpoints` checkpoints, and a backward solve whose checkpoint
-was freed runs the forward solve again from the `params` and `t_eval` that it also gets, so
-`max_checkpoints` controls only the memory); with `ad="forward"` it is the transpose of the
-forward sensitivities.
-
-A model with a mass matrix solves `M(t) u' = f(u, p, t)`: `mass(v, p, t)` is the action `M v`,
-linear in `v` and independent of `p` (the diffsol sensitivities have no dM/dp term, so a
-parameter-dependent mass is rejected). A singular `M` gives a semi-explicit index-1 DAE;
-`algebraic=` (an int or a boolean mask) is a shortcut for the diagonal mass with zeros on the
-algebraic states. The
-initial state is projected onto the algebraic constraints (diffsol solves the algebraic
-variables at `t0`), the gradients account for it, and a DAE needs an implicit solver
-(`bdf`, `esdirk34` or `tr_bdf2`). Higher-index DAEs must be reduced to index 1 first.
+`model.solve(params, t_eval)` works under `jax.jit`, `jax.grad`, `jax.jacfwd`, `jax.jacrev`
+and `jax.vmap`. See the documentation for the full story: getting started, gradients, DAEs,
+and architecture.
 """
 
 import weakref
@@ -101,10 +61,8 @@ def _diagonal_mass(algebraic, nstates):
 
 
 def _check_mass_is_linear(mass, nstates, nparams):
-    """`mass(v, p, t)` must be the action of a matrix on `v`: check linearity in `v`, and that
-    the matrix does not depend on `p`, at a random point, once, at model construction. The
-    sensitivity and adjoint equations of diffsol have no dM/dp term, so the gradient of a
-    parameter-dependent mass would silently miss it."""
+    """Check at a random point that `mass(v, p, t)` is linear in `v` and independent of `p`
+    (see the DAEs documentation for why)."""
     rng = np.random.default_rng(0)
     v1, v2 = (
         jnp.asarray(rng.standard_normal(nstates)),
@@ -133,6 +91,10 @@ def _check_mass_is_linear(mass, nstates, nparams):
 
 
 class Model:
+    """A diffsol solver for one problem: `Model(system, **options)`, or the functional form
+    `Model(rhs, init, nstates, ...)` with `nparams` (flat parameters) or `variables_like`
+    (pytree parameters). `solve(params, t_eval)` returns `ys [..., nt, nout]`."""
+
     def __init__(
         self,
         rhs=None,
@@ -213,7 +175,7 @@ class Model:
                 "a model with a mass matrix (a DAE) needs an implicit solver: "
                 "ode_solver='bdf', 'esdirk34' or 'tr_bdf2'"
             )
-        assert nparams is not None  # the mode checks above guarantee it
+        assert nparams is not None
         self.eq = Equations(rhs, init, nstates, nparams, out, nout, mass)
         self.nstates, self.nparams, self.nout = nstates, nparams, nout
         self.nsolution = nout if nout > 0 else nstates
@@ -332,11 +294,8 @@ class Model:
             return params, t_eval
 
         def run(params, t_eval) -> jax.Array:
-            """Solve for `params` at the times `t_eval [nt]` and return
-            `ys [..., nt, nout]` (`nout = nstates` if the model has no `out`). With
-            `nparams`, `params` is `[..., nparams]` and solves each lane; with
-            `variables_like`, it is a pytree of that structure and batching is by
-            `jax.vmap` over its leaves."""
+            """Solve for `params` (`[..., nparams]`, or the variables pytree) at the times
+            `t_eval [nt]`; returns `ys [..., nt, nout]`."""
             params, t_eval = check(params, t_eval)
             prim = prim_cls(jax.typeof(params), jax.typeof(t_eval), **kw)
             return prim(params, t_eval)

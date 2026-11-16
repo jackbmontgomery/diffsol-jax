@@ -22,7 +22,8 @@ not ship one as a loadable library. A prebuilt plugin for linux/amd64 is inside
 [gopjrt](https://github.com/gomlx/gopjrt)'s `gomlx_xlabuilder_linux_amd64.tar.gz` release asset
 (at `lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so`; the macOS arm64 asset is
 `gopjrt_cpu_darwin_arm64.tar.gz`), or you can build `pjrt_c_api_cpu_plugin.so` from
-[openxla/xla](https://github.com/openxla/xla). Point the environment variable at it:
+[openxla/xla](https://github.com/openxla/xla). Put it in `~/.local/share/pjrt/`, where it is
+found automatically, or point the environment variable at it:
 
 ```bash
 export DIFFSOL_JAX_PJRT_PLUGIN=/path/to/pjrt_c_api_cpu_plugin.so

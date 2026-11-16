@@ -2,11 +2,9 @@
 
 !!! note
 
-```text
-This page is the design document of the PJRT architecture, vendored from the
-[diffsol `diffsol-jax2` example](https://github.com/martinjrobins/diffsol/tree/diffsol-jax2/examples/diffsol-jax)
-that this library is built on.
-```
+    This page is the design document of the PJRT architecture, vendored from the
+    [diffsol `diffsol-jax2` example](https://github.com/martinjrobins/diffsol/tree/diffsol-jax2/examples/diffsol-jax)
+    that this library is built on.
 
 Use diffsol solves as JAX operations. Write the ODE equations as JAX functions.
 Use the solves in `jax.jit`, `jax.vmap`, `jax.grad`, `jax.jacfwd` and
@@ -161,6 +159,32 @@ git). The gap of about 1.05 s per solve:
 The executables depend on the number of lanes `B`. `B` is known only after
 `jax.vmap`, so the lowering rule of each solve compiles the callbacks for its
 `B`.
+
+## Pytree variables
+
+The solver core works on a flat `f64[B, nparams]` parameter buffer — the right
+representation for the callbacks, the sensitivity lanes, and the FFI. The
+pytree API (`System` and `variables_like`, in `_params.py`) is a thin boundary
+layer over it:
+
+- At model construction the leaves of the example pytree are split into
+  **trainable** (float or complex arrays) and **static** (everything else,
+  including the tree structure itself). The user functions are wrapped once so
+  the callbacks see the pytree; the wrapper rebuilds it from the flat vector
+  with slices and reshapes, which are traced into the compiled callbacks and
+  fuse away.
+- At the solve boundary, `solve` flattens the trainable leaves to the flat
+  vector. The ravel is built from `reshape`/`concatenate`/`astype`, so JAX AD
+  and `vmap` compose through it: `jax.grad` returns a pytree of the same
+  structure (each leaf's gradient in that leaf's own dtype — an f32 leaf gets
+  an f32 gradient), and a vmapped leaf batches the flat vector into solver
+  lanes.
+- The pytree **structure** is part of the model: changing it changes `nparams`
+  and the compiled callbacks, so it needs a new `Model`. Changing leaf values
+  is the hot path and costs nothing.
+
+Nothing below `Model.__init__` knows about pytrees; `_lower.py`,
+`_primitives.py` and the C++ are unchanged by this layer.
 
 Reverse mode (`ad="adjoint"`, the default) uses the diffsol VJP. The forward
 solve keeps the checkpoint in C++ and gives an int64 handle to the backward

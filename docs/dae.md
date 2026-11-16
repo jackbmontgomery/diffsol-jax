@@ -28,6 +28,9 @@ model = Model(
 )
 ```
 
+`algebraic=` combines with a [`System`](getting-started.md#systems-classes-instead-of-flat-vectors)
+the same way: `Model(system, algebraic=1)`.
+
 A classic example: the Robertson system with its conservation law as a constraint,
 
 ```python
@@ -57,11 +60,13 @@ the gradients account for the projection.
 ## General mass matrices
 
 For a non-diagonal or time-dependent mass, give `mass=lambda v, p, t: ...`, the action
-$v \mapsto M(t)\,v$. It must be **linear in `v`** and must **not use `p`** — both are checked
-once at model construction. The parameter restriction exists because diffsol's sensitivity and
-adjoint equations have no $\partial M/\partial p$ term, so the gradient of a
-parameter-dependent mass would silently miss it; fold such parameters into `rhs` instead (for
-example divide the differential equations by them, or scale the algebraic equations).
+$v \mapsto M(t)\,v$ — or override `mass(self, v, t)` on a `System`. It must be **linear in
+`v`** and must **not use the parameters** (for a `System`: the trainable fields) — both are
+checked once at model construction. The parameter restriction exists because diffsol's
+sensitivity and adjoint equations have no $\partial M/\partial p$ term, so the gradient of a
+parameter-dependent mass would silently miss it; fold such parameters into the right-hand
+side instead (for example divide the differential equations by them, or scale the algebraic
+equations).
 
 ## Limits
 

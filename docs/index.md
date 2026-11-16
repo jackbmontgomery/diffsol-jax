@@ -15,7 +15,11 @@ is a `solve` that plugs straight into the JAX ecosystem:
 - it differentiates under `jax.grad`, `jax.jacrev`, `jax.jvp`, and `jax.jacfwd`;
 - it batches under `jax.vmap` — a vmapped axis becomes more lanes in a single
   batched solve, not a loop of solves;
-- it solves **DAEs** (singular mass matrices).
+- it solves **DAEs** (singular mass matrices);
+- it takes the parameters as a **pytree**: a
+  [`System`](getting-started.md#systems-classes-instead-of-flat-vectors) class
+  bundles the equations with a network's weights and the initial state, for
+  neural ODEs trained with optax.
 
 ## Installation
 
@@ -71,12 +75,39 @@ many = jax.vmap(model.solve, (0, None))(
 )  # one solve, 64 lanes
 ```
 
-## Sharp bits :knife
+For ML — a neural network inside the ODE, trained by gradient descent — define the problem as
+one class instead:
+
+```python
+from diffsol_jax import Model, System
+
+
+class WeatherSystem(System):
+    y0: jax.Array  # the initial state, trained with everything else
+    net: eqx.Module  # any pytree of weights
+
+    def init(self, t):
+        return self.y0
+
+    def __call__(self, x, t):
+        return self.net(x)
+
+
+system = WeatherSystem(y0=y0, net=net)
+model = Model(system, ode_solver="tsit45")
+grads = jax.grad(loss)(system)  # a WeatherSystem — optax applies directly
+```
+
+See [Systems](getting-started.md#systems-classes-instead-of-flat-vectors) for the rules, and
+the `examples/neural-ode-weather-prediction` example for a full training loop.
+
+## Sharp bits :knife:
 
 - **`f64` is required.** diffsol is built for `f64` like most scientific
   solvers; enable x64 (`jax.config.update("jax_enable_x64", True)`) before
   creating a model.
-- **A CPU PJRT plugin is required.** jaxlib does not ship one; set
+- **A CPU PJRT plugin is required.** jaxlib does not ship one; put it in
+  `~/.local/share/pjrt/` (found automatically) or set
   `DIFFSOL_JAX_PJRT_PLUGIN` to its path (see
   [Getting started](getting-started.md)).
 - **No higher-order derivatives.** `grad(grad(solve(...)))` does not work.

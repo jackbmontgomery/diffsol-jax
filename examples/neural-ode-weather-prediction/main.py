@@ -47,7 +47,7 @@ class NeuralNetwork(eqx.Module):
     layers: list[eqx.nn.Linear]
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        x = jax.nn.silu(self.layers[0](x))  # Swish = SiLU
+        x = jax.nn.silu(self.layers[0](x))
         x = jax.nn.silu(self.layers[1](x))
         return self.layers[2](x)
 
@@ -107,7 +107,7 @@ def plot_round(round_idx, batch_len, predict_ys, path):
             ts[batch_len:], predict_ys[batch_len:, i], "--", label=f"{name}_predict"
         )
         ax.set_ylabel(name)
-        ax.legend(loc="upper left", fontsize="small")
+        ax.legend(fontsize="small")
     axes[-1].set_xlabel("month")
     fig.suptitle(f"neural-ode-weather-prediction, round {round_idx}")
     fig.tight_layout()

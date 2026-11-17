@@ -67,20 +67,17 @@ class WeatherSystem(System):
     y0: jax.Array
     net: NeuralNetwork
 
-    def init(self, t: jax.Array) -> jax.Array:
-        return self.y0
-
     def __call__(self, x: jax.Array, t: jax.Array) -> jax.Array:
         return self.net(x)
 
 
 system0 = WeatherSystem(y0=ys[0], net=make_network(DATA_DIM, jr.key(0)))
 
-model = Model(system0, ode_solver="tsit45")
+model = Model(system0, nstates=DATA_DIM, ode_solver="tsit45")
 
 
 def loss_fn(system, ts_batch, ys_batch):
-    return jnp.sum((model.solve(system, ts_batch) - ys_batch) ** 2)
+    return jnp.sum((model.solve(system.y0, system, ts_batch) - ys_batch) ** 2)
 
 
 value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
@@ -125,7 +122,7 @@ def main():
         rounds.set_postfix(data_points=batch_len)
         system = train_one_round(system, ts[:batch_len], ys[:batch_len], i)
 
-        predict_ys = model.solve(system, ts)
+        predict_ys = model.solve(system.y0, system, ts)
         plot_round(i, batch_len, predict_ys, PLOT_DIR / f"neural-ode-weather_{i}.png")
 
 

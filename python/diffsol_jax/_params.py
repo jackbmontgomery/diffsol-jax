@@ -30,10 +30,6 @@ class System(abc.ABC):
         return dataclasses.replace(cast(Any, self), **changes)
 
     @abc.abstractmethod
-    def init(self, t: jax.Array) -> jax.Array:
-        """The initial state `[nstates]` at the start time `t`."""
-
-    @abc.abstractmethod
     def __call__(self, x: jax.Array, t: jax.Array) -> jax.Array:
         """The right-hand side `[nstates]` at state `x [nstates]` and time `t`."""
 
@@ -102,7 +98,7 @@ class ParamSpec:
             flat.append(leaf.ravel().astype(jnp.float64))
         return jnp.concatenate(flat)
 
-    def bind_equations(self, rhs, init, out, mass):
+    def bind_equations(self, rhs, out, mass):
         """The user functions over the pytree, as functions of the flat vector."""
 
         def wrap(f):
@@ -110,13 +106,7 @@ class ParamSpec:
                 return None
             return lambda x, p, t: jnp.asarray(f(x, self.bind(p), t), jnp.float64)
 
-        def rhs_flat(x, p, t):
-            return jnp.asarray(rhs(x, self.bind(p), t), jnp.float64)
-
-        def init_flat(p, t):
-            return jnp.asarray(init(self.bind(p), t), jnp.float64)
-
-        return rhs_flat, init_flat, wrap(out), wrap(mass)
+        return wrap(rhs), wrap(out), wrap(mass)
 
     def bind(self, flat):
         """The pytree rebuilt from the flat `f64[nparams]` vector."""

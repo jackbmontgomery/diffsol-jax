@@ -29,6 +29,12 @@ where $u(t) \in \mathbb{R}^{n}$ is the state, $p \in \mathbb{R}^{m}$ the
 parameters, and $M$ an optional [mass matrix](dae.md). `solve` returns the
 solution sampled at the times in `t_eval`.
 
+`solve(y0, params, t_eval)` makes the initial state an argument, and $p$ above is
+the concatenation $(\texttt{params}, \texttt{y0})$, with
+$u_0(p) = \texttt{y0}$. Everything below therefore applies to `y0` unchanged:
+$\partial u_0 / \partial p = [\,0 \mid I\,]$, and the `y0` gradient is the tail
+of the parameter gradient.
+
 ## Forward sensitivities
 
 At a fixed time define the sensitivity matrix
@@ -40,9 +46,9 @@ $$ M \frac{\mathrm{d}S}{\mathrm{d}t} = \frac{\partial f}{\partial u}\, S + \frac
 diffsol solves this augmented system together with the state, using the same
 solver and tolerances. The Jacobians are never formed: the $j$-th column of the
 right-hand side is a single Jacobian–vector product of $f$, which diffsol-jax
-derives from your `rhs` with `jax.jvp` and compiles like any other callback. The
-initial condition comes from differentiating `init`, so parameters of the
-initial state are included. Given a parameter tangent $\dot p$, forward mode
+derives from your `rhs` with `jax.jvp` and compiles like any other callback.
+$S(t_0)$ selects the `y0` block, so the initial state is differentiated on the
+same footing as the parameters. Given a parameter tangent $\dot p$, forward mode
 returns $\dot u = S \dot p$.
 
 ## The adjoint

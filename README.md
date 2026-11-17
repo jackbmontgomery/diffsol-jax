@@ -23,19 +23,24 @@ from diffsol_jax import Model
 
 model = Model(
     rhs=lambda x, p, t: p[0] * x * (1.0 - x),  # one lane: x [nstates], p [nparams]
-    init=lambda p, t: jnp.array([0.1]),
     nstates=1,
     nparams=1,
 )
+y0, p = jnp.array([0.1]), jnp.array([1.0])
 t = jnp.linspace(0.0, 5.0, 11)
-ys = model.solve(jnp.array([1.0]), t)  # [nt, nstates]
-ys = jax.vmap(model.solve, (0, None))(jnp.ones((64, 1)), t)  # one solve with 64 lanes
-g = jax.grad(lambda p: model.solve(p, t).sum())(jnp.array([1.0]))
+ys = model.solve(y0, p, t)  # [nt, nstates]
+ys = jax.vmap(model.solve, (None, 0, None))(y0, jnp.ones((64, 1)), t)  # 64 lanes, one solve
+g_y0, g_p = jax.grad(lambda y0, p: model.solve(y0, p, t).sum(), (0, 1))(y0, p)
 ```
 
-Reverse mode (`ad="adjoint"`, the default) uses the diffsol adjoint with checkpointing; forward
-mode (`ad="forward"`) uses diffsol forward sensitivities. A `jax.vmap` over `params` becomes more
-lanes in a single batched solve, not a loop of solves.
+`solve(y0, params, t_eval)` is differentiable in both `y0` and `params`. Reverse mode
+(`ad="adjoint"`, the default) uses the diffsol adjoint with checkpointing; forward mode
+(`ad="forward"`) uses diffsol forward sensitivities. A `jax.vmap` over `y0` or `params` becomes
+more lanes in a single batched solve, not a loop of solves — so an ensemble over initial
+conditions costs one solve.
+
+An initial state that is itself a function of the parameters is ordinary JAX composition:
+`model.solve(f(p), p, t)` differentiates through `f` without any special case.
 
 ## Neural ODEs
 
@@ -50,21 +55,20 @@ class WeatherSystem(System):
     y0: jax.Array    # the initial state, trained with everything else
     net: eqx.Module  # any pytree of weights
 
-    def init(self, t):
-        return self.y0
-
     def __call__(self, x, t):
         return self.net(x)
 
 system = WeatherSystem(y0=y0, net=net)
-model = Model(system, ode_solver="tsit45")  # nstates inferred
+model = Model(system, nstates=4, ode_solver="tsit45")
 
-loss = lambda s: jnp.sum((model.solve(s, t_eval) - data) ** 2)
+loss = lambda s: jnp.sum((model.solve(s.y0, s, t_eval) - data) ** 2)
 grads = jax.grad(loss)(system)              # a WeatherSystem of gradients
 system = optax.apply_updates(system, optimizer.update(grads, opt_state, system)[0])
 ```
 
-Float-array fields are trainable; everything else is fixed at model construction. See
+Float-array fields are trainable; everything else is fixed at model construction. Keeping `y0`
+as a field is how the initial state is trained with the weights: pass it to `solve` and its
+gradient comes back in the same pytree. See
 [examples/neural-ode-weather-prediction](examples/neural-ode-weather-prediction) for a full
 training loop, and the docs for the rules (static fields, `out`/`mass` overrides, batching by
 `jax.vmap` over leaves).
@@ -80,15 +84,17 @@ are algebraic; or a boolean mask):
 # y' = -p0 * y   and   0 = z - p1 * y
 model = Model(
     rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
-    init=lambda p, t: jnp.array([1.0, p[1]]),
     nstates=2,
     nparams=2,
     algebraic=1,
 )
+p = jnp.array([0.7, 2.0])
+ys = model.solve(jnp.array([1.0, p[1]]), p, t_eval)  # a consistent y0
 ```
 
 The initial state is projected onto the algebraic constraints automatically (diffsol solves the
-algebraic variables at `t0`), and the gradients account for it. For a general (time-dependent)
+algebraic variables at `t0`), and the gradients account for it — so the algebraic entries of the
+`y0` you pass are only a starting guess. For a general (time-dependent)
 mass matrix, give `mass=lambda v, p, t: ...`, the action `M(t) v`, which must be linear in `v`
 and must not use `p` (the diffsol sensitivities have no `dM/dp` term, so a parameter-dependent
 mass would give a wrong gradient and is rejected — fold such parameters into `rhs` instead).

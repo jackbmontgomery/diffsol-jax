@@ -333,7 +333,6 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
     y0 = jnp.asarray(m["y0"])
     model = Model(
         rhs=m["rhs"],
-        init=lambda p, t: y0,
         nstates=nst,
         nparams=npar,
         ode_solver=m["solver"],
@@ -342,8 +341,8 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
         # one checkpoint: the registry is cleared after each gradient timing anyway
         max_checkpoints=1,
     )
-    jax_solve = jax.jit(model.solve)
-    jax_grad = jax.jit(jax.grad(lambda p: model.solve(p, t_jax)[..., 0].sum()))
+    jax_solve = jax.jit(lambda p, t: model.solve(y0, p, t))
+    jax_grad = jax.jit(jax.grad(lambda p: model.solve(y0, p, t_jax)[..., 0].sum()))
 
     def dfx_one(p):
         sol = diffrax.diffeqsolve(

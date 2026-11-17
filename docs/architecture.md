@@ -164,6 +164,29 @@ over it:
 Nothing below `Model.__init__` knows about pytrees; `_lower.py`,
 `_primitives.py` and the C++ are unchanged by this layer.
 
+## The initial state
+
+diffsol takes the initial state as `init(p, t)`, a function of the parameters,
+with `init_sens` and `init_sens_adjoint` supplying `dy0/dp`. `solve(y0, params,
+t_eval)` exposes it as an argument by making the internal parameter vector the
+concatenation `[params, y0]`, of width `nparams + nstates`:
+
+- `init(p, t)` is the slice `p[nparams:]`, so `init_sens` is the constant
+  selection matrix `[0 | I]` and `init_sens_adjoint` its transpose. Both are
+  derived by the usual `jax.jvp`/`jax.vjp` lowering, so the gradient with
+  respect to `y0` comes out of the existing sensitivity and adjoint callbacks
+  with no special case in `_primitives.py` or the C++.
+- The user equations are wrapped to see only the `params` head, so `rhs`, `out`
+  and `mass` are unaffected.
+- The concatenation happens in traced JAX code in `solve`, above the primitive.
+  `vmap` therefore batches `y0` through the existing `concatenate` batching rule
+  and into solver lanes, exactly as it does for `params` — a `vmap` over initial
+  conditions is one batched solve.
+
+The cost is `nstates` extra parameter columns. In reverse mode that is free; in
+forward mode (`ad="forward"`, where `P = nparams`) the augmented system grows by
+`nstates` columns.
+
 Reverse mode (`ad="adjoint"`, the default) uses the diffsol VJP. The forward
 solve keeps the checkpoint in C++ and gives an int64 handle to the backward
 solve. The model keeps at most `max_checkpoints` checkpoints. If the checkpoint

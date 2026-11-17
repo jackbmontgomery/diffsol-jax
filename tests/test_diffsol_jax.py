@@ -3,12 +3,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from diffsol_jax import Model
+from diffsol_jax import DiffsolJaxError, Model
 
 jax.config.update("jax_enable_x64", True)
 
 T_EVAL = jnp.array([0.0, 0.5, 1.0, 2.0, 4.0])
 X0 = 0.1
+Y0 = jnp.array([X0])
 
 
 def logistic_exact(r, t):
@@ -18,7 +19,6 @@ def logistic_exact(r, t):
 def logistic(ad="adjoint", **kw):
     return Model(
         rhs=lambda x, p, t: p[0] * x * (1.0 - x / p[1]),
-        init=lambda p, t: jnp.array([X0]),
         nstates=1,
         nparams=2,
         rtol=1e-10,
@@ -41,7 +41,6 @@ def robertson(**kw):
 
     return Model(
         rhs=rhs,
-        init=lambda p, t: jnp.array([1.0, 0.0, 0.0]),
         nstates=3,
         nparams=3,
         rtol=1e-8,
@@ -51,13 +50,14 @@ def robertson(**kw):
 
 
 ROBERTSON_P = jnp.array([0.04, 3e7, 1e4])
+Y0_ROB = jnp.array([1.0, 0.0, 0.0])
 # the classic reference solution at t = 40
 ROBERTSON_40 = np.array([0.7158270687193, 9.185534764529e-6, 0.2841637457471])
 
 
 def test_logistic_solve():
     model = logistic()
-    ys = model.solve(jnp.array([1.0, 1.0]), T_EVAL)
+    ys = model.solve(Y0, jnp.array([1.0, 1.0]), T_EVAL)
     assert ys.shape == (5, 1)
     np.testing.assert_allclose(ys[:, 0], logistic_exact(1.0, T_EVAL), rtol=1e-7)
 
@@ -65,7 +65,6 @@ def test_logistic_solve():
 def test_logistic_out():
     model = Model(
         rhs=lambda x, p, t: p[0] * x * (1.0 - x),
-        init=lambda p, t: jnp.array([X0]),
         out=lambda x, p, t: jnp.array([2.0 * x[0], x[0] ** 2]),
         nout=2,
         nstates=1,
@@ -73,7 +72,7 @@ def test_logistic_out():
         rtol=1e-10,
         atol=1e-10,
     )
-    ys = model.solve(jnp.array([1.0]), T_EVAL)
+    ys = model.solve(Y0, jnp.array([1.0]), T_EVAL)
     x = logistic_exact(1.0, T_EVAL)
     np.testing.assert_allclose(ys, jnp.stack([2 * x, x**2], axis=-1), rtol=1e-7)
 
@@ -81,23 +80,23 @@ def test_logistic_out():
 @pytest.mark.parametrize("solver", ["bdf", "esdirk34", "tr_bdf2"])
 def test_robertson(solver):
     model = robertson(ode_solver=solver)
-    ys = jax.jit(model.solve)(ROBERTSON_P, jnp.array([0.0, 40.0]))
+    ys = jax.jit(model.solve)(Y0_ROB, ROBERTSON_P, jnp.array([0.0, 40.0]))
     np.testing.assert_allclose(ys[-1], ROBERTSON_40, rtol=1e-4)
 
 
 def test_vmap_is_one_solve_and_matches_a_loop():
     model = logistic()
     params = jnp.array([[0.5, 1.0], [1.0, 1.0], [2.0, 1.5]])
-    batched = jax.jit(jax.vmap(model.solve, in_axes=(0, None)))
-    ys = batched(params, T_EVAL)
-    loop = jnp.stack([model.solve(p, T_EVAL) for p in params])
+    batched = jax.jit(jax.vmap(model.solve, in_axes=(None, 0, None)))
+    ys = batched(Y0, params, T_EVAL)
+    loop = jnp.stack([model.solve(Y0, p, T_EVAL) for p in params])
     np.testing.assert_allclose(ys, loop, rtol=1e-8)
-    hlo = batched.lower(params, T_EVAL).as_text()
+    hlo = batched.lower(Y0, params, T_EVAL).as_text()
     assert hlo.count("diffsol_solve_dense") == 1
 
 
 def loss(model, p):
-    return jnp.sum(model.solve(p, T_EVAL) ** 2)
+    return jnp.sum(model.solve(Y0, p, T_EVAL) ** 2)
 
 
 def finite_difference(f, p, h=1e-6):
@@ -118,10 +117,10 @@ def test_grad(ad):
 
 def test_forward_and_adjoint_jacobians_agree():
     p = jnp.array([1.2, 1.5])
-    fwd = jax.jacfwd(lambda p: logistic("forward").solve(p, T_EVAL))(p)
+    fwd = jax.jacfwd(lambda p: logistic("forward").solve(Y0, p, T_EVAL))(p)
     # jacrev maps over the cotangent: one backward solve with nout * nt directions
     model = logistic("adjoint")
-    rev = jax.jit(jax.jacrev(lambda p: model.solve(p, T_EVAL)))(p)
+    rev = jax.jit(jax.jacrev(lambda p: model.solve(Y0, p, T_EVAL)))(p)
     np.testing.assert_allclose(rev, fwd, rtol=1e-6, atol=1e-10)
 
 
@@ -129,8 +128,8 @@ def test_jacobians_with_either_ad_mode():
     # one primitive carries both AD rules: jacfwd works on an adjoint model (the forward
     # sensitivities), and jacrev on a forward model (their transpose)
     p = jnp.array([1.2, 1.5])
-    fwd = jax.jacfwd(lambda p: logistic("adjoint").solve(p, T_EVAL))(p)
-    rev = jax.jacrev(lambda p: logistic("forward").solve(p, T_EVAL))(p)
+    fwd = jax.jacfwd(lambda p: logistic("adjoint").solve(Y0, p, T_EVAL))(p)
+    rev = jax.jacrev(lambda p: logistic("forward").solve(Y0, p, T_EVAL))(p)
     np.testing.assert_allclose(rev, fwd, rtol=1e-6, atol=1e-10)
 
 
@@ -138,8 +137,10 @@ def test_vmap_of_jacrev():
     # the vmapped lane axis and the jacrev direction axis go through one backward solve
     model = logistic()
     params = jnp.array([[0.5, 1.0], [1.0, 1.0], [2.0, 1.5]])
+
     def f(p):
-        return model.solve(p, T_EVAL)
+        return model.solve(Y0, p, T_EVAL)
+
     jac = jax.jit(jax.vmap(jax.jacrev(f)))(params)
     loop = jnp.stack([jax.jacrev(f)(p) for p in params])
     np.testing.assert_allclose(jac, loop, rtol=1e-6, atol=1e-10)
@@ -158,8 +159,10 @@ def test_vmap_of_grad():
 def test_robertson_grad():
     model = robertson()
     t = jnp.array([0.0, 1.0, 10.0, 40.0])
+
     def f(logp):
-        return jnp.sum(model.solve(jnp.exp(logp), t)[:, 0])
+        return jnp.sum(model.solve(Y0_ROB, jnp.exp(logp), t)[:, 0])
+
     logp = jnp.log(ROBERTSON_P)
     grad = jax.jit(jax.grad(f))(logp)
     np.testing.assert_allclose(grad, finite_difference(f, logp, 1e-5), rtol=1e-3)
@@ -167,7 +170,7 @@ def test_robertson_grad():
 
 def test_vjp_function_can_run_two_times():
     model = logistic()
-    ys, vjp = jax.vjp(lambda p: model.solve(p, T_EVAL), jnp.array([1.0, 1.0]))
+    ys, vjp = jax.vjp(lambda p: model.solve(Y0, p, T_EVAL), jnp.array([1.0, 1.0]))
     (g1,) = vjp(jnp.ones_like(ys))
     (g2,) = vjp(jnp.ones_like(ys))
     np.testing.assert_allclose(g1, g2)
@@ -176,11 +179,11 @@ def test_vjp_function_can_run_two_times():
 def test_evicted_checkpoint_is_recomputed():
     model = logistic(max_checkpoints=1)
     p = jnp.array([1.0, 1.0])
-    ys, vjp = jax.vjp(lambda p: model.solve(p, T_EVAL), p)
+    ys, vjp = jax.vjp(lambda p: model.solve(Y0, p, T_EVAL), p)
     (expected,) = vjp(jnp.ones_like(ys))
     assert model.num_recomputes() == 0
     # a second forward solve frees the first checkpoint
-    jax.vjp(lambda p: model.solve(p, T_EVAL), jnp.array([2.0, 1.0]))
+    jax.vjp(lambda p: model.solve(Y0, p, T_EVAL), jnp.array([2.0, 1.0]))
     (grad,) = vjp(jnp.ones_like(ys))
     assert model.num_recomputes() == 1
     np.testing.assert_allclose(grad, expected, rtol=1e-12)
@@ -193,7 +196,7 @@ def test_grad_of_scan_with_more_solves_than_checkpoints():
 
     def f(p):
         def body(acc, r):
-            return acc + jnp.sum(model.solve(p * r, T_EVAL) ** 2), None
+            return acc + jnp.sum(model.solve(Y0, p * r, T_EVAL) ** 2), None
 
         return jax.lax.scan(body, 0.0, jnp.linspace(0.8, 1.2, 6))[0]
 
@@ -215,6 +218,7 @@ def _bkwd(model, handle, params, ct):
 
 
 def _fwd(model, params):
+    """`params` here is the internal vector `[p0, p1, y0]` that the primitives take."""
     from diffsol_jax import _primitives
 
     kw = {"model": model, "rtol": model.rtol, "atol": model.atol}
@@ -224,7 +228,7 @@ def _fwd(model, params):
 
 def test_handle_with_other_params_is_not_used():
     model = logistic()
-    p1, p2 = jnp.array([[1.0, 1.0]]), jnp.array([[2.0, 1.5]])
+    p1, p2 = jnp.array([[1.0, 1.0, X0]]), jnp.array([[2.0, 1.5, X0]])
     ys, h1 = _fwd(model, p1)
     ct = jnp.ones_like(ys)
     expected = _bkwd(model, _fwd(model, p2)[1], p2, ct)
@@ -236,7 +240,7 @@ def test_handle_with_other_params_is_not_used():
 
 def test_mixed_handles_are_not_used():
     model = logistic()
-    p = jnp.array([[1.0, 1.0], [2.0, 1.5]])
+    p = jnp.array([[1.0, 1.0, X0], [2.0, 1.5, X0]])
     ys, h = _fwd(model, p)
     ct = jnp.ones_like(ys)
     expected = _bkwd(model, h, p, ct)
@@ -246,3 +250,9 @@ def test_mixed_handles_are_not_used():
     grad = _bkwd(model, h.at[1].set(other[0]), p, ct)
     assert model.num_recomputes() == before + 1
     np.testing.assert_allclose(grad, expected, rtol=1e-12)
+
+
+def test_mismatched_batch_axes_raise():
+    model = logistic()
+    with pytest.raises(DiffsolJaxError, match="do not broadcast together"):
+        model.solve(jnp.ones((3, 1)), jnp.ones((4, 2)), T_EVAL)

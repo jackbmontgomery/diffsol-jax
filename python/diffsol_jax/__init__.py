@@ -66,15 +66,21 @@ def _check_mass_is_linear(mass, nstates, nparams):
         )
 
 
+def _over_params(nparams, f):
+    """`f(a, p, t)` over the user parameters, as a function of the internal `[params, y0]`."""
+    if f is None:
+        return None
+    return lambda a, p, t: f(a, p[:nparams], t)
+
+
 class Model:
-    """A diffsol solver for one problem: `Model(system, **options)`, or the functional form
-    `Model(rhs, init, nstates, ...)` with `nparams` (flat parameters) or `variables_like`
-    (pytree parameters). `solve(params, t_eval)` returns `ys [..., nt, nout]`."""
+    """A diffsol solver for one problem: `Model(system, nstates, **options)`, or the functional
+    form `Model(rhs, nstates, ...)` with `nparams` (flat parameters) or `variables_like` (pytree
+    parameters). `solve(y0, params, t_eval)` returns `ys [..., nt, nout]`."""
 
     def __init__(
         self,
         rhs=None,
-        init=None,
         nstates=None,
         nparams=None,
         out=None,
@@ -95,8 +101,6 @@ class Model:
         if isinstance(rhs, _params.System):
             system = rhs
             given = {
-                "init": init,
-                "nstates": nstates,
                 "nparams": nparams,
                 "out": out,
                 "mass": mass,
@@ -106,27 +110,25 @@ class Model:
             extra += ["nout"] if nout else []
             if extra:
                 raise DiffsolJaxError(
-                    "Model(system) takes the equations and sizes from the System: "
+                    "Model(system, nstates) takes the equations from the System: "
                     f"do not also give {', '.join(extra)}"
                 )
-            rhs = lambda x, v, t: v(x, t)  # noqa: E731
-            init = lambda v, t: v.init(t)  # noqa: E731
-            t0 = jax.ShapeDtypeStruct((), jnp.float64)
-            init_shape = jax.eval_shape(system.init, t0).shape
-            if len(init_shape) != 1:
+            if nstates is None:
                 raise DiffsolJaxError(
-                    f"System.init(t) must return a 1-D state, got shape {init_shape}"
+                    "Model(system, nstates): give nstates, the length of the state that "
+                    "System.__call__ returns"
                 )
-            nstates = init_shape[0]
+            rhs = lambda x, v, t: v(x, t)  # noqa: E731
             if type(system).out is not _params.System.out:
                 out = lambda x, v, t: v.out(x, t)  # noqa: E731
                 x0 = jax.ShapeDtypeStruct((nstates,), jnp.float64)
+                t0 = jax.ShapeDtypeStruct((), jnp.float64)
                 nout = jax.eval_shape(system.out, x0, t0).shape[0]
             if type(system).mass is not _params.System.mass:
                 mass = lambda v, p, t: p.mass(v, t)  # noqa: E731
             variables_like = system
-        elif rhs is None or init is None or nstates is None:
-            raise DiffsolJaxError("give a System, or rhs, init and nstates")
+        elif rhs is None or nstates is None:
+            raise DiffsolJaxError("give a System and nstates, or rhs and nstates")
         if (out is None) != (nout == 0):
             raise DiffsolJaxError("give out and nout > 0 together")
         if ad not in ("adjoint", "forward"):
@@ -137,7 +139,7 @@ class Model:
         if variables_like is not None:
             self.spec = _params.ParamSpec(variables_like)
             nparams = self.spec.nparams
-            rhs, init, out, mass = self.spec.bind_equations(rhs, init, out, mass)
+            rhs, out, mass = self.spec.bind_equations(rhs, out, mass)
         if algebraic is not None:
             if mass is not None:
                 raise DiffsolJaxError("give mass or algebraic, not both")
@@ -150,7 +152,19 @@ class Model:
                 "ode_solver='bdf', 'esdirk34' or 'tr_bdf2'"
             )
         assert nparams is not None
-        self.eq = Equations(rhs, init, nstates, nparams, out, nout, mass)
+        # diffsol's initial state is `init(p, t)`, a function of the parameters, so `y0` rides
+        # in the tail of the internal parameter vector `[params, y0]`. Then `init` is a slice:
+        # `init_sens` is the constant selection matrix `[0 | I]`, and the gradient with respect
+        # to `y0` comes out of the existing sensitivity and adjoint callbacks with no special
+        # case. The user equations only see the `params` head.
+        rhs = _over_params(nparams, rhs)
+        out = _over_params(nparams, out)
+        mass = _over_params(nparams, mass)
+
+        def init(p, t):
+            return p[nparams:]
+
+        self.eq = Equations(rhs, init, nstates, nparams + nstates, out, nout, mass)
         self.nstates, self.nparams, self.nout = nstates, nparams, nout
         self.nsolution = nout if nout > 0 else nstates
         self.rtol, self.atol, self.ad = float(rtol), float(atol), ad
@@ -158,7 +172,7 @@ class Model:
         self.id = _lib.call(
             so.diffsol_jax_model_new,
             nstates,
-            nparams,
+            self.eq.nparams,
             nout,
             _MATRIX_TYPES[matrix_type],
             _LINEAR_SOLVERS[linear_solver],
@@ -203,10 +217,10 @@ class Model:
         available = self.eq.available()
         for cb in available:
             self._add(cb, nbatch, 1)
-        if kind == "fwd_sens" and self.nparams > 1:
+        if kind == "fwd_sens" and self.eq.nparams > 1:
             for cb in _lower.FWD_SENS_MULTI_P:
                 if cb in available:
-                    self._add(cb, nbatch, self.nparams)
+                    self._add(cb, nbatch, self.eq.nparams)
         if kind == "vjp_bkwd" and ndirections > 1:
             for cb in _lower.VJP_BKWD_MULTI_P:
                 if cb in available:
@@ -254,23 +268,38 @@ class Model:
             else _primitives.SolveForward
         )
 
-        def check(params, t_eval):
+        def check(y0, params, t_eval):
             t_eval = jnp.asarray(t_eval, jnp.float64)
             if t_eval.ndim != 1:
                 raise DiffsolJaxError("t_eval must have one axis")
+            y0 = jnp.asarray(y0, jnp.float64)
+            if y0.ndim < 1 or y0.shape[-1] != self.nstates:
+                raise DiffsolJaxError(f"y0 must have the shape [..., {self.nstates}]")
             if self.spec is not None:
-                return self.spec.ravel(params), t_eval
-            params = jnp.asarray(params, jnp.float64)
-            if params.ndim < 1 or params.shape[-1] != self.nparams:
+                params = self.spec.ravel(params)
+            else:
+                params = jnp.asarray(params, jnp.float64)
+                if params.ndim < 1 or params.shape[-1] != self.nparams:
+                    raise DiffsolJaxError(
+                        f"params must have the shape [..., {self.nparams}]"
+                    )
+            # the internal vector `[params, y0]`, with the leading axes broadcast together
+            try:
+                batch = jnp.broadcast_shapes(params.shape[:-1], y0.shape[:-1])
+            except ValueError:
                 raise DiffsolJaxError(
-                    f"params must have the shape [..., {self.nparams}]"
-                )
-            return params, t_eval
+                    f"the leading axes of y0 {y0.shape[:-1]} and of params "
+                    f"{params.shape[:-1]} do not broadcast together"
+                ) from None
+            params = jnp.broadcast_to(params, batch + (self.nparams,))
+            y0 = jnp.broadcast_to(y0, batch + (self.nstates,))
+            return jnp.concatenate([params, y0], axis=-1), t_eval
 
-        def run(params, t_eval) -> jax.Array:
-            """Solve for `params` (`[..., nparams]`, or the variables pytree) at the times
-            `t_eval [nt]`; returns `ys [..., nt, nout]`."""
-            params, t_eval = check(params, t_eval)
+        def run(y0, params, t_eval) -> jax.Array:
+            """Solve from the initial state `y0` (`[..., nstates]`) for `params`
+            (`[..., nparams]`, or the variables pytree) at the times `t_eval [nt]`; returns
+            `ys [..., nt, nout]`. Differentiable with respect to both `y0` and `params`."""
+            params, t_eval = check(y0, params, t_eval)
             prim = prim_cls(jax.typeof(params), jax.typeof(t_eval), **kw)
             return prim(params, t_eval)
 

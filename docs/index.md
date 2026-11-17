@@ -54,23 +54,23 @@ def lotka_volterra(x, p, t):
 
 model = Model(
     rhs=lotka_volterra,
-    init=lambda p, t: jnp.array([1.0, 0.5]),
     nstates=2,
     nparams=4,
 )
 
+y0 = jnp.array([1.0, 0.5])
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
 t_eval = jnp.linspace(0.0, 10.0, 200)
-ys = model.solve(params, t_eval)  # [200, 2]
+ys = model.solve(y0, params, t_eval)  # [200, 2]
 
 
 def loss(p):
-    return jnp.sum(model.solve(p, t_eval) ** 2)
+    return jnp.sum(model.solve(y0, p, t_eval) ** 2)
 
 
 grad = jax.grad(loss)(params)  # adjoint gradient w.r.t. the parameters
-many = jax.vmap(model.solve, (0, None))(
-    jnp.stack([params] * 64), t_eval
+many = jax.vmap(model.solve, (None, 0, None))(
+    y0, jnp.stack([params] * 64), t_eval
 )  # one solve, 64 lanes
 ```
 
@@ -85,15 +85,13 @@ class WeatherSystem(System):
     y0: jax.Array  # the initial state, trained with everything else
     net: eqx.Module  # any pytree of weights
 
-    def init(self, t):
-        return self.y0
-
     def __call__(self, x, t):
         return self.net(x)
 
 
 system = WeatherSystem(y0=y0, net=net)
-model = Model(system, ode_solver="tsit45")
+model = Model(system, nstates=4, ode_solver="tsit45")
+# the loss passes the initial state from the pytree: loss(s) uses model.solve(s.y0, s, t_eval)
 grads = jax.grad(loss)(system)  # a WeatherSystem — optax applies directly
 ```
 

@@ -18,16 +18,18 @@ an int (the last states are algebraic) or a boolean mask:
 # y' = -p0 * y   and   0 = z - p1 * y
 model = Model(
     rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
-    init=lambda p, t: jnp.array([1.0, p[1]]),
     nstates=2,
     nparams=2,
     algebraic=1,  # or algebraic=[False, True]
 )
+
+p = jnp.array([0.7, 2.0])
+ys = model.solve(jnp.array([1.0, p[1]]), p, t_eval)  # a consistent y0
 ```
 
 `algebraic=` combines with a
 [`System`](getting-started.md#systems-classes-instead-of-flat-vectors) the same
-way: `Model(system, algebraic=1)`.
+way: `Model(system, nstates=2, algebraic=1)`.
 
 A classic example: the Robertson system with its conservation law as a
 constraint,
@@ -41,7 +43,6 @@ def rhs(x, p, t):
 
 robertson = Model(
     rhs=rhs,
-    init=lambda p, t: jnp.array([1.0, 0.0, 0.0]),
     nstates=3,
     nparams=3,
     algebraic=1,
@@ -51,9 +52,10 @@ robertson = Model(
 ## Consistent initial conditions
 
 The initial state must satisfy the algebraic constraints. diffsol does this
-automatically. An `init` that is inconsistent in its algebraic entries is
-projected onto the constraints before the solve. The sensitivity and adjoint
-systems get the matching consistent initialisation.
+automatically: a `y0` whose algebraic entries are inconsistent is projected onto
+the constraints before the solve, so those entries are only a starting guess.
+The sensitivity and adjoint systems get the matching consistent initialisation,
+so the gradient with respect to `y0` accounts for the projection.
 
 ## General mass matrices
 

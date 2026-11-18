@@ -1,5 +1,3 @@
-"""The problem: the equations, the pytree layouts, and the diffsol solver they are built into."""
-
 import weakref
 from collections.abc import Callable, Sequence
 
@@ -68,9 +66,6 @@ def _spec(*shape):
     return jax.ShapeDtypeStruct(shape, F64)
 
 
-# a problem holds functions, layouts and a native solver, never JAX arrays: as a static pytree
-# it can be an argument of a jitted or vmapped function (`jax.jit(solve)`, `in_axes=None`)
-# without being traced.
 @jax.tree_util.register_static
 class ODEProblem:
     """An ODE (or semi-explicit index-1 DAE) and the diffsol solver for it.

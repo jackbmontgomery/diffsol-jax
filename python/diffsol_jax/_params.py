@@ -1,9 +1,3 @@
-"""The pytree layouts of a problem: how the state, the parameters and the output map to and
-from the flat `f64` buffers that the diffsol equations and the FFI take.
-
-A layout is declared once, by `state=` and `params=` of an `ODEProblem`: an int (one `f64[n]`
-leaf) or a template pytree."""
-
 import math
 
 import jax

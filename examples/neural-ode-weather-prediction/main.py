@@ -1,9 +1,8 @@
 """
 Neural ODE weather prediction.
 
-The MLP drives the right hand side of an ODE, trained to fit the Delhi monthly climate data
-(mean temperature, humidity, wind speed, mean pressure). The network is the `args` of the
-solve: `jax.grad` returns a network of gradients, which optax updates directly.
+The MLP drives the right-hand side of an ODE, trained to fit the Delhi monthly climate data
+(mean temperature, humidity, wind speed, mean pressure).
 """
 
 import pathlib
@@ -105,9 +104,7 @@ def main():
     y0 = ys[0]
     net0 = make_network(DATA_DIM, key=jr.key(0))
 
-    prob = ODEProblem(
-        lambda x, net, t: net(x), state=DATA_DIM, params=net0, solver="tsit45"
-    )
+    prob = ODEProblem(lambda x, net, t: net(x), state=y0, params=net0, solver="tsit45")
 
     net = net0
     ntimes = ts.shape[0]

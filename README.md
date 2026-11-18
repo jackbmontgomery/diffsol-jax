@@ -16,10 +16,10 @@ jax.config.update("jax_enable_x64", True)
 
 problem = ODEProblem(lambda y, p, t: p[0] * y * (1.0 - y), state=1, params=1)
 y0, p = jnp.array([0.1]), jnp.array([1.0])
-t = jnp.linspace(0.0, 5.0, 11)
-ys = solve(problem, y0, p, t)  # [nt, nstates]
-ys = jax.vmap(solve, (None, None, 0, None))(problem, y0, jnp.ones((64, 1)), t)
-g_y0, g_p = jax.grad(lambda y, p: solve(problem, y, p, t).sum(), (0, 1))(y0, p)
+ts = jnp.linspace(0.0, 5.0, 11)
+ys = solve(problem, y0, p, ts)  # [nt, nstates]
+ys = jax.vmap(solve, (None, None, 0, None))(problem, y0, jnp.ones((64, 1)), ts)
+g_y0, g_p = jax.grad(lambda y, p: solve(problem, y, p, ts).sum(), (0, 1))(y0, p)
 ```
 
 An `ODEProblem` is the equations plus the layouts and solver options they are

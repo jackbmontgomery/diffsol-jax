@@ -12,13 +12,14 @@ do not support it.
 ## Marking algebraic states
 
 Write the algebraic equations as rows of `rhs` and mark them with `algebraic=` -
-an int (the last states are algebraic) or a boolean mask:
+an int (the last entries of the flat state are algebraic), a boolean mask, or a
+pytree of bools matching the state:
 
 ```python
 # y' = -p0 * y   and   0 = z - p1 * y
 problem = ODEProblem(
     rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
-    nstates=2,
+    state=2,
     params=2,
     algebraic=1,  # or algebraic=[False, True]
 )
@@ -31,6 +32,17 @@ A DAE needs one of the implicit solvers (`solver="bdf"`, the default,
 `"esdirk34"` or `"tr_bdf2"`); building a problem with the explicit `"tsit45"`
 and a mass matrix is rejected.
 
+With a pytree state, the mask follows the state instead of its flat order:
+
+```python
+problem = ODEProblem(
+    lambda y, p, t: {"y": -p[0] * y["y"], "z": y["z"] - p[1] * y["y"]},
+    state={"y": jnp.zeros(()), "z": jnp.zeros(())},
+    params=2,
+    algebraic={"y": False, "z": True},
+)
+```
+
 A classic example: the Robertson system with its conservation law as a
 constraint,
 
@@ -41,7 +53,7 @@ def rhs(x, p, t):
     return jnp.array([-r1, r1 - r2, x[0] + x[1] + x[2] - 1.0])
 
 
-robertson = ODEProblem(rhs, nstates=3, params=3, algebraic=1)
+robertson = ODEProblem(rhs, state=3, params=3, algebraic=1)
 ```
 
 ## Consistent initial conditions

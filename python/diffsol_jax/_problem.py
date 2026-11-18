@@ -1,4 +1,4 @@
-"""The problem: the equations, the sizes, and the diffsol solver they are built into."""
+"""The problem: the equations, the pytree layouts, and the diffsol solver they are built into."""
 
 import weakref
 from collections.abc import Callable, Sequence
@@ -7,11 +7,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from . import _lib, _lower, _params
+from . import _lib, _lower
 from ._lib import DiffsolJaxError
 from ._lower import Equations
-from ._params import F64
-from ._types import Args, LinearSolver, MatrixType, Solver
+from ._params import F64, Layout
+from ._types import LinearSolver, MatrixType, PyTree, Solver
 
 ODE_SOLVERS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
 LINEAR_SOLVERS = {"default": 0, "lu": 1, "klu": 2}
@@ -26,35 +26,11 @@ def _one_of(name, value, table):
     return table[value]
 
 
-def _normalise_algebraic(algebraic):
-    if algebraic is None:
-        return None
-    if isinstance(algebraic, bool):
-        raise DiffsolJaxError("algebraic must be an int or a boolean mask, not a bool")
-    if isinstance(algebraic, (int, np.integer)):
-        return int(algebraic)
-    if isinstance(algebraic, (Sequence, jax.Array, np.ndarray)):
-        return tuple(bool(a) for a in algebraic)
-    raise DiffsolJaxError(
-        f"algebraic must be an int or a boolean mask, got {type(algebraic).__name__}"
-    )
-
-
-def _diagonal_mass(algebraic, nstates):
-    """The diagonal mass of `algebraic`: an int meaning that the last `algebraic` states are
-    algebraic, or a boolean mask of length `nstates` with True denoting an algebraic state."""
-    if isinstance(algebraic, int):
-        if not 0 < algebraic < nstates:
-            raise DiffsolJaxError(
-                f"algebraic must be in [1, {nstates - 1}], got {algebraic}"
-            )
-        mask = [False] * (nstates - algebraic) + [True] * algebraic
-    else:
-        mask = list(algebraic)
-        if len(mask) != nstates:
-            raise DiffsolJaxError(f"the algebraic mask must have length {nstates}")
-        if all(mask) or not any(mask):
-            raise DiffsolJaxError("algebraic must mark some, not all, of the states")
+def _diagonal_mass(mask):
+    """The diagonal mass of a boolean mask over the flat state, True denoting an algebraic
+    entry: the rows of `rhs` it selects become algebraic equations."""
+    if all(mask) or not any(mask):
+        raise DiffsolJaxError("algebraic must mark some, not all, of the state")
     diff = jnp.array([0.0 if a else 1.0 for a in mask], F64)
     return lambda v, p, t: diff * v
 
@@ -88,20 +64,13 @@ def _check_mass_is_linear(mass, nstates, nparams):
         )
 
 
-def _over_params(nparams, f):
-    """`f(a, p, t)` over the user parameters, as a function of the internal `[params, y0]`."""
-    if f is None:
-        return None
-    return lambda a, p, t: f(a, p[:nparams], t)
-
-
 def _spec(*shape):
     return jax.ShapeDtypeStruct(shape, F64)
 
 
-# a problem holds functions, sizes and a native solver, never JAX arrays: as a static pytree it
-# can be an argument of a jitted or vmapped function (`jax.jit(solve)`, `in_axes=None`) without
-# being traced.
+# a problem holds functions, layouts and a native solver, never JAX arrays: as a static pytree
+# it can be an argument of a jitted or vmapped function (`jax.jit(solve)`, `in_axes=None`)
+# without being traced.
 @jax.tree_util.register_static
 class ODEProblem:
     """An ODE (or semi-explicit index-1 DAE) and the diffsol solver for it.
@@ -110,26 +79,25 @@ class ODEProblem:
     takes the initial state, the times and the parameter values. The solver, with its compiled
     callbacks and its adjoint checkpoints, is built once and lives as long as the problem.
 
-    Every equation takes one lane: the state `x [nstates]` (or a vector `v` of its size), the
-    parameters `p`, and the scalar time `t`.
+    The state and the parameters are pytrees, declared by `state=` and `params=`. Each is
+    either an int `n`, meaning one flat `f64[n]` array, or a template pytree: its float-array
+    leaves carry the shapes and dtypes, and `jax.eval_shape(make_net, key)` does as well as a
+    network. The equations then act on one lane of those pytrees.
 
     Args:
-        rhs: `rhs(x, p, t) -> [nstates]`, the right-hand side.
-        nstates: the length of the state.
-        params: the parameter layout. An int is a flat vector `p [nparams]`, whose leading axes
-            in a solve are lanes of a batched solve; `None` is no parameters; anything else is a
-            template pytree (an equinox module, a dataclass, a dict) whose float-array leaves
-            are the parameters and whose other leaves the equations capture as constants. The
-            `args` of a solve then supply the values, and `jax.grad` returns the same structure.
-            Only shapes and dtypes are read from the parameter leaves, so
-            `jax.eval_shape(make_net, key)` works as well as a network.
-        out: `out(x, p, t) -> [nout]`, an output to return in place of the state. `nout` is
-            inferred by shape tracing.
-        mass: `mass(v, p, t) -> [nstates]`, the mass matrix action `M(t) v`. Must be linear in
-            `v` and must not use `p`.
-        algebraic: a `mass` shortcut for a semi-explicit DAE: an int, meaning that the last
-            `algebraic` rows of `rhs` are algebraic equations, or a boolean mask over the
-            states.
+        rhs: `rhs(y, p, t) -> y-like`, the right-hand side: `y` and the result are in the
+            `state` structure, `p` is in the `params` structure, and `t` is a scalar.
+        state: the layout of the state, an int or a template. Every leaf must be a float array.
+        params: the layout of the parameters, an int, `None` for no parameters, or a template
+            whose float-array leaves are the parameters and whose other leaves the equations
+            capture as constants (their values coming from the template).
+        out: `out(y, p, t) -> pytree`, an output to return in place of the state. Its structure
+            is inferred by shape tracing, and `ys` comes back in it.
+        mass: `mass(v, p, t) -> v-like`, the mass matrix action `M(t) v`, with `v` in the state
+            structure. Must be linear in `v` and must not use `p`.
+        algebraic: a `mass` shortcut for a semi-explicit DAE, marking the rows of `rhs` that
+            are algebraic equations: an int (the last `algebraic` entries of the flat state), a
+            sequence of `nstates` bools, or a pytree of bools matching `state`.
         solver: the diffsol solver: `bdf`, `esdirk34`, `tr_bdf2`, or `tsit45` (explicit, so not
             for a DAE).
         linear_solver: `default`, `lu`, or `klu`.
@@ -140,12 +108,12 @@ class ODEProblem:
     def __init__(
         self,
         rhs: Callable,
-        nstates: int,
-        params: Args = None,
+        state: int | PyTree,
+        params: int | PyTree = None,
         *,
         out: Callable | None = None,
         mass: Callable | None = None,
-        algebraic: int | Sequence[bool] | None = None,
+        algebraic: int | Sequence[bool] | PyTree | None = None,
         solver: Solver = "bdf",
         linear_solver: LinearSolver = "default",
         matrix_type: MatrixType = "nalgebra_dense",
@@ -154,20 +122,15 @@ class ODEProblem:
         if not jax.config.read("jax_enable_x64"):
             raise DiffsolJaxError("diffsol_jax needs jax_enable_x64")
         if not callable(rhs):
-            raise DiffsolJaxError("rhs must be a function rhs(x, p, t) -> [nstates]")
-        if isinstance(nstates, bool) or not isinstance(nstates, (int, np.integer)):
-            raise DiffsolJaxError("nstates must be an int, the length of the state")
-        if nstates < 1:
-            raise DiffsolJaxError(f"nstates must be at least 1, got {nstates}")
+            raise DiffsolJaxError("rhs must be a function rhs(y, p, t) -> y-like")
         if mass is not None and algebraic is not None:
             raise DiffsolJaxError("give mass or algebraic, not both")
         if max_checkpoints < 1:
             raise DiffsolJaxError("max_checkpoints must be at least 1")
-        algebraic = _normalise_algebraic(algebraic)
         # the arguments as given, so that `replace` can rebuild the problem
         self._declared = {
             "rhs": rhs,
-            "nstates": int(nstates),
+            "state": state,
             "params": params,
             "out": out,
             "mass": mass,
@@ -177,44 +140,75 @@ class ODEProblem:
             "matrix_type": matrix_type,
             "max_checkpoints": max_checkpoints,
         }
-        self.rhs, self.out, self.mass, self.algebraic = rhs, out, mass, algebraic
         self.solver, self.linear_solver = solver, linear_solver
         self.matrix_type, self.max_checkpoints = matrix_type, max_checkpoints
-        self.nstates = int(nstates)
-        self.layout = _params.layout(params)
-        self.nparams = self.layout.nparams
-        nparams = self.nparams
+        self.state = Layout(state, "state", constants=False)
+        self.params = Layout(params, "params")
+        if self.state.n < 1:
+            raise DiffsolJaxError("state must have at least one entry")
+        nstates, nparams = self.state.n, self.params.n
+        self.nstates, self.nparams = nstates, nparams
 
-        rhs, out, mass = self.layout.bind_equations(rhs, out, mass)
-        self.nout = 0
+        # the wrappers close over the layouts, not over `self`: a reference from `self.eq` back
+        # to `self` would be a cycle, and the native solver would outlive the problem until the
+        # next gc pass
+        state, params_layout = self.state, self.params
+
+        def over_flat(f, name, result):
+            """`f` over the pytrees, as a function of the flat vectors."""
+            if f is None:
+                return None
+
+            def wrapped(a, p, t):
+                y = f(state.unravel(a), params_layout.unravel(p), t)
+                return result.ravel(y, f"the result of {name}")
+
+            return wrapped
+
+        # what `ys` comes back in: the state, or whatever `out` returns
+        self.solution = self.state
         if out is not None:
-            shape = jax.eval_shape(out, _spec(nstates), _spec(nparams), _spec()).shape
-            if len(shape) != 1:
-                raise DiffsolJaxError(f"out must return [nout], got the shape {shape}")
-            self.nout = int(shape[0])
-        self.nsolution = self.nout if self.nout > 0 else self.nstates
+            self.solution = Layout(
+                jax.eval_shape(
+                    lambda a, p, t: out(state.unravel(a), params_layout.unravel(p), t),
+                    _spec(nstates),
+                    _spec(nparams),
+                    _spec(),
+                ),
+                "out",
+                constants=False,
+            )
+        self.nout = 0 if out is None else self.solution.n
+        self.nsolution = self.solution.n
         if algebraic is not None:
-            mass = _diagonal_mass(algebraic, nstates)
-        elif mass is not None:
-            _check_mass_is_linear(mass, nstates, nparams)
-        if mass is not None and solver == "tsit45":
+            mask = self.state.mask(algebraic)
+            flat_mass = _diagonal_mass(mask)
+        else:
+            flat_mass = over_flat(mass, "mass", self.state)
+            if flat_mass is not None:
+                _check_mass_is_linear(flat_mass, nstates, nparams)
+        if flat_mass is not None and solver == "tsit45":
             raise DiffsolJaxError(
                 "a problem with a mass matrix (a DAE) needs an implicit solver: "
                 "solver='bdf', 'esdirk34' or 'tr_bdf2'"
             )
+
         # diffsol's initial state is `init(p, t)`, a function of the parameters, so `y0` rides
         # in the tail of the internal parameter vector `[params, y0]`. Then `init` is a slice:
         # `init_sens` is the constant selection matrix `[0 | I]`, and the gradient with respect
         # to `y0` comes out of the existing sensitivity and adjoint callbacks with no special
         # case. The user equations only see the `params` head.
+        def over_params(f):
+            return None if f is None else lambda a, p, t: f(a, p[:nparams], t)
+
         self.eq = Equations(
-            _over_params(nparams, rhs),
+            over_params(over_flat(rhs, "rhs", self.state)),
             lambda p, t: p[nparams:],
             nstates,
             nparams + nstates,
-            _over_params(nparams, out),
+            over_params(over_flat(out, "out", self.solution)),
             self.nout,
-            _over_params(nparams, mass),
+            over_params(flat_mass),
         )
         so = _lib.lib()
         self._id = _lib.call(
@@ -232,10 +226,10 @@ class ODEProblem:
         self._compile_options = None
 
     def __repr__(self):
-        return (
-            f"ODEProblem(nstates={self.nstates}, {self.layout!r}, nout={self.nout}, "
-            f"solver={self.solver!r})"
-        )
+        parts = [repr(self.state), repr(self.params)]
+        if self.solution is not self.state:
+            parts.append(repr(self.solution))
+        return f"ODEProblem({', '.join(parts)}, solver={self.solver!r})"
 
     def replace(self, **changes) -> "ODEProblem":
         """A problem with the given arguments replaced, and so with its own diffsol solver:
@@ -247,25 +241,20 @@ class ODEProblem:
 
     # ---- the solve arguments ------------------------------------------------------------------
 
-    def _pack(self, y0, args) -> jax.Array:
-        """The internal parameter vector `[params, y0]`, with the leading axes of the parameters
-        and of `y0` broadcast together into the lanes of one batched solve."""
-        y0 = jnp.asarray(y0, F64)
-        if y0.ndim < 1 or y0.shape[-1] != self.nstates:
-            raise DiffsolJaxError(
-                f"y0 must have the shape [..., {self.nstates}], got {y0.shape}"
-            )
-        params = self.layout.ravel(args)
-        try:
-            batch = jnp.broadcast_shapes(params.shape[:-1], y0.shape[:-1])
-        except ValueError:
-            raise DiffsolJaxError(
-                f"the leading axes of y0 {y0.shape[:-1]} and of args "
-                f"{params.shape[:-1]} do not broadcast together"
-            ) from None
-        params = jnp.broadcast_to(params, batch + (self.nparams,))
-        y0 = jnp.broadcast_to(y0, batch + (self.nstates,))
-        return jnp.concatenate([params, y0], axis=-1)
+    def _pack(self, y0, params) -> jax.Array:
+        """The internal parameter vector `[params, y0]` of one lane. A `jax.vmap` over either
+        batches it through `concatenate` and into the lanes of one batched solve."""
+        hint = "batch with jax.vmap rather than by adding axes to the leaves"
+        return jnp.concatenate(
+            [
+                self.params.ravel(params, hint=hint),
+                self.state.ravel(y0, "y0", hint=hint),
+            ]
+        )
+
+    def _unpack(self, ys: jax.Array):
+        """`ys [..., nt, nsolution]` as the solution pytree, each leaf `[..., nt, *shape]`."""
+        return self.solution.unpack(ys)
 
     # ---- callbacks ----------------------------------------------------------------------------
 

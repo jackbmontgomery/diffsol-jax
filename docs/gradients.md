@@ -29,8 +29,8 @@ where $u(t) \in \mathbb{R}^{n}$ is the state, $p \in \mathbb{R}^{m}$ the
 parameters, and $M$ an optional [mass matrix](dae.md). `solve` returns the
 solution sampled at the times in `t_eval`.
 
-`solve(problem, y0, t_eval, args)` makes the initial state an argument, and $p$
-above is the concatenation $(\texttt{args}, \texttt{y0})$, with
+`solve(problem, y0, t_eval, params)` makes the initial state an argument, and
+$p$ above is the concatenation $(\texttt{params}, \texttt{y0})$, with
 $u_0(p) = \texttt{y0}$. Everything below therefore applies to `y0` unchanged:
 $\partial u_0 / \partial p = [\,0 \mid I\,]$, and the `y0` gradient is the tail
 of the parameter gradient.
@@ -71,7 +71,8 @@ cotangent directions through a single backward solve.
 The backward solve needs the forward trajectory. The forward pass keeps a
 checkpoint in C++ and hands JAX an opaque `int64` handle; the backward solve
 interpolates from the checkpoint. A problem keeps at most `max_checkpoints`
-checkpoints. The backward solve also receives the parameters and `t_eval`, so if its
+checkpoints. The backward solve also receives the parameters and `t_eval`, so if
+its
 checkpoint has been evicted (for example in `jax.grad` of a `lax.scan` with many
 solves) it **re-runs the forward solve** and the gradient is unchanged.
 

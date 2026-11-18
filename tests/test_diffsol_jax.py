@@ -12,7 +12,7 @@ X0 = 0.1
 Y0 = jnp.array([X0])
 TOL = {"rtol": 1e-10, "atol": 1e-10}
 
-LOGISTIC = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]), nstates=1, params=2)
+LOGISTIC = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]), state=1, params=2)
 
 
 def logistic(y0, p, t_eval=T_EVAL, **kw):
@@ -34,7 +34,7 @@ def robertson_rhs(x, p, t):
     )
 
 
-ROBERTSON = ODEProblem(robertson_rhs, nstates=3, params=3)
+ROBERTSON = ODEProblem(robertson_rhs, state=3, params=3)
 ROBERTSON_TOL = {"rtol": 1e-8, "atol": 1e-10}
 ROBERTSON_P = jnp.array([0.04, 3e7, 1e4])
 Y0_ROB = jnp.array([1.0, 0.0, 0.0])
@@ -55,7 +55,7 @@ def test_logistic_solve():
 def test_logistic_out():
     problem = ODEProblem(
         rhs=lambda x, p, t: p[0] * x * (1.0 - x),
-        nstates=1,
+        state=1,
         params=1,
         out=lambda x, p, t: jnp.array([2.0 * x[0], x[0] ** 2]),
     )
@@ -67,7 +67,7 @@ def test_logistic_out():
 def test_nout_is_inferred():
     problem = ODEProblem(
         rhs=lambda x, p, t: -x,
-        nstates=1,
+        state=1,
         params=1,
         out=lambda x, p, t: jnp.concatenate([x, x, x]),
     )
@@ -182,7 +182,7 @@ def test_replace_builds_another_solver():
 
 
 def test_the_solver_is_freed_with_the_problem():
-    problem = ODEProblem(lambda x, p, t: -x, nstates=1, params=1)
+    problem = ODEProblem(lambda x, p, t: -x, state=1, params=1)
     finalizer = problem._finalizer
     assert finalizer.alive
     del problem
@@ -267,18 +267,28 @@ def test_mixed_handles_are_not_used():
     np.testing.assert_allclose(grad, expected, rtol=1e-12)
 
 
-def test_mismatched_batch_axes_raise():
-    with pytest.raises(DiffsolJaxError, match="do not broadcast together"):
-        solve(LOGISTIC, jnp.ones((3, 1)), T_EVAL, jnp.ones((4, 2)))
+def test_lanes_come_from_vmap_only():
+    """An extra axis is a shape error, not a lane count: batching is `jax.vmap`."""
+    p = jnp.array([1.0, 1.0])
+    with pytest.raises(DiffsolJaxError, match="batch with jax.vmap"):
+        solve(LOGISTIC, Y0, T_EVAL, jnp.ones((4, 2)))
+    with pytest.raises(DiffsolJaxError, match="batch with jax.vmap"):
+        solve(LOGISTIC, jnp.ones((3, 1)), T_EVAL, p)
+    lanes = jax.vmap(lambda y0: logistic(y0, p))(jnp.ones((3, 1)) * X0)
+    # one batched solve takes one step sequence for all its lanes, so it agrees with a loop of
+    # single-lane solves to the solver accuracy, not to round-off
+    np.testing.assert_allclose(lanes, jnp.stack([logistic(Y0, p)] * 3), rtol=1e-7)
 
 
 def test_solve_argument_errors():
     p = jnp.array([1.0, 1.0])
     with pytest.raises(DiffsolJaxError, match="t_eval must have one axis"):
         solve(LOGISTIC, Y0, jnp.ones((2, 2)), p)
-    with pytest.raises(DiffsolJaxError, match="y0 must have the shape"):
+    with pytest.raises(
+        DiffsolJaxError, match=r"y0 has the shape \(2,\), expected \(1,\)"
+    ):
         solve(LOGISTIC, jnp.ones(2), T_EVAL, p)
-    with pytest.raises(DiffsolJaxError, match="args must have the shape"):
+    with pytest.raises(DiffsolJaxError, match=r"params has the shape \(3,\)"):
         solve(LOGISTIC, Y0, T_EVAL, jnp.ones(3))
     with pytest.raises(DiffsolJaxError, match="ad must be"):
         solve(LOGISTIC, Y0, T_EVAL, p, ad="reverse")
@@ -287,18 +297,29 @@ def test_solve_argument_errors():
 def test_problem_argument_errors():
     rhs = lambda x, p, t: -x  # noqa: E731
     with pytest.raises(DiffsolJaxError, match="rhs must be a function"):
-        ODEProblem(None, nstates=1)
-    with pytest.raises(DiffsolJaxError, match="nstates must be an int"):
-        ODEProblem(rhs, nstates=None)
-    with pytest.raises(DiffsolJaxError, match="nstates must be at least 1"):
-        ODEProblem(rhs, nstates=0)
+        ODEProblem(None, state=1)
+    with pytest.raises(DiffsolJaxError, match="state must have at least one entry"):
+        ODEProblem(rhs, state=None)
+    with pytest.raises(DiffsolJaxError, match="state must have at least one entry"):
+        ODEProblem(rhs, state=0)
+    with pytest.raises(DiffsolJaxError, match="state must be an int or a pytree"):
+        ODEProblem(rhs, state=True)
+    with pytest.raises(DiffsolJaxError, match="every leaf of it must be one"):
+        ODEProblem(rhs, state={"a": 1}, params=1)
     with pytest.raises(DiffsolJaxError, match="solver must be one of"):
-        ODEProblem(rhs, nstates=1, params=1, solver="rk4")
+        ODEProblem(rhs, state=1, params=1, solver="rk4")
     with pytest.raises(DiffsolJaxError, match="matrix_type must be one of"):
-        ODEProblem(rhs, nstates=1, params=1, matrix_type="dense")
+        ODEProblem(rhs, state=1, params=1, matrix_type="dense")
     with pytest.raises(DiffsolJaxError, match="max_checkpoints"):
-        ODEProblem(rhs, nstates=1, params=1, max_checkpoints=0)
+        ODEProblem(rhs, state=1, params=1, max_checkpoints=0)
     with pytest.raises(DiffsolJaxError, match="params must not be negative"):
-        ODEProblem(rhs, nstates=1, params=-1)
-    with pytest.raises(DiffsolJaxError, match="out must return"):
-        ODEProblem(rhs, nstates=1, params=1, out=lambda x, p, t: jnp.outer(x, x))
+        ODEProblem(rhs, state=1, params=-1)
+    with pytest.raises(DiffsolJaxError, match="every leaf of it must be one"):
+        ODEProblem(rhs, state={"a": 1}, params=1)
+    with pytest.raises(DiffsolJaxError, match="the result of rhs"):
+        solve(
+            ODEProblem(lambda x, p, t: x[:1] * p, state=2, params=1),
+            jnp.ones(2),
+            T_EVAL,
+            jnp.ones(1),
+        )

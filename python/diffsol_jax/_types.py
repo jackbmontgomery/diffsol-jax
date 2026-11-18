@@ -1,4 +1,4 @@
-"""The types of the solve options, so that the choices show up in the signature."""
+"""The types of the public signatures, so that the choices show up in them."""
 
 from typing import Any, Literal
 
@@ -8,7 +8,7 @@ Solver = Literal["bdf", "esdirk34", "tr_bdf2", "tsit45"]
 LinearSolver = Literal["default", "lu", "klu"]
 MatrixType = Literal["nalgebra_dense", "faer_dense", "faer_sparse"]
 Ad = Literal["adjoint", "forward"]
-# the parameters of the equations: one array [..., nparams], or any pytree, or None
-Args = Any
+# a pytree: the state, the parameters, or the output of a problem
+PyTree = Any
 
-__all__ = ["Ad", "Args", "ArrayLike", "LinearSolver", "MatrixType", "Solver"]
+__all__ = ["Ad", "ArrayLike", "LinearSolver", "MatrixType", "PyTree", "Solver"]

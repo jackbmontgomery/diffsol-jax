@@ -26,7 +26,7 @@ def linear_dae_rhs(x, p, t):
 
 def dae_problem(**kw):
     kw.setdefault("mass", lambda v, p, t: jnp.array([v[0], 0.0]))
-    return ODEProblem(linear_dae_rhs, nstates=2, params=2, **kw)
+    return ODEProblem(linear_dae_rhs, state=2, params=2, **kw)
 
 
 DIAGONAL_MASS = dae_problem()
@@ -104,7 +104,7 @@ def robertson(dae):
         last = x[0] + x[1] + x[2] - 1.0 if dae else r2
         return jnp.array([-r1, r1 - r2, last])
 
-    return ODEProblem(rhs, nstates=3, params=3, algebraic=1 if dae else None)
+    return ODEProblem(rhs, state=3, params=3, algebraic=1 if dae else None)
 
 
 ROBERTSON_TOL = {"rtol": 1e-10, "atol": 1e-12}
@@ -139,7 +139,7 @@ def test_time_dependent_mass():
     # (1 + t) y' = -p0 y: y = (1 + t) ** -p0
     problem = ODEProblem(
         rhs=lambda x, p, t: -p[0] * x,
-        nstates=1,
+        state=1,
         params=2,
         mass=lambda v, p, t: (1.0 + t) * v,
     )
@@ -159,7 +159,7 @@ def test_parameter_dependent_mass_raises():
     with pytest.raises(DiffsolJaxError, match="dM/dp"):
         ODEProblem(
             rhs=lambda x, p, t: -p[0] * x,
-            nstates=1,
+            state=1,
             params=2,
             mass=lambda v, p, t: p[1] * v,
         )
@@ -182,5 +182,5 @@ def test_bad_algebraic_raises():
         dae_problem(mass=None, algebraic=True)
     with pytest.raises(DiffsolJaxError, match="algebraic must be in"):
         dae_problem(mass=None, algebraic=2)  # all the states algebraic
-    with pytest.raises(DiffsolJaxError, match="length"):
+    with pytest.raises(DiffsolJaxError, match="must have length 2"):
         dae_problem(mass=None, algebraic=[True])

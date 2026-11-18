@@ -39,9 +39,6 @@ def load_data():
     return jnp.asarray(data[:, 0]), jnp.asarray(data[:, 1:])
 
 
-ts, ys = load_data()
-
-
 class NeuralNetwork(eqx.Module):
     layers: list[eqx.nn.Linear]
 
@@ -62,40 +59,29 @@ def make_network(data_dim: int, key: jax.Array) -> NeuralNetwork:
     )
 
 
-y0 = ys[0]
-net0 = make_network(DATA_DIM, key=jr.key(0))
-
-# the network is the parameters: the problem declares its structure, each solve passes the
-# current weights
-PROBLEM = ODEProblem(
-    lambda x, net, t: net(x), nstates=DATA_DIM, params=net0, solver="tsit45"
-)
-
-
-def predict(net, t_eval):
-    return solve(PROBLEM, y0, t_eval, net)
-
-
-def loss_fn(net, ts_batch, ys_batch):
-    return jnp.sum((predict(net, ts_batch) - ys_batch) ** 2)
-
-
-value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
-
-
-def train_one_round(net, ts_batch, ys_batch, round_idx):
+def train_one_round(prob, y0, net, ts_batch, ys_batch, round_idx):
     opt = optax.adamw(LR)
     opt_state = opt.init(net)
+
+    def loss_fn(p, t_eval, ys):
+        return jnp.sum((solve(prob, y0, t_eval, p) - ys) ** 2)
+
+    value_and_grad = jax.value_and_grad(loss_fn)
+
+    @jax.jit
+    def step(p, opt_state, t_eval, ys_data):
+        loss_val, grads = value_and_grad(p, t_eval, ys_data)
+        updates, opt_state = opt.update(grads, opt_state, p)
+        return optax.apply_updates(p, updates), opt_state, loss_val
+
     pbar = trange(STEPS_PER_ROUND, desc=f"round {round_idx}", leave=False)
     for _ in pbar:
-        loss, grads = value_and_grad(net, ts_batch, ys_batch)
-        updates, opt_state = opt.update(grads, opt_state, net)
-        net = optax.apply_updates(net, updates)
-        pbar.set_postfix(loss=f"{loss:.4f}")
+        net, opt_state, loss_val = step(net, opt_state, ts_batch, ys_batch)
+        pbar.set_postfix(loss=f"{loss_val:.4f}")
     return net
 
 
-def plot_round(round_idx, batch_len, predict_ys, path):
+def plot_round(round_idx, batch_len, ts, ys, predict_ys, path):
     fig, axes = plt.subplots(DATA_DIM, 1, figsize=(8, 10), sharex=True)
     for i, (ax, name) in enumerate(zip(axes, COLUMNS)):
         ax.plot(ts, ys[:, i], "o", ms=3, color="black", label=f"{name}_data")
@@ -114,16 +100,30 @@ def plot_round(round_idx, batch_len, predict_ys, path):
 
 def main():
     PLOT_DIR.mkdir(exist_ok=True)
+
+    ts, ys = load_data()
+    y0 = ys[0]
+    net0 = make_network(DATA_DIM, key=jr.key(0))
+
+    prob = ODEProblem(
+        lambda x, net, t: net(x), state=DATA_DIM, params=net0, solver="tsit45"
+    )
+
     net = net0
     ntimes = ts.shape[0]
     rounds = trange(1, ntimes // BATCH_STEP, desc="rounds")
     for i in rounds:
         batch_len = i * BATCH_STEP
         rounds.set_postfix(data_points=batch_len)
-        net = train_one_round(net, ts[:batch_len], ys[:batch_len], i)
+        ts_batch = ts[:batch_len]
+        ys_batch = ys[:batch_len]
+        net = train_one_round(prob, y0, net, ts_batch, ys_batch, i)
 
-        predict_ys = predict(net, ts)
-        plot_round(i, batch_len, predict_ys, PLOT_DIR / f"neural-ode-weather_{i}.png")
+        predict_ys = solve(prob, y0, ts, net)
+
+        plot_round(
+            i, batch_len, ts, ys, predict_ys, PLOT_DIR / f"neural-ode-weather_{i}.png"
+        )
 
 
 if __name__ == "__main__":

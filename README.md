@@ -2,18 +2,9 @@
   <img src="assets/diffsol-jax.png" alt="Logo" style="width: 75%;">
 </p>
 
-Use [diffsol](https://github.com/martinjrobins/diffsol) solves as JAX
-operations. Write the ODE equations as ordinary JAX functions and use the solves
-in `jax.jit`, `jax.vmap`, `jax.grad`, `jax.jacfwd` and `jax.jacrev`.
-
-The equations stay in JAX: every callback diffsol needs (`rhs`, its Jacobian
-action, the adjoint, the sensitivities,...) is derived with JAX's own
-transformations (`jax.jvp` / `jax.vjp`), lowered to StableHLO, and executed
-natively through the PJRT C API. The solves run in diffsol
-([diffsol-c](https://crates.io/crates/diffsol-c)) and are exposed to JAX as XLA
-FFI custom calls. There is no translation of your Python to another language, so
-anything JAX can trace works as an equation. See
-[docs/architecture.md](docs/architecture.md) for the full design and benchmarks.
+JAX bindings for [diffsol](https://github.com/martinjrobins/diffsol). Write the
+ODE equations as ordinary JAX functions and use the solves in `jax.jit`,
+`jax.vmap`, `jax.grad`, `jax.jacfwd` and `jax.jacrev`.
 
 ## Example usage
 
@@ -23,8 +14,8 @@ from diffsol_jax import ODEProblem, solve
 
 jax.config.update("jax_enable_x64", True)
 
-# one lane of the equations: x [nstates], p the parameters, t the time
-problem = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x), nstates=1, params=1)
+# one lane of the equations: y the state, p the parameters, t the time
+problem = ODEProblem(lambda y, p, t: p[0] * y * (1.0 - y), state=1, params=1)
 y0, p = jnp.array([0.1]), jnp.array([1.0])
 t = jnp.linspace(0.0, 5.0, 11)
 ys = solve(problem, y0, t, p)  # [nt, nstates]
@@ -32,38 +23,54 @@ ys = jax.vmap(solve, (None, None, None, 0))(problem, y0, t, jnp.ones((64, 1)))
 g_y0, g_p = jax.grad(lambda y, p: solve(problem, y, t, p).sum(), (0, 1))(y0, p)
 ```
 
-An `ODEProblem` is the equations plus the sizes and solver options they are
+An `ODEProblem` is the equations plus the layouts and solver options they are
 built into: constructing one builds the diffsol solver, with its compiled
 callbacks and its adjoint checkpoints, and that solver lives as long as the
-problem. A solve then supplies the values — `solve(problem, y0, t_eval, args,
+problem. A solve then supplies the values — `solve(problem, y0, t_eval, params,
 rtol=..., atol=..., ad=...)`. To change the solver, make another problem:
 `problem.replace(solver="tsit45")`.
 
-`solve` is differentiable in both `y0` and `args`. Reverse mode
+`solve` is differentiable in both `y0` and `params`. Reverse mode
 (`ad="adjoint"`, the default) uses the diffsol adjoint with checkpointing;
-forward mode (`ad="forward"`) uses diffsol forward sensitivities. A `jax.vmap`
-over `y0` or over `args` becomes more lanes in a single batched solve, not a
-loop of solves — so an ensemble over initial conditions costs one solve.
+forward mode (`ad="forward"`) uses diffsol forward sensitivities. Batching is
+`jax.vmap`: a vmapped axis of `y0` or of `params` becomes more lanes in a single
+batched solve, not a loop of solves, so an ensemble over initial conditions
+costs one solve.
 
 An initial state that is itself a function of the parameters is ordinary JAX
 composition: `solve(problem, f(p), t, p)` differentiates through `f` without any
 special case.
 
-## Neural ODEs
+## Pytrees
 
-`params` is either an int, a flat parameter vector of that width, or a template
-pytree — so the parameters can be a network: its float-array leaves are the
-parameters, and every other leaf is captured by the equations as a constant.
-`jax.grad` returns a pytree of the same structure, so optax updates it
-directly:
+The state and the parameters are both pytrees, declared once by `state=` and
+`params=`. Each is either an int `n`, meaning one flat `f64[n]` array, or a
+template: its float-array leaves give the shapes and dtypes. The equations, `y0`
+and `ys` all share the state structure, so a system with named blocks can stay
+named:
+
+```python
+problem = ODEProblem(
+    lambda y, p, t: {"pos": y["vel"], "vel": -p.k * y["pos"]},
+    state={"pos": jnp.zeros(3), "vel": jnp.zeros(3)},
+    params=Spring(k=jnp.array(1.0)),
+)
+
+ys = solve(problem, {"pos": pos0, "vel": vel0}, t_eval, params)
+ys["pos"]  # [nt, 3]
+```
+
+In a `params` template, the float-array leaves are the parameters and every
+other leaf is captured by the equations as a constant. `jax.grad` returns a
+pytree of the same structure, so a network inside the right-hand side is
+ordinary — and optax updates the gradients directly:
 
 ```python
 import equinox as eqx
-from diffsol_jax import ODEProblem, solve
 
 net = eqx.nn.MLP(4, 4, 64, 2, key=jax.random.key(0))  # any pytree of weights
 problem = ODEProblem(
-    lambda x, net, t: net(x), nstates=4, params=net, solver="tsit45"
+    lambda y, net, t: net(y), state=4, params=net, solver="tsit45"
 )
 
 def loss(net):
@@ -76,29 +83,26 @@ net = optax.apply_updates(net, optimizer.update(grads, opt_state, net)[0])
 
 Only the shapes and dtypes of the parameter leaves are read, so
 `params=jax.eval_shape(make_net, key)` is a complete declaration — the problem
-never holds the weights, each solve passes them.
-
-To train the initial state with the weights, make it a leaf of the same pytree
-and pass it as both: `solve(problem, v.y0, t_eval, v)`. Its gradient comes back
-in `v`'s structure next to the weights. For full training loops, see
+never holds the weights, each solve passes them. To train the initial state with
+them, make it a leaf of the same pytree and pass it as both: `solve(problem,
+v.y0, t_eval, v)`. For full training loops, see
 [examples/neural-ode-weather-prediction](examples/neural-ode-weather-prediction)
-(the network alone) and
-[examples/fitting-a-predator-prey-model](examples/fitting-a-predator-prey-model)
-(the initial state and the rates together).
+and
+[examples/fitting-a-predator-prey-model](examples/fitting-a-predator-prey-model).
 
 ## DAEs
 
 A singular mass matrix gives a semi-explicit index-1 DAE, solved with the
 implicit solvers (`bdf`, the default, `esdirk34` or `tr_bdf2`) and
 differentiable like any other problem. Write the algebraic equations as rows of
-`rhs` and mark them with `algebraic=` (an int: the last states are algebraic; or
-a boolean mask):
+`rhs` and mark them with `algebraic=` — an int (the last entries of the flat
+state), a boolean mask, or a pytree of bools matching the state:
 
 ```python
 # y' = -p0 * y   and   0 = z - p1 * y
 problem = ODEProblem(
-    rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
-    nstates=2,
+    rhs=lambda y, p, t: jnp.array([-p[0] * y[0], y[1] - p[1] * y[0]]),
+    state=2,
     params=2,
     algebraic=1,
 )

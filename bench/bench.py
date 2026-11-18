@@ -333,7 +333,7 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
     y0 = jnp.asarray(m["y0"])
     problem = ODEProblem(
         m["rhs"],
-        nstates=nst,
+        state=nst,
         params=npar,
         solver=m["solver"],
         # one checkpoint: the registry is cleared after each gradient timing anyway
@@ -341,7 +341,8 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
     )
 
     def diffsol_solve(p, t):
-        return solve(problem, y0, t, p, rtol=RTOL, atol=ATOL)
+        # p is [B, npar]: a vmapped axis of the parameters is lanes of one batched solve
+        return jax.vmap(lambda q: solve(problem, y0, t, q, rtol=RTOL, atol=ATOL))(p)
 
     jax_solve = jax.jit(diffsol_solve)
     jax_grad = jax.jit(jax.grad(lambda p: diffsol_solve(p, t_jax)[..., 0].sum()))

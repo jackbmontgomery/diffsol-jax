@@ -138,26 +138,33 @@ The executables depend on the number of lanes `B`. `B` is known only after
 `jax.vmap`, so the lowering rule of each solve compiles the callbacks for its
 `B`.
 
-## Pytree parameters
+## Pytree layouts
 
-The solver core works on a flat `f64[B, nparams]` parameter buffer — the right
-representation for the callbacks, the sensitivity lanes, and the FFI. The pytree
-`args` of a solve (`_params.py`) is a thin boundary layer over it:
+The solver core works on flat `f64[B, nstates]` and `f64[B, nparams]` buffers —
+the right representation for the callbacks, the sensitivity lanes, and the FFI.
+The pytree layouts of the state, the parameters and the output (`_params.py`,
+one `Layout` each) are a thin boundary layer over them:
 
 - `ODEProblem` splits the leaves of the `params` template into **parameters**
   (float or complex arrays) and **constants** (everything else, including the
-  tree structure itself). The user functions are wrapped once so the callbacks
-  see the pytree; the wrapper rebuilds it from the flat vector with slices and
-  reshapes, which are traced into the compiled callbacks and fuse away.
-- The ravel of the parameter leaves is built from
-  `reshape`/`concatenate`/`astype`, so JAX AD and `vmap` compose through it:
-  `jax.grad` returns a pytree of the same structure (each leaf's gradient in
-  that leaf's own dtype — an f32 leaf gets an f32 gradient), and a vmapped leaf
-  batches the flat vector into solver lanes.
+  tree structure itself); a `state` template is all parameters, since every leaf
+  is integrated. The user functions are wrapped once, so that `rhs(y, p, t)`
+  becomes a function of the flat vectors: unravel, call, ravel the result. The
+  slices, reshapes and concatenates of that are traced into the compiled
+  callbacks and fuse away, and `jax.jvp`/`jax.vjp` differentiate through them,
+  so the Jacobian-action, sensitivity and adjoint callbacks need no special
+  case.
+- At the solve boundary the same ravel runs in traced JAX, so AD and `vmap`
+  compose through it: `jax.grad` returns a pytree of the same structure (each
+  leaf's gradient in that leaf's own dtype — an f32 leaf gets an f32 gradient),
+  and a vmapped leaf of `y0` or of the parameters batches the flat vector into
+  solver lanes. `ys` is unraveled the same way, each leaf taking its slice of
+  the trailing axis. Lanes come only from `vmap`: the leaves carry the declared
+  shapes, so an extra axis is a shape error rather than a lane count.
 - The pytree **structure**, the leaf shapes and the values of the constant
   leaves are what the callbacks are compiled for, which is why they are declared
-  once by `params=` rather than taken from each solve: a solve checks its `args`
-  against the template and raises on a mismatch. Changing the parameter values
+  once by `params=` rather than taken from each solve: a solve checks its
+  parameter values against the template and raises on a mismatch. Changing the parameter values
   is the hot path and costs nothing.
 
 Nothing below `ODEProblem.__init__` knows about pytrees; `_lower.py`,
@@ -167,8 +174,8 @@ Nothing below `ODEProblem.__init__` knows about pytrees; `_lower.py`,
 
 diffsol takes the initial state as `init(p, t)`, a function of the parameters,
 with `init_sens` and `init_sens_adjoint` supplying `dy0/dp`. `solve(problem, y0,
-t_eval, args)` exposes it as an argument by making the internal parameter vector
-the concatenation `[params, y0]`, of width `nparams + nstates`:
+t_eval, params)` exposes it as an argument by making the internal parameter
+vector the concatenation `[params, y0]`, of width `nparams + nstates`:
 
 - `init(p, t)` is the slice `p[nparams:]`, so `init_sens` is the constant
   selection matrix `[0 | I]` and `init_sens_adjoint` its transpose. Both are
@@ -179,8 +186,8 @@ the concatenation `[params, y0]`, of width `nparams + nstates`:
   and `mass` are unaffected.
 - The concatenation happens in traced JAX code in `solve`, above the primitive.
   `vmap` therefore batches `y0` through the existing `concatenate` batching rule
-  and into solver lanes, exactly as it does for `params` — a `vmap` over initial
-  conditions is one batched solve.
+  and into solver lanes, exactly as it does for the parameters — a `vmap` over
+  initial conditions is one batched solve.
 
 The cost is `nstates` extra parameter columns. In reverse mode that is free; in
 forward mode (`ad="forward"`, where `P = nparams`) the augmented system grows by

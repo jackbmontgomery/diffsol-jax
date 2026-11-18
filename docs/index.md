@@ -15,9 +15,9 @@ run in diffsol and are exposed to JAX as XLA FFI custom calls. The result is a
 - it batches under `jax.vmap` - a vmapped axis becomes more lanes in a single
   batched solve;
 - it solves **DAEs**;
-- it takes the parameters as a **pytree**: a network's weights, or anything
-  else [optax can update](getting-started.md#parameters-as-a-pytree), for neural
-  ODEs.
+- the state and the parameters are **pytrees**, so a system can keep its named
+  blocks and a neural ODE's parameters can be
+  [the network itself](getting-started.md#pytrees-the-state-and-the-parameters).
 
 ## Installation
 
@@ -51,7 +51,7 @@ def lotka_volterra(x, p, t):
     )
 
 
-problem = ODEProblem(lotka_volterra, nstates=2, params=4)
+problem = ODEProblem(lotka_volterra, state=2, params=4)
 
 y0 = jnp.array([1.0, 0.5])
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
@@ -69,13 +69,15 @@ many = jax.vmap(solve, (None, None, None, 0))(
 )  # one solve, 64 lanes
 ```
 
-A problem holds the equations, the sizes and the solver; a solve takes the
-state, the times and the parameter values. For ML — a neural network inside the
-ODE, trained by gradient descent — the parameters are the network:
+A problem holds the equations, the layouts and the solver; a solve takes the
+state, the times and the parameter values. Both layouts are pytrees: `state=2`
+and `params=4` above are shorthand for one flat `f64[2]` and one flat `f64[4]`,
+and a template declares anything else. For ML — a neural network inside the ODE,
+trained by gradient descent — the parameters are the network:
 
 ```python
 problem = ODEProblem(
-    lambda x, net, t: net(x), nstates=4, params=net, solver="tsit45"
+    lambda y, net, t: net(y), state=4, params=net, solver="tsit45"
 )
 
 ys = solve(problem, y0, t_eval, net)  # the current weights
@@ -83,7 +85,7 @@ grads = jax.grad(lambda net: loss(solve(problem, y0, t_eval, net)))(net)
 ```
 
 `grads` is a network of gradients, which optax applies directly. See
-[Parameters as a pytree](getting-started.md#parameters-as-a-pytree) for the
+[Pytrees](getting-started.md#pytrees-the-state-and-the-parameters) for the
 rules, and the `examples/neural-ode-weather-prediction` example for a full
 training loop.
 

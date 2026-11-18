@@ -1,4 +1,4 @@
-"""Tests of the `params` layout of a problem and the `args` of its solves: one array of
+"""Tests of the `params` layout of a problem and the values its solves take: one flat array of
 parameters, or a pytree whose float-array leaves are the parameters and whose other leaves the
 equations capture as constants."""
 
@@ -26,8 +26,8 @@ class Logistic:
 
 
 LOGISTIC = Logistic(r=jnp.array(1.0), k=jnp.array(1.0))
-TREE = ODEProblem(lambda x, p, t: p.r * x * (1.0 - x / p.k), nstates=1, params=LOGISTIC)
-FLAT = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]), nstates=1, params=2)
+TREE = ODEProblem(lambda x, p, t: p.r * x * (1.0 - x / p.k), state=1, params=LOGISTIC)
+FLAT = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]), state=1, params=2)
 
 
 def flat_of(v):
@@ -79,7 +79,7 @@ def test_y0_as_a_parameter_leaf():
 
     v = WithY0(y0=Y0, rates=LOGISTIC)
     problem = ODEProblem(
-        lambda x, p, t: p.rates.r * x * (1.0 - x / p.rates.k), nstates=1, params=v
+        lambda x, p, t: p.rates.r * x * (1.0 - x / p.rates.k), state=1, params=v
     )
     assert problem.nparams == 3
     g = jax.grad(lambda v: solve(problem, v.y0, T_EVAL, v, **TOL).sum())(v)
@@ -101,8 +101,10 @@ def test_jacfwd_matches_flat():
 def test_vmap_over_one_leaf():
     rs = jnp.array([0.5, 1.0, 2.0])
     ys = jax.vmap(lambda r: tree(Y0, dataclasses.replace(LOGISTIC, r=r)))(rs)
-    params = jax.vmap(lambda r: flat_of(LOGISTIC).at[0].set(r))(rs)
-    np.testing.assert_allclose(ys, flat(Y0, params), rtol=1e-12)
+    loop = jnp.stack([flat(Y0, flat_of(LOGISTIC).at[0].set(r)) for r in rs])
+    # the vmap is one batched solve and the loop is three single-lane solves, so they agree to
+    # the solver accuracy, not to round-off
+    np.testing.assert_allclose(ys, loop, rtol=1e-7)
 
 
 def test_vmap_over_y0():
@@ -121,7 +123,7 @@ def test_a_template_of_shapes_needs_no_values():
     thing being trained is a complete declaration."""
     problem = ODEProblem(
         lambda x, p, t: p.r * x * (1.0 - x / p.k),
-        nstates=1,
+        state=1,
         params=jax.eval_shape(lambda: LOGISTIC),
     )
     assert problem.nparams == 2
@@ -131,7 +133,7 @@ def test_a_template_of_shapes_needs_no_values():
 
 
 def test_no_params():
-    problem = ODEProblem(lambda x, p, t: x * (1.0 - x), nstates=1)
+    problem = ODEProblem(lambda x, p, t: x * (1.0 - x), state=1)
     assert problem.nparams == 0
     np.testing.assert_allclose(
         solve(problem, Y0, T_EVAL, **TOL), flat(Y0, jnp.ones(2)), rtol=1e-9
@@ -144,7 +146,7 @@ def test_no_params():
 def test_out_with_tree_params():
     problem = ODEProblem(
         rhs=lambda x, p, t: p.r * x * (1.0 - x / p.k),
-        nstates=1,
+        state=1,
         params=LOGISTIC,
         out=lambda x, p, t: jnp.array([2.0 * x[0], p.r * x[0] ** 2]),
     )
@@ -161,7 +163,7 @@ def test_dict_params_and_a_callable_leaf():
     """A leaf that is not a float array is a constant of the equations."""
     template = {"r": jnp.array(1.0), "shape": lambda x: x * (1.0 - x)}
     problem = ODEProblem(
-        lambda x, p, t: p["r"] * p["shape"](x), nstates=1, params=template
+        lambda x, p, t: p["r"] * p["shape"](x), state=1, params=template
     )
     assert problem.nparams == 1
     np.testing.assert_allclose(
@@ -176,7 +178,7 @@ def test_dict_params_and_a_callable_leaf():
 def test_f32_leaf_gets_f32_grad():
     template = dataclasses.replace(LOGISTIC, r=jnp.array(1.0, jnp.float32))
     problem = ODEProblem(
-        lambda x, p, t: p.r * x * (1.0 - x / p.k), nstates=1, params=template
+        lambda x, p, t: p.r * x * (1.0 - x / p.k), state=1, params=template
     )
     g = jax.grad(lambda v: solve(problem, Y0, T_EVAL, v, **TOL).sum())(template)
     assert g.r.dtype == jnp.float32
@@ -188,21 +190,20 @@ def test_f32_leaf_gets_f32_grad():
 def test_integer_leaf_is_captured_as_a_constant():
     """A non-float leaf is compiled into the callbacks, so its value comes from the template."""
     rhs = lambda x, p, t: p["r"] * x * (1.0 - x ** p["n"])  # noqa: E731
-    linear = ODEProblem(rhs, nstates=1, params={"r": jnp.array(1.0), "n": 1})
-    cubic = ODEProblem(rhs, nstates=1, params={"r": jnp.array(1.0), "n": jnp.array(3)})
+    linear = ODEProblem(rhs, state=1, params={"r": jnp.array(1.0), "n": 1})
+    cubic = ODEProblem(rhs, state=1, params={"r": jnp.array(1.0), "n": jnp.array(3)})
     assert (linear.nparams, cubic.nparams) == (1, 1)
-    args = {"r": jnp.array(1.0), "n": 99}  # the value in args is ignored
+    args = {"r": jnp.array(1.0), "n": 99}  # the value passed to solve is ignored
     ys_linear = solve(linear, Y0, T_EVAL, args, **TOL)
     np.testing.assert_allclose(ys_linear, flat(Y0, jnp.ones(2)), rtol=1e-12)
     ys_cubic = solve(cubic, Y0, T_EVAL, args, **TOL)
     assert np.all(ys_cubic[1:] > ys_linear[1:])
 
 
-def test_mismatched_args_raise():
-    with pytest.raises(DiffsolJaxError, match="does not match the params template"):
+def test_mismatched_params_raise():
+    with pytest.raises(DiffsolJaxError, match="does not match the structure"):
         tree(Y0, {"r": jnp.array(1.0), "k": jnp.array(1.0)})
-    # an extra axis on a leaf is not lanes: a pytree of parameters batches with jax.vmap, and
-    # only the flat layout (params=<int>) reads leading axes as lanes
+    # an extra axis on a leaf is not lanes: batching is jax.vmap
     with pytest.raises(DiffsolJaxError, match=r"has the shape \(3,\), expected \(\)"):
         tree(Y0, dataclasses.replace(LOGISTIC, r=jnp.ones(3)))
 
@@ -210,7 +211,7 @@ def test_mismatched_args_raise():
 def test_newly_inexact_constant_leaf_raises():
     problem = ODEProblem(
         lambda x, p, t: p["r"] * x * (1.0 - x ** p["n"]),
-        nstates=1,
+        state=1,
         params={"r": jnp.array(1.0), "n": 2},
     )
     with pytest.raises(DiffsolJaxError, match="captured it as a constant"):
@@ -221,7 +222,7 @@ def test_a_shape_only_constant_leaf_raises():
     with pytest.raises(DiffsolJaxError, match="has no value"):
         ODEProblem(
             lambda x, p, t: p["r"] * x,
-            nstates=1,
+            state=1,
             params={
                 "r": jnp.array(1.0),
                 "n": jax.ShapeDtypeStruct((), jnp.int32),
@@ -240,7 +241,7 @@ def test_dae_with_tree_params():
     y0 = jnp.array([1.0, 0.0])
     problem = ODEProblem(
         lambda x, p, t: jnp.array([-p.r * x[0], p.c * x[0] - x[1]]),
-        nstates=2,
+        state=2,
         params=v,
         algebraic=1,
     )
@@ -255,7 +256,7 @@ def test_mass_using_a_parameter_leaf_raises():
     with pytest.raises(DiffsolJaxError, match="must not depend on p"):
         ODEProblem(
             lambda x, p, t: jnp.array([-p.r * x[0], p.k * x[0] - x[1]]),
-            nstates=2,
+            state=2,
             params=LOGISTIC,
             mass=lambda v, p, t: p.k * jnp.array([v[0], 0.0]),
         )

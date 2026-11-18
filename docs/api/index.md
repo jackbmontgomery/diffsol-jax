@@ -16,49 +16,53 @@ and `jax.vmap`.
 
 ## The equations
 
-All the equations act on **one lane**: `x` (or `v`) has shape `[nstates]`, `t` is a scalar, and
-`p` is the parameters — an array `[nparams]`, or the `params` pytree rebuilt. Any traceable JAX
-code is allowed.
+All the equations act on **one lane**: `y` (or `v`) is in the state structure, `p` is in the
+parameter structure, and `t` is a scalar. Any traceable JAX code is allowed.
 
 | Function    | Signature      | Required | Description                                             |
 | ----------- | -------------- | -------- | ------------------------------------------------------- |
-| `rhs`       | `(x, p, t)`    | yes      | The right-hand side, returning `[nstates]`.             |
-| `out`       | `(x, p, t)`    | no       | An output function returning `[nout]`; `ys` then has `nout` columns instead of `nstates`. `nout` is inferred by shape tracing. |
-| `mass`      | `(v, p, t)`    | no       | The mass matrix action `M(t) v`, linear in `v`, not using `p`. See [DAEs](../dae.md). |
+| `rhs`       | `(y, p, t)`    | yes      | The right-hand side, returning the state structure.     |
+| `out`       | `(y, p, t)`    | no       | An output function returning any pytree; `ys` comes back in its structure instead of the state's. Inferred by shape tracing. |
+| `mass`      | `(v, p, t)`    | no       | The mass matrix action `M(t) v`, with `v` in the state structure, linear in `v` and not using `p`. See [DAEs](../dae.md). |
 
-`algebraic=` (an int, or a boolean mask over the states) is a shortcut for the diagonal `mass`
-of a semi-explicit DAE.
+`algebraic=` is a shortcut for the diagonal `mass` of a semi-explicit DAE: an int (the last
+entries of the flat state), a sequence of `nstates` bools, or a pytree of bools matching the
+state.
 
-## The parameter layout
+## The layouts
 
-`params=` declares what the `args` of a solve will be:
+`state=` and `params=` declare the pytrees that the equations, `y0`, `ys` and the parameter
+values share:
 
-| `params=`        | The equations get      | A solve passes                                     |
-| ---------------- | ---------------------- | -------------------------------------------------- |
-| an int `n`       | `p [n]`                | an array `[..., n]`; its leading axes are lanes    |
-| a template pytree| the pytree, rebuilt    | a pytree of the same structure and leaf shapes     |
-| `None`           | `None`                 | nothing                                            |
+| Declared as       | The equations get      | A solve passes                                  |
+| ----------------- | ---------------------- | ----------------------------------------------- |
+| an int `n`        | one flat `f64[n]`      | one array of shape `(n,)`                       |
+| a template pytree | the pytree, rebuilt    | a pytree of the same structure and leaf shapes   |
+| `None` (`params`) | `None`                 | nothing                                         |
 
-In a template, the float-array leaves are the parameters (differentiated, in flatten order) and
-every other leaf is captured by the equations as a constant — so the values of those leaves come
-from the template, not from `args`. Only shapes and dtypes are read from the parameter leaves,
-so `params=jax.eval_shape(make_net, key)` is a complete declaration.
+Only the shapes and dtypes of the float-array leaves are read, so
+`params=jax.eval_shape(make_net, key)` is a complete declaration. Every leaf of a `state`
+template must be a float array, since every leaf is integrated. In a `params` template, any
+other leaf is a constant that the equations capture — its value comes from the template, not
+from what a solve passes.
 
 ## Solving
 
 ```python
-problem = ODEProblem(rhs, nstates=2, params=4)                   # a flat parameter vector
-problem = ODEProblem(rhs, nstates=4, params=net, solver="tsit45")  # a pytree of weights
-ys = solve(problem, y0, t_eval, args, rtol=1e-6, ad="adjoint")
+problem = ODEProblem(rhs, state=2, params=4)                        # both flat
+problem = ODEProblem(rhs, state=4, params=net, solver="tsit45")     # a pytree of weights
+ys = solve(problem, y0, t_eval, params, rtol=1e-6, ad="adjoint")
 ```
 
-`solve(problem, y0, t_eval, args)` takes `y0` of shape `[..., nstates]`, `t_eval` of shape
-`[nt]`, and `args` in the declared layout, and returns `ys` of shape `[..., nt, nout]`
-(`nout = nstates` if the problem has no `out`). Leading axes of `y0` and of a flat `args` are
-broadcast together and solved as lanes of one batched solve; a pytree `args` batches by
-`jax.vmap` over its leaves.
+`solve(problem, y0, t_eval, params)` takes `y0` and `params` in the declared layouts and
+`t_eval` of shape `[nt]`, and returns `ys` in the output layout, each leaf `[nt, *leaf_shape]`
+— for a flat `state=n` and no `out`, one array `[nt, n]`.
 
-The solve is differentiable in `y0` as well as in `args`: internally `y0` is appended to the
+Batching is `jax.vmap`, and a vmapped axis of `y0` or of `params` becomes more lanes of one
+batched solve. The leaves carry exactly the declared shapes, so an extra axis is a shape error
+rather than a lane count.
+
+The solve is differentiable in `y0` as well as in `params`: internally `y0` is appended to the
 parameter vector, so it reaches the diffsol sensitivity and adjoint equations by the same path.
 An initial state that is a function of the parameters needs no special support — pass
 `solve(problem, f(params), t_eval, params)` and JAX composes the derivatives.

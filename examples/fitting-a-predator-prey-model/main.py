@@ -1,21 +1,16 @@
 """
 Fitting a predator-prey model.
-
-The Lotka-Volterra rates and the initial state are fitted together: both are leaves of the
-`args` pytree that `solve` takes, so `jax.grad` returns a pytree of the same structure and optax
-updates it directly.
 """
 
 import pathlib
-import time
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
+from jaxtyping import Array
 import optax
-from jaxtyping import Array, ArrayLike
 from tqdm import trange
 
 from diffsol_jax import ODEProblem, solve
@@ -24,82 +19,69 @@ jax.config.update("jax_enable_x64", True)
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 
-T_EVAL = jnp.linspace(0.0, 5.0, num=100)
-NOISE_STD = 0.05
+
 STEPS = 200
 LR = 1e-2
 
 
-class Rates(eqx.Module):
+class LotkaVolterraParams(eqx.Module):
     alpha: Array
     beta: Array
     gamma: Array
     delta: Array
 
-    def __init__(
-        self,
-        alpha: ArrayLike = 1.3,
-        beta: ArrayLike = 0.9,
-        gamma: ArrayLike = 0.8,
-        delta: ArrayLike = 1.8,
-    ):
-        self.alpha = jnp.asarray(alpha)
-        self.beta = jnp.asarray(beta)
-        self.gamma = jnp.asarray(gamma)
-        self.delta = jnp.asarray(delta)
 
-
-class LotkaVolterra(eqx.Module):
-    """Everything the fit varies: the rates and the initial state."""
-
-    y0: Array
-    rates: Rates
-
-
-def rhs(x: Array, p: LotkaVolterra, t: Array) -> Array:
+def rhs(x: Array, p: LotkaVolterraParams, _t: float) -> Array:
     prey, predator = x[0], x[1]
-    r = p.rates
     return jnp.array(
         [
-            r.alpha * prey - r.beta * predator * prey,
-            r.gamma * prey * predator - r.delta * predator,
+            p.alpha * prey - p.beta * predator * prey,
+            p.gamma * prey * predator - p.delta * predator,
         ]
     )
 
 
-V_LIKE = LotkaVolterra(y0=jnp.zeros(2), rates=Rates())
-PROBLEM = ODEProblem(rhs, nstates=2, params=V_LIKE, solver="tsit45")
+def trajectory(
+    prob: ODEProblem, y0: Array, p: LotkaVolterraParams, t_eval: Array, **options
+) -> Array:
+    return solve(prob, y0, t_eval, p, **options)
 
 
-def trajectory(v: LotkaVolterra, t_eval: Array, **options) -> Array:
-    return solve(PROBLEM, v.y0, t_eval, v, **options)
+def generate_data(
+    prob: ODEProblem,
+    y0: Array,
+    p: LotkaVolterraParams,
+    t_eval: Array,
+    *,
+    key: Array,
+    noise_std=0.05,
+) -> Array:
+    ys = trajectory(prob, y0, p, t_eval)
+    return ys + noise_std * jr.normal(key=key, shape=ys.shape)
 
 
-def generate_data(v: LotkaVolterra, t_eval: Array, *, key: Array) -> Array:
-    ys = trajectory(v, t_eval)
-    return ys + NOISE_STD * jr.normal(key=key, shape=ys.shape)
-
-
-def fit(v: LotkaVolterra, t_eval: Array, ys_data: Array) -> LotkaVolterra:
+def fit(
+    prob: ODEProblem, y0: Array, p: LotkaVolterraParams, t_eval: Array, ys_data: Array
+) -> LotkaVolterraParams:
     opt = optax.adam(LR)
-    opt_state = opt.init(v)
+    opt_state = opt.init(p)
 
-    def loss_fn(v, ts_batch, ys_batch):
-        return jnp.sum((trajectory(v, ts_batch) - ys_batch) ** 2)
+    def loss_fn(p, ys_batch):
+        return jnp.sum((trajectory(prob, y0, p, t_eval) - ys_batch) ** 2)
 
-    value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
+    value_and_grad = jax.value_and_grad(loss_fn)
 
     @jax.jit
     def step(v, opt_state):
-        loss_val, grads = value_and_grad(v, t_eval, ys_data)
+        loss_val, grads = value_and_grad(v, ys_data)
         updates, opt_state = opt.update(grads, opt_state, v)
         return optax.apply_updates(v, updates), opt_state, loss_val
 
     pbar = trange(STEPS, desc="fit")
     for _ in pbar:
-        v, opt_state, loss_val = step(v, opt_state)
+        p, opt_state, loss_val = step(p, opt_state)
         pbar.set_postfix(loss=f"{loss_val:.4f}")
-    return v
+    return p
 
 
 def plot_fit(t_eval, ys_data, ys_true, ys_fit, path):
@@ -117,51 +99,33 @@ def plot_fit(t_eval, ys_data, ys_true, ys_fit, path):
     plt.close(fig)
 
 
-def time_call(fn, *args, repeats=20):
-    jax.block_until_ready(fn(*args))
-    times = []
-    for _ in range(repeats):
-        t0 = time.perf_counter()
-        jax.block_until_ready(fn(*args))
-        times.append(time.perf_counter() - t0)
-    return min(times)
-
-
-def compare_ad_modes(v: LotkaVolterra, t_eval: Array, ys_data: Array):
-    """The two reverse modes solve the same problem: `ad` is a solve option, not another
-    problem."""
-    print(f"\n{'':20s}{'grad(fit loss)':>18s}{'jacrev(trajectory)':>22s}")
-    for ad in ("adjoint", "forward"):
-
-        def loss_fn(v):
-            return jnp.sum((trajectory(v, t_eval, ad=ad) - ys_data) ** 2)
-
-        grad_time = time_call(jax.jit(jax.grad(loss_fn)), v)
-        jacrev_time = time_call(
-            jax.jit(jax.jacrev(lambda v: trajectory(v, t_eval, ad=ad))), v
-        )
-        print(f"ad={ad!r:10s}{grad_time * 1e3:15.3f} ms{jacrev_time * 1e3:19.3f} ms")
-
-
 def main():
     key = jr.key(0)
+    t_eval = jnp.linspace(0.0, 5.0, num=100)
     y0 = 5.0 * jr.uniform(key=key, shape=(2,))
-    v_true = LotkaVolterra(y0=y0, rates=Rates())
-    ys_true = trajectory(v_true, T_EVAL)
-    ys_data = generate_data(v_true, T_EVAL, key=key)
-
-    v_init = LotkaVolterra(
-        y0=y0, rates=Rates(alpha=1.1, beta=1.0, gamma=0.5, delta=1.6)
+    p_true = LotkaVolterraParams(
+        alpha=jnp.asarray(1.3),
+        beta=jnp.asarray(0.9),
+        gamma=jnp.asarray(0.8),
+        delta=jnp.asarray(1.8),
     )
-    v_fit = fit(v_init, T_EVAL, ys_data)
-    print(v_fit.rates)
+    prob = ODEProblem(rhs, state=len(y0), params=p_true)
+    ys_true = trajectory(prob, y0, p_true, t_eval)
+    ys_data = generate_data(prob, y0, p_true, t_eval, key=key)
 
-    ys_fit = trajectory(v_fit, T_EVAL)
+    p = LotkaVolterraParams(
+        alpha=jnp.asarray(1.1),
+        beta=jnp.asarray(1.0),
+        gamma=jnp.asarray(0.5),
+        delta=jnp.asarray(1.6),
+    )
+    p_fit = fit(prob, y0, p, t_eval, ys_data)
+    print(jax.tree.leaves(p_fit))
+
+    ys_fit = trajectory(prob, y0, p_fit, t_eval)
     plot_fit(
-        T_EVAL, ys_data, ys_true, ys_fit, BASE_DIR / "fitting-a-predator-prey-model.png"
+        t_eval, ys_data, ys_true, ys_fit, BASE_DIR / "fitting-a-predator-prey-model.png"
     )
-
-    compare_ad_modes(v_fit, T_EVAL, ys_data)
 
 
 if __name__ == "__main__":

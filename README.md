@@ -2,103 +2,129 @@
   <img src="assets/diffsol-jax.png" alt="Logo" style="width: 75%;">
 </p>
 
-Use [diffsol](https://github.com/martinjrobins/diffsol) solves as JAX operations. Write the ODE
-equations as ordinary JAX functions and use the solves in `jax.jit`, `jax.vmap`, `jax.grad`,
-`jax.jacfwd` and `jax.jacrev`.
-
-The equations stay in JAX: every callback diffsol needs (`rhs`, its Jacobian action, the adjoint,
-the sensitivities, ...) is derived with JAX's own transformations (`jax.jvp` / `jax.vjp`), lowered
-to StableHLO, and executed natively through the PJRT C API. The solves run in diffsol
-([diffsol-c](https://crates.io/crates/diffsol-c)) and are exposed to JAX as XLA FFI custom calls.
-There is no translation of your Python to another language, so anything JAX can trace works as an
-equation. See [docs/architecture.md](docs/architecture.md) for the full design and benchmarks.
+JAX bindings for [diffsol](https://github.com/martinjrobins/diffsol). Write the
+ODE equations as ordinary JAX functions and use the solves in `jax.jit`,
+`jax.vmap`, `jax.grad`, `jax.jacfwd` and `jax.jacrev`.
 
 ## Example usage
 
 ```python
 import jax, jax.numpy as jnp
+from diffsol_jax import ODEProblem, solve
 
 jax.config.update("jax_enable_x64", True)
-from diffsol_jax import Model
 
-model = Model(
-    rhs=lambda x, p, t: p[0] * x * (1.0 - x),  # one lane: x [nstates], p [nparams]
-    init=lambda p, t: jnp.array([0.1]),
-    nstates=1,
-    nparams=1,
-)
-t = jnp.linspace(0.0, 5.0, 11)
-ys = model.solve(jnp.array([1.0]), t)  # [nt, nstates]
-ys = jax.vmap(model.solve, (0, None))(jnp.ones((64, 1)), t)  # one solve with 64 lanes
-g = jax.grad(lambda p: model.solve(p, t).sum())(jnp.array([1.0]))
+problem = ODEProblem(lambda y, p, t: p[0] * y * (1.0 - y), state=1, params=1)
+y0, p = jnp.array([0.1]), jnp.array([1.0])
+ts = jnp.linspace(0.0, 5.0, 11)
+ys = solve(problem, y0, p, ts)  # [nt, nstates]
+ys = jax.vmap(solve, (None, None, 0, None))(problem, y0, jnp.ones((64, 1)), ts)
+g_y0, g_p = jax.grad(lambda y, p: solve(problem, y, p, ts).sum(), (0, 1))(y0, p)
 ```
 
-Reverse mode (`ad="adjoint"`, the default) uses the diffsol adjoint with checkpointing; forward
-mode (`ad="forward"`) uses diffsol forward sensitivities. A `jax.vmap` over `params` becomes more
-lanes in a single batched solve, not a loop of solves.
+An `ODEProblem` is the equations plus the layouts and solver options they are
+built into: constructing one builds the diffsol solver, with its compiled
+callbacks and its adjoint checkpoints, and that solver lives as long as the
+problem. A solve then supplies the values —
+`solve(problem, y0, params, t_eval, rtol=..., atol=..., ad=...)`. To change the
+solver, make another problem: `problem.replace(solver="tsit45")`.
 
-## Neural ODEs
+`solve` is differentiable in both `y0` and `params`. Reverse mode
+(`ad="adjoint"`, the default) uses the diffsol adjoint with checkpointing;
+forward mode (`ad="forward"`) uses diffsol forward sensitivities. Batching is
+`jax.vmap`: a vmapped axis of `y0` or of `params` becomes more lanes in a single
+batched solve, not a loop of solves, so an ensemble over initial conditions
+costs one solve.
 
-For ML, define the problem as one `System`: the fields are the differentiable inputs (a frozen
-dataclass pytree — an initial state, a network, rate constants) and the methods are the
-equations. `jax.grad` returns a pytree of the same structure, so optax updates it directly:
+An initial state that is itself a function of the parameters is ordinary JAX
+composition: `solve(problem, f(p), p, t)` differentiates through `f` without any
+special case.
+
+## Pytrees
+
+The state and the parameters are both pytrees, declared once by `state=` and
+`params=`. Each is either an int `n`, meaning one flat `f64[n]` array, or a
+template: its float-array leaves give the shapes and dtypes. The equations, `y0`
+and `ys` all share the state structure, so a system with named blocks can stay
+named:
 
 ```python
-from diffsol_jax import Model, System
+problem = ODEProblem(
+    lambda y, p, t: {"pos": y["vel"], "vel": -p.k * y["pos"]},
+    state={"pos": jnp.zeros(3), "vel": jnp.zeros(3)},
+    params=Spring(k=jnp.array(1.0)),
+)
 
-class WeatherSystem(System):
-    y0: jax.Array    # the initial state, trained with everything else
-    net: eqx.Module  # any pytree of weights
-
-    def init(self, t):
-        return self.y0
-
-    def __call__(self, x, t):
-        return self.net(x)
-
-system = WeatherSystem(y0=y0, net=net)
-model = Model(system, ode_solver="tsit45")  # nstates inferred
-
-loss = lambda s: jnp.sum((model.solve(s, t_eval) - data) ** 2)
-grads = jax.grad(loss)(system)              # a WeatherSystem of gradients
-system = optax.apply_updates(system, optimizer.update(grads, opt_state, system)[0])
+ys = solve(problem, {"pos": pos0, "vel": vel0}, params, t_eval)
+ys["pos"]  # [nt, 3]
 ```
 
-Float-array fields are trainable; everything else is fixed at model construction. See
-[examples/neural-ode-weather-prediction](examples/neural-ode-weather-prediction) for a full
-training loop, and the docs for the rules (static fields, `out`/`mass` overrides, batching by
-`jax.vmap` over leaves).
+In a `params` template, the float-array leaves are the parameters and every
+other leaf is captured by the equations as a constant. `jax.grad` returns a
+pytree of the same structure, so a network inside the right-hand side is
+ordinary — and optax updates the gradients directly:
+
+```python
+import equinox as eqx
+
+net = eqx.nn.MLP(4, 4, 64, 2, key=jax.random.key(0))  # any pytree of weights
+problem = ODEProblem(
+    lambda y, net, t: net(y), state=4, params=net, solver="tsit45"
+)
+
+def loss(net):
+    ys = solve(problem, y0, net, t_eval)  # the current weights
+    return jnp.sum((ys - data) ** 2)
+
+grads = jax.grad(loss)(net)  # an MLP of gradients
+net = optax.apply_updates(net, optimizer.update(grads, opt_state, net)[0])
+```
+
+Only the shapes and dtypes of the parameter leaves are read, so
+`params=jax.eval_shape(make_net, key)` is a complete declaration — the problem
+never holds the weights, each solve passes them. To train the initial state with
+them, make it a leaf of the same pytree and pass it as both:
+`solve(problem, v.y0, v, t_eval)`. For full training loops, see
+[examples/neural-ode-weather-prediction](examples/neural-ode-weather-prediction)
+and
+[examples/fitting-a-predator-prey-model](examples/fitting-a-predator-prey-model).
 
 ## DAEs
 
-A singular mass matrix gives a semi-explicit index-1 DAE, solved with the implicit solvers
-(`bdf`, the default, `esdirk34` or `tr_bdf2`) and differentiable like any other model. Write the
-algebraic equations as rows of `rhs` and mark them with `algebraic=` (an int: the last states
-are algebraic; or a boolean mask):
+A singular mass matrix gives a semi-explicit index-1 DAE, solved with the
+implicit solvers (`bdf`, the default, `esdirk34` or `tr_bdf2`) and
+differentiable like any other problem. Write the algebraic equations as rows of
+`rhs` and mark them with `algebraic=` — an int (the last entries of the flat
+state), a boolean mask, or a pytree of bools matching the state:
 
 ```python
 # y' = -p0 * y   and   0 = z - p1 * y
-model = Model(
-    rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
-    init=lambda p, t: jnp.array([1.0, p[1]]),
-    nstates=2,
-    nparams=2,
+problem = ODEProblem(
+    rhs=lambda y, p, t: jnp.array([-p[0] * y[0], y[1] - p[1] * y[0]]),
+    state=2,
+    params=2,
     algebraic=1,
 )
+p = jnp.array([0.7, 2.0])
+ys = solve(problem, jnp.array([1.0, p[1]]), p, t_eval)  # a consistent y0
 ```
 
-The initial state is projected onto the algebraic constraints automatically (diffsol solves the
-algebraic variables at `t0`), and the gradients account for it. For a general (time-dependent)
-mass matrix, give `mass=lambda v, p, t: ...`, the action `M(t) v`, which must be linear in `v`
-and must not use `p` (the diffsol sensitivities have no `dM/dp` term, so a parameter-dependent
-mass would give a wrong gradient and is rejected — fold such parameters into `rhs` instead).
+The initial state is projected onto the algebraic constraints automatically
+(diffsol solves the algebraic variables at `t0`), and the gradients account for
+it — so the algebraic entries of the `y0` you pass are only a starting guess.
+For a general (time-dependent) mass matrix, give `mass=lambda v, p, t: ...`, the
+action `M(t) v`, which must be linear in `v` and must not use `p` (the diffsol
+sensitivities have no `dM/dp` term, so a parameter-dependent mass would give a
+wrong gradient and is rejected — fold such parameters into `rhs` instead).
 Higher-index DAEs must be reduced to index 1 first.
 
 ## Building (development)
 
-Requirements: Python ≥ 3.12, a Rust toolchain, cmake and a C++20 compiler, and a CPU PJRT plugin.
+Requirements: Python ≥ 3.12, a Rust toolchain, cmake and a C++20 compiler, and a
+CPU PJRT plugin.
 
-1. Build diffsol-c from a [diffsol](https://github.com/martinjrobins/diffsol) checkout:
+1. Build diffsol-c from a [diffsol](https://github.com/martinjrobins/diffsol)
+   checkout:
 
    ```sh
    cargo build -p diffsol-c --release
@@ -114,11 +140,14 @@ Requirements: Python ≥ 3.12, a Rust toolchain, cmake and a C++20 compiler, and
    cmake --build build
    ```
 
-3. Get a CPU PJRT plugin. jaxlib does not ship one; a prebuilt plugin for linux/amd64 is inside
-   [gopjrt](https://github.com/gomlx/gopjrt)'s `gomlx_xlabuilder_linux_amd64.tar.gz` release
-   asset (`lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so`), or build `pjrt_c_api_cpu_plugin.so` from
-   [openxla/xla](https://github.com/openxla/xla). Put it in `~/.local/share/pjrt/` (found
-   automatically), or point `DIFFSOL_JAX_PJRT_PLUGIN` at it.
+3. Get a CPU PJRT plugin. jaxlib does not ship one; a prebuilt plugin for
+   linux/amd64 is inside [gopjrt](https://github.com/gomlx/gopjrt)'s
+   `gomlx_xlabuilder_linux_amd64.tar.gz` release asset
+   (`lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so`), or build
+   `pjrt_c_api_cpu_plugin.so` from
+   [openxla/xla](https://github.com/openxla/xla). Put it in
+   `~/.local/share/pjrt/` (found automatically), or point
+   `DIFFSOL_JAX_PJRT_PLUGIN` at it.
 
 4. Make the package importable from the venv (once per venv):
 
@@ -126,8 +155,9 @@ Requirements: Python ≥ 3.12, a Rust toolchain, cmake and a C++20 compiler, and
    echo "$PWD/python" > "$(.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/diffsol_jax_dev.pth"
    ```
 
-   After this, `uv run python` and `.venv/bin/python` import `diffsol_jax` from `python/`, with
-   the native library from `build/` — no `sys.path` changes needed in scripts.
+   After this, `uv run python` and `.venv/bin/python` import `diffsol_jax` from
+   `python/`, with the native library from `build/` — no `sys.path` changes
+   needed in scripts.
 
 5. Run the tests:
 
@@ -139,5 +169,6 @@ Requirements: Python ≥ 3.12, a Rust toolchain, cmake and a C++20 compiler, and
 
 This branch is a rewrite onto the PJRT architecture (vendored from the diffsol
 [`diffsol-jax2` example](https://github.com/martinjrobins/diffsol/tree/diffsol-jax2/examples/diffsol-jax),
-see [issue #303](https://github.com/martinjrobins/diffsol/issues/303)). CPU and `f64` only for
-now; GPU arrives with diffsol's GPU backend by loading the CUDA PJRT plugin instead.
+see [issue #303](https://github.com/martinjrobins/diffsol/issues/303)). CPU and
+`f64` only for now; GPU arrives with diffsol's GPU backend by loading the CUDA
+PJRT plugin instead.

@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diffsol_jax import Model
+from diffsol_jax import ODEProblem, solve
 
 RTOL, ATOL = 1e-6, 1e-8
 SOLVER_IDS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
@@ -331,19 +331,21 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
     nst, npar, t_eval = m["nstates"], m["nparams"], m["t_eval"]
     t_jax = jnp.asarray(t_eval)
     y0 = jnp.asarray(m["y0"])
-    model = Model(
-        rhs=m["rhs"],
-        init=lambda p, t: y0,
-        nstates=nst,
-        nparams=npar,
-        ode_solver=m["solver"],
-        rtol=RTOL,
-        atol=ATOL,
+    problem = ODEProblem(
+        m["rhs"],
+        state=nst,
+        params=npar,
+        solver=m["solver"],
         # one checkpoint: the registry is cleared after each gradient timing anyway
         max_checkpoints=1,
     )
-    jax_solve = jax.jit(model.solve)
-    jax_grad = jax.jit(jax.grad(lambda p: model.solve(p, t_jax)[..., 0].sum()))
+
+    def diffsol_solve(p, t):
+        # p is [B, npar]: a vmapped axis of the parameters is lanes of one batched solve
+        return jax.vmap(lambda q: solve(problem, y0, q, t, rtol=RTOL, atol=ATOL))(p)
+
+    jax_solve = jax.jit(diffsol_solve)
+    jax_grad = jax.jit(jax.grad(lambda p: diffsol_solve(p, t_jax)[..., 0].sum()))
 
     def dfx_one(p):
         sol = diffrax.diffeqsolve(
@@ -372,9 +374,9 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
 
         ys = np.asarray(jax_solve(pj, t_jax))  # [B, nt, nst]
         t_js = bench(lambda: jax_solve(pj, t_jax).block_until_ready())
-        model.callback_stats(B, reset=True)
+        problem.callback_stats(B, reset=True)
         jax_solve(pj, t_jax).block_until_ready()
-        ncalls, _, _ = model.callback_stats(B, reset=True)
+        ncalls, _, _ = problem.callback_stats(B, reset=True)
         # a VJP tape (and the diffrax checkpoints) can be several GiB for many lanes and states:
         # skip the gradients above the limit (a run with a 16 GiB machine crashed)
         est = tape_gib(ncalls, m["solver"], nst, B)
@@ -390,7 +392,7 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
         if do_grad:
             g_jax = np.asarray(jax_grad(pj))
             t_jg = bench(lambda: jax_grad(pj).block_until_ready())
-            model.clear_checkpoints()
+            problem.clear_checkpoints()
 
         nat = dc.native_ode(m["native"], m["solver"], B)
         ys_nat = dc.solve(nat, p, t_eval, B, nst)

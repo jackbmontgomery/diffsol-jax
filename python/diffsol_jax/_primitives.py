@@ -12,10 +12,13 @@ from jax.experimental.hijax import (
 )
 
 
-def _ffi(target, out_avals, *args, model, rtol, atol):
+def _ffi(target, out_avals, *args, problem, rtol, atol):
     out_types = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in out_avals]
     return jax.ffi.ffi_call(target, out_types)(
-        *args, model_id=np.int64(model.id), rtol=np.float64(rtol), atol=np.float64(atol)
+        *args,
+        model_id=np.int64(problem._id),
+        rtol=np.float64(rtol),
+        atol=np.float64(atol),
     )
 
 
@@ -23,22 +26,22 @@ def _f64(shape):
     return ShapedArray(shape, jnp.float64)
 
 
-def _ys_aval(params_aval, t_eval_aval, model):
-    return _f64(params_aval.shape[:-1] + (t_eval_aval.shape[0], model.nsolution))
+def _ys_aval(params_aval, t_eval_aval, problem):
+    return _f64(params_aval.shape[:-1] + (t_eval_aval.shape[0], problem.nsolution))
 
 
 class _LaneOp(HiPrim):
     """An operation on (params [*B, np], t_eval [nt]) whose vmapped `params` axis becomes more
     lanes: the axis goes to the front, and the operation runs once for all the lanes."""
 
-    def __init__(self, params_aval, t_eval_aval, *, model, rtol, atol):
+    def __init__(self, params_aval, t_eval_aval, *, problem, rtol, atol):
         self.in_avals = (params_aval, t_eval_aval)
-        self.out_aval = self._out_aval(params_aval, t_eval_aval, model)
-        self.params = {"_model": model, "rtol": rtol, "atol": atol}
+        self.out_aval = self._out_aval(params_aval, t_eval_aval, problem)
+        self.params = {"_problem": problem, "rtol": rtol, "atol": atol}
         super().__init__()
 
     def _kw(self):
-        return {"model": self._model, "rtol": self.rtol, "atol": self.atol}
+        return {"problem": self._problem, "rtol": self.rtol, "atol": self.atol}
 
     def _nbatch(self):
         return math.prod(self.in_avals[0].shape[:-1])
@@ -59,14 +62,14 @@ class _VjpFwdOp(_LaneOp):
     """The forward solve of the adjoint: -> (ys, handle s64[*B]). The checkpoint stays in C++;
     `handle` names it in the registry."""
 
-    def _out_aval(self, params_aval, t_eval_aval, model):
+    def _out_aval(self, params_aval, t_eval_aval, problem):
         return (
-            _ys_aval(params_aval, t_eval_aval, model),
+            _ys_aval(params_aval, t_eval_aval, problem),
             ShapedArray(params_aval.shape[:-1], jnp.int64),
         )
 
     def expand(self, params, t_eval):
-        self._model.ensure_callbacks("vjp_fwd", self._nbatch())
+        self._problem._ensure_callbacks("vjp_fwd", self._nbatch())
         ys, handle = _ffi(
             "diffsol_solve_vjp_fwd", self.out_aval, params, t_eval, **self._kw()
         )
@@ -76,15 +79,15 @@ class _VjpFwdOp(_LaneOp):
 class _FwdSensOp(_LaneOp):
     """The solve with forward sensitivities: -> (ys, sens [*B, np, nt, nout])."""
 
-    def _out_aval(self, params_aval, t_eval_aval, model):
-        ys = _ys_aval(params_aval, t_eval_aval, model)
+    def _out_aval(self, params_aval, t_eval_aval, problem):
+        ys = _ys_aval(params_aval, t_eval_aval, problem)
         return (
             ys,
             _f64(params_aval.shape[:-1] + (params_aval.shape[-1],) + ys.shape[-2:]),
         )
 
     def expand(self, params, t_eval):
-        self._model.ensure_callbacks("fwd_sens", self._nbatch())
+        self._problem._ensure_callbacks("fwd_sens", self._nbatch())
         ys, sens = _ffi(
             "diffsol_solve_fwd_sens", self.out_aval, params, t_eval, **self._kw()
         )
@@ -94,11 +97,11 @@ class _FwdSensOp(_LaneOp):
 class _Solve(_LaneOp):
     """(params [*B, np], t_eval [nt]) -> ys [*B, nt, nout]."""
 
-    def _out_aval(self, params_aval, t_eval_aval, model):
-        return _ys_aval(params_aval, t_eval_aval, model)
+    def _out_aval(self, params_aval, t_eval_aval, problem):
+        return _ys_aval(params_aval, t_eval_aval, problem)
 
     def expand(self, params, t_eval):
-        self._model.ensure_callbacks("dense", self._nbatch())
+        self._problem._ensure_callbacks("dense", self._nbatch())
         (ys,) = _ffi(
             "diffsol_solve_dense", [self.out_aval], params, t_eval, **self._kw()
         )
@@ -153,20 +156,20 @@ class VjpBkwd(HiPrim):
     the backward solve does all the directions together."""
 
     def __init__(
-        self, handle_aval, params_aval, t_eval_aval, dgdu_aval, *, model, rtol, atol
+        self, handle_aval, params_aval, t_eval_aval, dgdu_aval, *, problem, rtol, atol
     ):
         self.in_avals = (handle_aval, params_aval, t_eval_aval, dgdu_aval)
         self.out_aval = _f64(dgdu_aval.shape[:-2] + (params_aval.shape[-1],))
-        self.params = {"_model": model, "rtol": rtol, "atol": atol}
+        self.params = {"_problem": problem, "rtol": rtol, "atol": atol}
         super().__init__()
 
     def _kw(self):
-        return {"model": self._model, "rtol": self.rtol, "atol": self.atol}
+        return {"problem": self._problem, "rtol": self.rtol, "atol": self.atol}
 
     def expand(self, handle, params, t_eval, dgdu):
         nbatch = math.prod(handle.shape)
         ndirections = math.prod(dgdu.shape[handle.ndim : -2])
-        self._model.ensure_callbacks("vjp_bkwd", nbatch, ndirections)
+        self._problem._ensure_callbacks("vjp_bkwd", nbatch, ndirections)
         (grad,) = _ffi(
             "diffsol_solve_vjp_bkwd",
             [self.out_aval],

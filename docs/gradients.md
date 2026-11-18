@@ -1,14 +1,14 @@
 # Computing gradients
 
-`jax.grad`, `jax.jacrev`, `jax.jvp`, and `jax.jacfwd` all work on `model.solve`.
-This page explains the maths behind them.
+`jax.grad`, `jax.jacrev`, `jax.jvp`, and `jax.jacfwd` all work on `solve`. This
+page explains the maths behind them.
 
 ## TL;DR
 
 Forward mode (`jax.jvp`, `jax.jacfwd`) always uses diffsol
 **forward sensitivities**: an augmented system solved alongside the state,
 efficient when the number of parameters is small to moderate. Reverse mode
-(`jax.grad`, `jax.jacrev`) depends on the model's `ad=` option:
+(`jax.grad`, `jax.jacrev`) depends on the `ad=` option of the solve:
 
 - `ad="adjoint"` (the default) solves the diffsol **adjoint** equations
   backwards in time — one backward solve per cotangent regardless of the number
@@ -21,13 +21,19 @@ computed to the solver tolerances.
 
 ## The problem
 
-`Model` integrates an initial value problem
+A solve integrates an initial value problem
 
 $$ M \frac{\mathrm{d}u}{\mathrm{d}t} = f(u, p, t), \qquad u(t_0) = u_0(p), $$
 
 where $u(t) \in \mathbb{R}^{n}$ is the state, $p \in \mathbb{R}^{m}$ the
 parameters, and $M$ an optional [mass matrix](dae.md). `solve` returns the
 solution sampled at the times in `t_eval`.
+
+`solve(problem, y0, params, t_eval)` makes the initial state an argument, and
+$p$ above is the concatenation $(\texttt{params}, \texttt{y0})$, with
+$u_0(p) = \texttt{y0}$. Everything below therefore applies to `y0` unchanged:
+$\partial u_0 / \partial p = [\,0 \mid I\,]$, and the `y0` gradient is the tail
+of the parameter gradient.
 
 ## Forward sensitivities
 
@@ -40,9 +46,9 @@ $$ M \frac{\mathrm{d}S}{\mathrm{d}t} = \frac{\partial f}{\partial u}\, S + \frac
 diffsol solves this augmented system together with the state, using the same
 solver and tolerances. The Jacobians are never formed: the $j$-th column of the
 right-hand side is a single Jacobian–vector product of $f$, which diffsol-jax
-derives from your `rhs` with `jax.jvp` and compiles like any other callback. The
-initial condition comes from differentiating `init`, so parameters of the
-initial state are included. Given a parameter tangent $\dot p$, forward mode
+derives from your `rhs` with `jax.jvp` and compiles like any other callback.
+$S(t_0)$ selects the `y0` block, so the initial state is differentiated on the
+same footing as the parameters. Given a parameter tangent $\dot p$, forward mode
 returns $\dot u = S \dot p$.
 
 ## The adjoint
@@ -64,8 +70,9 @@ cotangent directions through a single backward solve.
 
 The backward solve needs the forward trajectory. The forward pass keeps a
 checkpoint in C++ and hands JAX an opaque `int64` handle; the backward solve
-interpolates from the checkpoint. A model keeps at most `max_checkpoints`
-checkpoints. The backward solve also receives `params` and `t_eval`, so if its
+interpolates from the checkpoint. A problem keeps at most `max_checkpoints`
+checkpoints. The backward solve also receives the parameters and `t_eval`, so if
+its
 checkpoint has been evicted (for example in `jax.grad` of a `lax.scan` with many
 solves) it **re-runs the forward solve** and the gradient is unchanged.
 

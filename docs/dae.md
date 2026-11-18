@@ -12,22 +12,36 @@ do not support it.
 ## Marking algebraic states
 
 Write the algebraic equations as rows of `rhs` and mark them with `algebraic=` -
-an int (the last states are algebraic) or a boolean mask:
+an int (the last entries of the flat state are algebraic), a boolean mask, or a
+pytree of bools matching the state:
 
 ```python
 # y' = -p0 * y   and   0 = z - p1 * y
-model = Model(
+problem = ODEProblem(
     rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
-    init=lambda p, t: jnp.array([1.0, p[1]]),
-    nstates=2,
-    nparams=2,
+    state=2,
+    params=2,
     algebraic=1,  # or algebraic=[False, True]
 )
+
+p = jnp.array([0.7, 2.0])
+ys = solve(problem, jnp.array([1.0, p[1]]), p, t_eval)  # a consistent y0
 ```
 
-`algebraic=` combines with a
-[`System`](getting-started.md#systems-classes-instead-of-flat-vectors) the same
-way: `Model(system, algebraic=1)`.
+A DAE needs one of the implicit solvers (`solver="bdf"`, the default,
+`"esdirk34"` or `"tr_bdf2"`); building a problem with the explicit `"tsit45"`
+and a mass matrix is rejected.
+
+With a pytree state, the mask follows the state instead of its flat order:
+
+```python
+problem = ODEProblem(
+    lambda y, p, t: {"y": -p[0] * y["y"], "z": y["z"] - p[1] * y["y"]},
+    state={"y": jnp.zeros(()), "z": jnp.zeros(())},
+    params=2,
+    algebraic={"y": False, "z": True},
+)
+```
 
 A classic example: the Robertson system with its conservation law as a
 constraint,
@@ -39,21 +53,16 @@ def rhs(x, p, t):
     return jnp.array([-r1, r1 - r2, x[0] + x[1] + x[2] - 1.0])
 
 
-robertson = Model(
-    rhs=rhs,
-    init=lambda p, t: jnp.array([1.0, 0.0, 0.0]),
-    nstates=3,
-    nparams=3,
-    algebraic=1,
-)
+robertson = ODEProblem(rhs, state=3, params=3, algebraic=1)
 ```
 
 ## Consistent initial conditions
 
 The initial state must satisfy the algebraic constraints. diffsol does this
-automatically. An `init` that is inconsistent in its algebraic entries is
-projected onto the constraints before the solve. The sensitivity and adjoint
-systems get the matching consistent initialisation.
+automatically: a `y0` whose algebraic entries are inconsistent is projected onto
+the constraints before the solve, so those entries are only a starting guess.
+The sensitivity and adjoint systems get the matching consistent initialisation,
+so the gradient with respect to `y0` accounts for the projection.
 
 ## General mass matrices
 

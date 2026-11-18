@@ -15,10 +15,9 @@ run in diffsol and are exposed to JAX as XLA FFI custom calls. The result is a
 - it batches under `jax.vmap` - a vmapped axis becomes more lanes in a single
   batched solve;
 - it solves **DAEs**;
-- it takes the parameters as a **pytree**: a
-  [`System`](getting-started.md#systems-classes-instead-of-flat-vectors) class
-  bundles the equations with a network's weights and the initial state, for
-  neural ODEs trained with optax.
+- the state and the parameters are **pytrees**, so a system can keep its named
+  blocks and a neural ODE's parameters can be
+  [the network itself](getting-started.md#pytrees-the-state-and-the-parameters).
 
 ## Installation
 
@@ -40,7 +39,7 @@ Requires Python $\geq$ 3.12 and JAX $\geq$ 0.12, plus a CPU PJRT plugin (see
 ```python
 import jax
 import jax.numpy as jnp
-from diffsol_jax import Model
+from diffsol_jax import ODEProblem, solve
 
 jax.config.update("jax_enable_x64", True)  # the solver uses f64
 
@@ -52,60 +51,49 @@ def lotka_volterra(x, p, t):
     )
 
 
-model = Model(
-    rhs=lotka_volterra,
-    init=lambda p, t: jnp.array([1.0, 0.5]),
-    nstates=2,
-    nparams=4,
-)
+problem = ODEProblem(lotka_volterra, state=2, params=4)
 
+y0 = jnp.array([1.0, 0.5])
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
 t_eval = jnp.linspace(0.0, 10.0, 200)
-ys = model.solve(params, t_eval)  # [200, 2]
+ys = solve(problem, y0, params, t_eval)  # [200, 2]
 
 
 def loss(p):
-    return jnp.sum(model.solve(p, t_eval) ** 2)
+    return jnp.sum(solve(problem, y0, p, t_eval) ** 2)
 
 
 grad = jax.grad(loss)(params)  # adjoint gradient w.r.t. the parameters
-many = jax.vmap(model.solve, (0, None))(
-    jnp.stack([params] * 64), t_eval
+many = jax.vmap(solve, (None, None, 0, None))(
+    problem, y0, jnp.stack([params] * 64), t_eval
 )  # one solve, 64 lanes
 ```
 
-For ML — a neural network inside the ODE, trained by gradient descent — define
-the problem as one class instead:
+A problem holds the equations, the layouts and the solver; a solve takes the
+state, the times and the parameter values. Both layouts are pytrees: `state=2`
+and `params=4` above are shorthand for one flat `f64[2]` and one flat `f64[4]`,
+and a template declares anything else. For ML — a neural network inside the ODE,
+trained by gradient descent — the parameters are the network:
 
 ```python
-from diffsol_jax import Model, System
+problem = ODEProblem(
+    lambda y, net, t: net(y), state=4, params=net, solver="tsit45"
+)
 
-
-class WeatherSystem(System):
-    y0: jax.Array  # the initial state, trained with everything else
-    net: eqx.Module  # any pytree of weights
-
-    def init(self, t):
-        return self.y0
-
-    def __call__(self, x, t):
-        return self.net(x)
-
-
-system = WeatherSystem(y0=y0, net=net)
-model = Model(system, ode_solver="tsit45")
-grads = jax.grad(loss)(system)  # a WeatherSystem — optax applies directly
+ys = solve(problem, y0, net, t_eval)  # the current weights
+grads = jax.grad(lambda net: loss(solve(problem, y0, net, t_eval)))(net)
 ```
 
-See [Systems](getting-started.md#systems-classes-instead-of-flat-vectors) for
-the rules, and the `examples/neural-ode-weather-prediction` example for a full
+`grads` is a network of gradients, which optax applies directly. See
+[Pytrees](getting-started.md#pytrees-the-state-and-the-parameters) for the
+rules, and the `examples/neural-ode-weather-prediction` example for a full
 training loop.
 
 ## Sharp bits :knife
 
 - **`f64` is required.** diffsol is built for `f64` like most scientific
   solvers; enable x64 (`jax.config.update("jax_enable_x64", True)`) before
-  creating a model.
+  building a problem.
 - **A CPU PJRT plugin is required.** jaxlib does not ship one; put it in
   `~/.local/share/pjrt/` (found automatically) or set
   `DIFFSOL_JAX_PJRT_PLUGIN` to its path (see
@@ -128,7 +116,7 @@ training loop.
   behind `jax.grad` and `jax.jacfwd`.
 - [DAEs](dae.md): singular mass matrices and algebraic constraints.
 - [Architecture](architecture.md): how the pieces fit together, with benchmarks.
-- [API reference](api/index.md): `Model` and its options.
+- [API reference](api/index.md): `ODEProblem`, `solve` and their options.
 
 ## See also
 

@@ -1,10 +1,8 @@
 """
 Neural ODE weather prediction.
 
-The MLP drives the right hand side of an ODE, trained to fit the Delhi monthly climate data
-(mean temperature, humidity, wind speed, mean pressure) with `diffsol_jax.Model`. The whole
-problem is one `System`: the initial state and the network as fields (trained together, optax
-updates the instance directly), the equations as methods.
+The MLP drives the right-hand side of an ODE, trained to fit the Delhi monthly climate data
+(mean temperature, humidity, wind speed, mean pressure).
 """
 
 import pathlib
@@ -18,7 +16,7 @@ import numpy as np
 import optax
 from tqdm import trange
 
-from diffsol_jax import Model, System
+from diffsol_jax import ODEProblem, solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -38,9 +36,6 @@ WEIGHT_DECAY = 1e-2
 def load_data():
     data = np.loadtxt(DATA_PATH, delimiter=",", skiprows=1)
     return jnp.asarray(data[:, 0]), jnp.asarray(data[:, 1:])
-
-
-ts, ys = load_data()
 
 
 class NeuralNetwork(eqx.Module):
@@ -63,42 +58,29 @@ def make_network(data_dim: int, key: jax.Array) -> NeuralNetwork:
     )
 
 
-class WeatherSystem(System):
-    y0: jax.Array
-    net: NeuralNetwork
-
-    def init(self, t: jax.Array) -> jax.Array:
-        return self.y0
-
-    def __call__(self, x: jax.Array, t: jax.Array) -> jax.Array:
-        return self.net(x)
-
-
-system0 = WeatherSystem(y0=ys[0], net=make_network(DATA_DIM, jr.key(0)))
-
-model = Model(system0, ode_solver="tsit45")
-
-
-def loss_fn(system, ts_batch, ys_batch):
-    return jnp.sum((model.solve(system, ts_batch) - ys_batch) ** 2)
-
-
-value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
-
-
-def train_one_round(system, ts_batch, ys_batch, round_idx):
+def train_one_round(prob, y0, net, ts_batch, ys_batch, round_idx):
     opt = optax.adamw(LR)
-    opt_state = opt.init(system)
+    opt_state = opt.init(net)
+
+    def loss_fn(p, t_eval, ys):
+        return jnp.sum((solve(prob, y0, p, t_eval) - ys) ** 2)
+
+    value_and_grad = jax.value_and_grad(loss_fn)
+
+    @jax.jit
+    def step(p, opt_state, t_eval, ys_data):
+        loss_val, grads = value_and_grad(p, t_eval, ys_data)
+        updates, opt_state = opt.update(grads, opt_state, p)
+        return optax.apply_updates(p, updates), opt_state, loss_val
+
     pbar = trange(STEPS_PER_ROUND, desc=f"round {round_idx}", leave=False)
     for _ in pbar:
-        loss, grads = value_and_grad(system, ts_batch, ys_batch)
-        updates, opt_state = opt.update(grads, opt_state, system)
-        system = optax.apply_updates(system, updates)
-        pbar.set_postfix(loss=f"{loss:.4f}")
-    return system
+        net, opt_state, loss_val = step(net, opt_state, ts_batch, ys_batch)
+        pbar.set_postfix(loss=f"{loss_val:.4f}")
+    return net
 
 
-def plot_round(round_idx, batch_len, predict_ys, path):
+def plot_round(round_idx, batch_len, ts, ys, predict_ys, path):
     fig, axes = plt.subplots(DATA_DIM, 1, figsize=(8, 10), sharex=True)
     for i, (ax, name) in enumerate(zip(axes, COLUMNS)):
         ax.plot(ts, ys[:, i], "o", ms=3, color="black", label=f"{name}_data")
@@ -117,16 +99,28 @@ def plot_round(round_idx, batch_len, predict_ys, path):
 
 def main():
     PLOT_DIR.mkdir(exist_ok=True)
-    system = system0
+
+    ts, ys = load_data()
+    y0 = ys[0]
+    net0 = make_network(DATA_DIM, key=jr.key(0))
+
+    prob = ODEProblem(lambda x, net, t: net(x), state=y0, params=net0, solver="tsit45")
+
+    net = net0
     ntimes = ts.shape[0]
     rounds = trange(1, ntimes // BATCH_STEP, desc="rounds")
     for i in rounds:
         batch_len = i * BATCH_STEP
         rounds.set_postfix(data_points=batch_len)
-        system = train_one_round(system, ts[:batch_len], ys[:batch_len], i)
+        ts_batch = ts[:batch_len]
+        ys_batch = ys[:batch_len]
+        net = train_one_round(prob, y0, net, ts_batch, ys_batch, i)
 
-        predict_ys = model.solve(system, ts)
-        plot_round(i, batch_len, predict_ys, PLOT_DIR / f"neural-ode-weather_{i}.png")
+        predict_ys = solve(prob, y0, net, ts)
+
+        plot_round(
+            i, batch_len, ts, ys, predict_ys, PLOT_DIR / f"neural-ode-weather_{i}.png"
+        )
 
 
 if __name__ == "__main__":

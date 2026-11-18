@@ -1,57 +1,67 @@
 # API overview
 
-The main entry point is `Model`. Construct it with your equation functions and sizes; it exposes
-a `solve` attribute that is compatible with `jax.jit`, `jax.grad`, `jax.jacrev`, `jax.jvp`,
-`jax.jacfwd`, and `jax.vmap`.
+There are two public pieces: [`ODEProblem`](diffsol_jax.md#diffsol_jax.ODEProblem),
+which holds the equations, and [`solve`](diffsol_jax.md#diffsol_jax.solve), which
+solves one. `solve` is compatible with `jax.jit`, `jax.grad`, `jax.jacrev`,
+`jax.jvp`, `jax.jacfwd`, and `jax.vmap`.
 
 ## Public symbols
 
-| Symbol                                                          | Kind      | Description                                   |
-| --------------------------------------------------------------- | --------- | --------------------------------------------- |
-| [`Model`](diffsol_jax.md#diffsol_jax.Model)                     | class     | A compiled model; exposes `solve`.            |
-| [`System`](diffsol_jax.md#diffsol_jax.System)                   | class     | Abstract base: variables as fields, equations as methods — see [Systems](../getting-started.md#systems-classes-instead-of-flat-vectors). |
-| [`DiffsolJaxError`](diffsol_jax.md#diffsol_jax.DiffsolJaxError) | exception | Raised on configuration and solver errors.    |
+| Symbol                                                           | Kind      | Description                                   |
+| ---------------------------------------------------------------- | --------- | --------------------------------------------- |
+| [`ODEProblem`](diffsol_jax.md#diffsol_jax.ODEProblem)            | class     | The equations of an ODE or index-1 DAE.       |
+| [`solve`](diffsol_jax.md#diffsol_jax.solve)                      | function  | Solve a problem; differentiable and batchable.|
+| [`Model`](diffsol_jax.md#diffsol_jax.Model)                      | class     | The built diffsol solver behind a solve, from `ODEProblem.compile` — its counters and statistics. |
+| [`clear_cache`](diffsol_jax.md#diffsol_jax.clear_cache)          | function  | Drop the built solvers.                       |
+| [`DiffsolJaxError`](diffsol_jax.md#diffsol_jax.DiffsolJaxError)  | exception | Raised on configuration and solver errors.    |
 
 ## The equations
 
-The recommended form is a `System`: `Model(system, nstates, **options)` derives the equations
-from the method `__call__(self, x, t)` and the optional overrides `out(self, x, t)` and
-`mass(self, v, t)`, with `nout` inferred by shape tracing.
+All the equations act on **one lane**: `x` (or `v`) has shape `[nstates]`, `t` is a scalar, and
+`p` is the parameters — the `args` of the solve, so either an array `[nparams]` or the pytree
+rebuilt. Any traceable JAX code is allowed.
 
-In the functional form, all functions act on **one lane**: `x` has shape `[nstates]`, `p` has
-shape `[nparams]`, and `t` is a scalar. Any traceable JAX code is allowed. With
-`variables_like=` instead of `nparams`, `p` is instead the variables pytree (an `eqx.Module`,
-a dict, ...).
+| Function    | Signature      | Required | Description                                             |
+| ----------- | -------------- | -------- | ------------------------------------------------------- |
+| `rhs`       | `(x, p, t)`    | yes      | The right-hand side, returning `[nstates]`.             |
+| `out`       | `(x, p, t)`    | no       | An output function returning `[nout]`; `ys` then has `nout` columns instead of `nstates`. |
+| `mass`      | `(v, p, t)`    | no       | The mass matrix action `M(t) v`, linear in `v`, not using `p`. See [DAEs](../dae.md). |
 
-| Function        | Signature      | Required | Description                                             |
-| --------------- | -------------- | -------- | ------------------------------------------------------- |
-| `rhs`           | `(x, p, t)`    | yes      | The right-hand side, returning `[nstates]`.             |
-| `out`           | `(x, p, t)`    | no       | An output function returning `[nout]`; `ys` then has `nout` columns. |
-| `mass`          | `(v, p, t)`    | no       | The mass matrix action `M(t) v`, linear in `v`, not using `p`. See [DAEs](../dae.md). |
+`algebraic=` (an int, or a boolean mask over the states) is a shortcut for the diagonal `mass`
+of a semi-explicit DAE.
 
 ## Solving
 
 ```python
-model = Model(system, nstates=2, ode_solver="bdf", rtol=1e-6)        # from a System
-model = Model(rhs, nstates=2, nparams=4)                             # functional form
-ys = model.solve(y0, params, t_eval)
+problem = ODEProblem(rhs)                                  # equations only
+problem = ODEProblem(rhs, out=out, algebraic=1)            # an output, and a DAE
+ys = solve(problem, y0, t_eval, args, solver="bdf", rtol=1e-6)
 ```
 
-`solve(y0, params, t_eval)` takes `y0` of shape `[..., nstates]`, `params` of shape
-`[..., nparams]` and `t_eval` of shape `[nt]`, and returns `ys` of shape `[..., nt, nout]`
-(`nout = nstates` if the model has no `out`). Leading axes of `y0` and `params` are broadcast
-together and solved as lanes of one batched solve. For a `System` model (or `variables_like=`),
-the second argument is the pytree instead — the current field values, e.g. mid-training — and
-batching is by `jax.vmap` over its leaves.
+`solve(problem, y0, t_eval, args)` takes `y0` of shape `[..., nstates]`, `t_eval` of shape
+`[nt]`, and `args` either of shape `[..., nparams]` or as a pytree, and returns `ys` of shape
+`[..., nt, nout]` (`nout = nstates` if the problem has no `out`). Leading axes of `y0` and of an
+array `args` are broadcast together and solved as lanes of one batched solve; a pytree `args`
+batches by `jax.vmap` over its leaves. The sizes are read from the arguments: `nstates` from
+`y0`, `nparams` from `args`, `nout` by shape-tracing `out`.
 
-The solve is differentiable in `y0` as well as in `params`: internally `y0` is appended to the
+The solve is differentiable in `y0` as well as in `args`: internally `y0` is appended to the
 parameter vector, so it reaches the diffsol sensitivity and adjoint equations by the same path.
 An initial state that is a function of the parameters needs no special support — pass
-`model.solve(f(params), params, t_eval)` and JAX composes the derivatives.
+`solve(problem, f(params), t_eval, params)` and JAX composes the derivatives.
+
+## Caching
+
+The diffsol solver for a problem is built on the first solve that needs it and reused by every
+solve that matches on the problem, `nstates`, the parameter layout, and the compile-time options
+(`solver`, `linear_solver`, `matrix_type`, `max_checkpoints`). `rtol`, `atol` and `ad` are per
+solve and do not build another one. `ODEProblem.compile(y0, args, **options)` returns that same
+`Model` — use it to pay the construction cost before the first solve, or to read its callback
+statistics and checkpoint counters. `clear_cache()` drops them all.
 
 ## Solvers
 
-| `ode_solver=`     | Type                             | Mass matrices / DAEs |
+| `solver=`         | Type                             | Mass matrices / DAEs |
 | ----------------- | -------------------------------- | -------------------- |
 | `"bdf"` (default) | BDF (implicit, variable-order)   | yes                  |
 | `"esdirk34"`      | ESDIRK3(4) (implicit)            | yes                  |

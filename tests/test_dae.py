@@ -5,11 +5,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from diffsol_jax import DiffsolJaxError, Model
+from diffsol_jax import DiffsolJaxError, ODEProblem, solve
 
 jax.config.update("jax_enable_x64", True)
 
 T_EVAL = jnp.array([0.0, 0.5, 1.0, 2.0, 3.0])
+TOL = {"rtol": 1e-10, "atol": 1e-10}
 P = jnp.array([0.7, 2.0])
 
 
@@ -18,17 +19,16 @@ def y0_of(p):
     return jnp.array([1.0, p[1]])
 
 
-def linear_dae(**kw):
+def linear_dae_rhs(x, p, t):
     """y' = -p0 y and 0 = z - p1 y, so y = exp(-p0 t) and z = p1 y."""
-    kw.setdefault("mass", lambda v, p, t: jnp.array([v[0], 0.0]))
-    return Model(
-        rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
-        nstates=2,
-        nparams=2,
-        rtol=1e-10,
-        atol=1e-10,
-        **kw,
-    )
+    return jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]])
+
+
+DIAGONAL_MASS = ODEProblem(linear_dae_rhs, mass=lambda v, p, t: jnp.array([v[0], 0.0]))
+
+
+def linear_dae(y0, p, problem=DIAGONAL_MASS, **kw):
+    return solve(problem, y0, T_EVAL, p, **{**TOL, **kw})
 
 
 def exact(p, t):
@@ -43,52 +43,35 @@ def finite_difference(f, p, eps=1e-6):
 
 @pytest.mark.parametrize("solver", ["bdf", "esdirk34", "tr_bdf2"])
 def test_dae_matches_analytic(solver):
-    ys = linear_dae(ode_solver=solver).solve(y0_of(P), P, T_EVAL)
+    ys = linear_dae(y0_of(P), P, solver=solver)
     np.testing.assert_allclose(ys, exact(P, T_EVAL), rtol=1e-6)
 
 
 def test_algebraic_shortcut_matches_mass():
-    ys = linear_dae().solve(y0_of(P), P, T_EVAL)
-    np.testing.assert_allclose(
-        linear_dae(mass=None, algebraic=1).solve(y0_of(P), P, T_EVAL), ys, rtol=1e-9
-    )
-    np.testing.assert_allclose(
-        linear_dae(mass=None, algebraic=[False, True]).solve(y0_of(P), P, T_EVAL),
-        ys,
-        rtol=1e-9,
-    )
+    ys = linear_dae(y0_of(P), P)
+    for algebraic in (1, [False, True], np.array([False, True])):
+        problem = ODEProblem(linear_dae_rhs, algebraic=algebraic)
+        np.testing.assert_allclose(linear_dae(y0_of(P), P, problem), ys, rtol=1e-9)
 
 
 def test_inconsistent_y0_is_projected():
     # y0 gives z(0) = 99, but z(0) = p1 y(0) = 2: diffsol solves the algebraic variables at t0
-    model = Model(
-        rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
-        mass=lambda v, p, t: jnp.array([v[0], 0.0]),
-        nstates=2,
-        nparams=2,
-        rtol=1e-10,
-        atol=1e-10,
-    )
     y0 = jnp.array([1.0, 99.0])
-    np.testing.assert_allclose(model.solve(y0, P, T_EVAL), exact(P, T_EVAL), rtol=1e-6)
+    np.testing.assert_allclose(linear_dae(y0, P), exact(P, T_EVAL), rtol=1e-6)
 
 
 @pytest.mark.parametrize("ad", ["adjoint", "forward"])
 def test_dae_grad_matches_finite_difference(ad):
-    model = linear_dae(ad=ad)
-
     def loss(p):
-        return model.solve(y0_of(p), p, T_EVAL).sum()
+        return linear_dae(y0_of(p), p, ad=ad).sum()
 
     grad = jax.jit(jax.grad(loss))(P)
     np.testing.assert_allclose(grad, finite_difference(loss, P), rtol=1e-5)
 
 
 def test_dae_jacfwd_matches_jacrev():
-    model = linear_dae()
-
     def f(p):
-        return model.solve(y0_of(p), p, T_EVAL)
+        return linear_dae(y0_of(p), p)
 
     np.testing.assert_allclose(
         jax.jacfwd(f)(P), jax.jacrev(f)(P), rtol=1e-6, atol=1e-10
@@ -96,11 +79,10 @@ def test_dae_jacfwd_matches_jacrev():
 
 
 def test_dae_vmap_of_grad_matches_loop():
-    model = linear_dae()
     params = jnp.array([[0.7, 2.0], [1.1, 0.5], [0.3, 3.0]])
 
     def loss(p):
-        return model.solve(y0_of(p), p, T_EVAL).sum()
+        return linear_dae(y0_of(p), p).sum()
 
     grads = jax.jit(jax.vmap(jax.grad(loss)))(params)
     loop = jnp.stack([jax.grad(loss)(p) for p in params])
@@ -117,14 +99,10 @@ def robertson(dae):
         last = x[0] + x[1] + x[2] - 1.0 if dae else r2
         return jnp.array([-r1, r1 - r2, last])
 
-    return Model(
-        rhs=rhs,
-        nstates=3,
-        nparams=3,
-        rtol=1e-10,
-        atol=1e-12,
-        algebraic=1 if dae else None,
-    )
+    return ODEProblem(rhs, algebraic=1 if dae else None)
+
+
+ROBERTSON_TOL = {"rtol": 1e-10, "atol": 1e-12}
 
 
 def test_robertson_dae_matches_ode_form():
@@ -133,13 +111,18 @@ def test_robertson_dae_matches_ode_form():
     ode, dae = robertson(dae=False), robertson(dae=True)
     y0 = jnp.array([1.0, 0.0, 0.0])
     np.testing.assert_allclose(
-        dae.solve(y0, p, t), ode.solve(y0, p, t), rtol=1e-6, atol=1e-10
+        solve(dae, y0, t, p, **ROBERTSON_TOL),
+        solve(ode, y0, t, p, **ROBERTSON_TOL),
+        rtol=1e-6,
+        atol=1e-10,
     )
 
     # the adjoint of the DAE form against the adjoint of the ODE form; y2 is of order 1e-5,
     # so the gradient entries span many orders of magnitude
-    def loss(m):
-        return lambda q: (m.solve(y0, q * p, t)[:, 1] * 1e4).sum()
+    def loss(problem):
+        return lambda q: (
+            solve(problem, y0, t, q * p, **ROBERTSON_TOL)[:, 1] * 1e4
+        ).sum()
 
     one = jnp.ones(3)
     np.testing.assert_allclose(
@@ -149,20 +132,15 @@ def test_robertson_dae_matches_ode_form():
 
 def test_time_dependent_mass():
     # (1 + t) y' = -p0 y: y = (1 + t) ** -p0
-    model = Model(
-        rhs=lambda x, p, t: -p[0] * x,
-        mass=lambda v, p, t: (1.0 + t) * v,
-        nstates=1,
-        nparams=2,
-        rtol=1e-10,
-        atol=1e-10,
+    problem = ODEProblem(
+        rhs=lambda x, p, t: -p[0] * x, mass=lambda v, p, t: (1.0 + t) * v
     )
     y0 = jnp.array([1.0])
-    ys = model.solve(y0, P, T_EVAL)
+    ys = solve(problem, y0, T_EVAL, P, **TOL)
     np.testing.assert_allclose(ys[:, 0], (1.0 + T_EVAL) ** -P[0], rtol=1e-6)
 
     def loss(p):
-        return model.solve(y0, p, T_EVAL).sum()
+        return solve(problem, y0, T_EVAL, p, **TOL).sum()
 
     np.testing.assert_allclose(jax.grad(loss)(P), finite_difference(loss, P), rtol=1e-5)
 
@@ -170,29 +148,29 @@ def test_time_dependent_mass():
 def test_parameter_dependent_mass_raises():
     # the diffsol sensitivity and adjoint equations have no dM/dp term, so the gradient of a
     # parameter-dependent mass would silently miss it (checked against finite differences)
+    problem = ODEProblem(rhs=lambda x, p, t: -p[0] * x, mass=lambda v, p, t: p[1] * v)
     with pytest.raises(DiffsolJaxError, match="dM/dp"):
-        Model(
-            rhs=lambda x, p, t: -p[0] * x,
-            mass=lambda v, p, t: p[1] * v,
-            nstates=1,
-            nparams=2,
-        )
+        solve(problem, jnp.ones(1), T_EVAL, P)
 
 
 def test_explicit_solver_raises():
     with pytest.raises(DiffsolJaxError, match="implicit"):
-        linear_dae(ode_solver="tsit45")
+        linear_dae(y0_of(P), P, solver="tsit45")
 
 
 def test_nonlinear_mass_raises():
+    problem = ODEProblem(linear_dae_rhs, mass=lambda v, p, t: v**2)
     with pytest.raises(DiffsolJaxError, match="linear"):
-        linear_dae(mass=lambda v, p, t: v**2)
+        linear_dae(y0_of(P), P, problem)
 
 
 def test_bad_algebraic_raises():
     with pytest.raises(DiffsolJaxError, match="not both"):
-        linear_dae(algebraic=1)  # linear_dae also sets mass
-    with pytest.raises(DiffsolJaxError, match="algebraic"):
-        linear_dae(mass=None, algebraic=2)  # all states algebraic
+        ODEProblem(linear_dae_rhs, mass=lambda v, p, t: v, algebraic=1)
+    with pytest.raises(DiffsolJaxError, match="not a bool"):
+        ODEProblem(linear_dae_rhs, algebraic=True)
+    with pytest.raises(DiffsolJaxError, match="algebraic must be in"):
+        # all the states algebraic
+        linear_dae(y0_of(P), P, ODEProblem(linear_dae_rhs, algebraic=2))
     with pytest.raises(DiffsolJaxError, match="length"):
-        linear_dae(mass=None, algebraic=[True])
+        linear_dae(y0_of(P), P, ODEProblem(linear_dae_rhs, algebraic=[True]))

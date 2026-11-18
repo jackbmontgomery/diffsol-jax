@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diffsol_jax import Model
+from diffsol_jax import ODEProblem, solve
 
 RTOL, ATOL = 1e-6, 1e-8
 SOLVER_IDS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
@@ -331,18 +331,16 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
     nst, npar, t_eval = m["nstates"], m["nparams"], m["t_eval"]
     t_jax = jnp.asarray(t_eval)
     y0 = jnp.asarray(m["y0"])
-    model = Model(
-        rhs=m["rhs"],
-        nstates=nst,
-        nparams=npar,
-        ode_solver=m["solver"],
-        rtol=RTOL,
-        atol=ATOL,
-        # one checkpoint: the registry is cleared after each gradient timing anyway
-        max_checkpoints=1,
-    )
-    jax_solve = jax.jit(lambda p, t: model.solve(y0, p, t))
-    jax_grad = jax.jit(jax.grad(lambda p: model.solve(y0, p, t_jax)[..., 0].sum()))
+    problem = ODEProblem(m["rhs"])
+    # one checkpoint: the registry is cleared after each gradient timing anyway
+    opts = {"solver": m["solver"], "rtol": RTOL, "atol": ATOL, "max_checkpoints": 1}
+    model = problem.compile(y0, np.zeros(npar), solver=m["solver"], max_checkpoints=1)
+
+    def diffsol_solve(p, t):
+        return solve(problem, y0, t, p, **opts)
+
+    jax_solve = jax.jit(diffsol_solve)
+    jax_grad = jax.jit(jax.grad(lambda p: diffsol_solve(p, t_jax)[..., 0].sum()))
 
     def dfx_one(p):
         sol = diffrax.diffeqsolve(

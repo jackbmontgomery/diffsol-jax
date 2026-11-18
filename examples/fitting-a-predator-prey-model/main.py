@@ -1,3 +1,11 @@
+"""
+Fitting a predator-prey model.
+
+The Lotka-Volterra rates and the initial state are fitted together: both are leaves of the
+`args` pytree that `solve` takes, so `jax.grad` returns a pytree of the same structure and optax
+updates it directly.
+"""
+
 import pathlib
 import time
 
@@ -10,7 +18,7 @@ import optax
 from jaxtyping import Array, ArrayLike
 from tqdm import trange
 
-from diffsol_jax import Model, System
+from diffsol_jax import ODEProblem, solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -20,10 +28,9 @@ T_EVAL = jnp.linspace(0.0, 5.0, num=100)
 NOISE_STD = 0.05
 STEPS = 200
 LR = 1e-2
-NSTATES = 2
 
 
-class LotkaVolterraParams(eqx.Module):
+class Rates(eqx.Module):
     alpha: Array
     beta: Array
     gamma: Array
@@ -42,50 +49,56 @@ class LotkaVolterraParams(eqx.Module):
         self.delta = jnp.asarray(delta)
 
 
-class LotkaVolterra(System):
+class LotkaVolterra(eqx.Module):
+    """Everything the fit varies: the rates and the initial state."""
+
     y0: Array
-    params: LotkaVolterraParams
-
-    def __call__(self, x: Array, t: Array) -> Array:
-        prey, predator = x[0], x[1]
-        p = self.params
-        return jnp.array(
-            [
-                p.alpha * prey - p.beta * predator * prey,
-                p.gamma * prey * predator - p.delta * predator,
-            ]
-        )
+    rates: Rates
 
 
-def generate_data(system: LotkaVolterra, t_eval: Array, *, key: Array) -> Array:
-    ys = Model(system, nstates=NSTATES, ode_solver="tsit45").solve(
-        system.y0, system, t_eval
+def rhs(x: Array, p: LotkaVolterra, t: Array) -> Array:
+    prey, predator = x[0], x[1]
+    r = p.rates
+    return jnp.array(
+        [
+            r.alpha * prey - r.beta * predator * prey,
+            r.gamma * prey * predator - r.delta * predator,
+        ]
     )
+
+
+PROBLEM = ODEProblem(rhs)
+
+
+def trajectory(v: LotkaVolterra, t_eval: Array, **options) -> Array:
+    return solve(PROBLEM, v.y0, t_eval, v, solver="tsit45", **options)
+
+
+def generate_data(v: LotkaVolterra, t_eval: Array, *, key: Array) -> Array:
+    ys = trajectory(v, t_eval)
     return ys + NOISE_STD * jr.normal(key=key, shape=ys.shape)
 
 
-def fit(
-    model: Model, system: LotkaVolterra, t_eval: Array, ys_data: Array
-) -> LotkaVolterra:
+def fit(v: LotkaVolterra, t_eval: Array, ys_data: Array) -> LotkaVolterra:
     opt = optax.adam(LR)
-    opt_state = opt.init(system)
+    opt_state = opt.init(v)
 
-    def loss_fn(system, ts_batch, ys_batch):
-        return jnp.sum((model.solve(system.y0, system, ts_batch) - ys_batch) ** 2)
+    def loss_fn(v, ts_batch, ys_batch):
+        return jnp.sum((trajectory(v, ts_batch) - ys_batch) ** 2)
 
     value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 
     @jax.jit
-    def step(system, opt_state):
-        loss_val, grads = value_and_grad(system, t_eval, ys_data)
-        updates, opt_state = opt.update(grads, opt_state, system)
-        return optax.apply_updates(system, updates), opt_state, loss_val
+    def step(v, opt_state):
+        loss_val, grads = value_and_grad(v, t_eval, ys_data)
+        updates, opt_state = opt.update(grads, opt_state, v)
+        return optax.apply_updates(v, updates), opt_state, loss_val
 
     pbar = trange(STEPS, desc="fit")
     for _ in pbar:
-        system, opt_state, loss_val = step(system, opt_state)
+        v, opt_state, loss_val = step(v, opt_state)
         pbar.set_postfix(loss=f"{loss_val:.4f}")
-    return system
+    return v
 
 
 def plot_fit(t_eval, ys_data, ys_true, ys_fit, path):
@@ -113,17 +126,18 @@ def time_call(fn, *args, repeats=20):
     return min(times)
 
 
-def compare_ad_modes(system: LotkaVolterra, t_eval: Array, ys_data: Array):
+def compare_ad_modes(v: LotkaVolterra, t_eval: Array, ys_data: Array):
+    """The two reverse modes solve the same problem: `ad` is a solve option, not another
+    problem."""
     print(f"\n{'':20s}{'grad(fit loss)':>18s}{'jacrev(trajectory)':>22s}")
     for ad in ("adjoint", "forward"):
-        model = Model(system, nstates=NSTATES, ode_solver="tsit45", ad=ad)
 
-        def loss_fn(system):
-            return jnp.sum((model.solve(system.y0, system, t_eval) - ys_data) ** 2)
+        def loss_fn(v):
+            return jnp.sum((trajectory(v, t_eval, ad=ad) - ys_data) ** 2)
 
-        grad_time = time_call(jax.jit(jax.grad(loss_fn)), system)
+        grad_time = time_call(jax.jit(jax.grad(loss_fn)), v)
         jacrev_time = time_call(
-            jax.jit(jax.jacrev(lambda s: model.solve(s.y0, s, t_eval))), system
+            jax.jit(jax.jacrev(lambda v: trajectory(v, t_eval, ad=ad))), v
         )
         print(f"ad={ad!r:10s}{grad_time * 1e3:15.3f} ms{jacrev_time * 1e3:19.3f} ms")
 
@@ -131,25 +145,22 @@ def compare_ad_modes(system: LotkaVolterra, t_eval: Array, ys_data: Array):
 def main():
     key = jr.key(0)
     y0 = 5.0 * jr.uniform(key=key, shape=(2,))
-    system_true = LotkaVolterra(y0=y0, params=LotkaVolterraParams())
-    ys_true = Model(system_true, nstates=NSTATES, ode_solver="tsit45").solve(
-        system_true.y0, system_true, T_EVAL
-    )
-    ys_data = generate_data(system_true, T_EVAL, key=key)
+    v_true = LotkaVolterra(y0=y0, rates=Rates())
+    ys_true = trajectory(v_true, T_EVAL)
+    ys_data = generate_data(v_true, T_EVAL, key=key)
 
-    model = Model(system_true, nstates=NSTATES, ode_solver="tsit45")  # ad="adjoint"
-    system_init = LotkaVolterra(
-        y0=y0, params=LotkaVolterraParams(alpha=1.1, beta=1.0, gamma=0.5, delta=1.6)
+    v_init = LotkaVolterra(
+        y0=y0, rates=Rates(alpha=1.1, beta=1.0, gamma=0.5, delta=1.6)
     )
-    system_fit = fit(model, system_init, T_EVAL, ys_data)
-    print(system_fit.params)
+    v_fit = fit(v_init, T_EVAL, ys_data)
+    print(v_fit.rates)
 
-    ys_fit = model.solve(system_fit.y0, system_fit, T_EVAL)
+    ys_fit = trajectory(v_fit, T_EVAL)
     plot_fit(
         T_EVAL, ys_data, ys_true, ys_fit, BASE_DIR / "fitting-a-predator-prey-model.png"
     )
 
-    compare_ad_modes(system_fit, T_EVAL, ys_data)
+    compare_ad_modes(v_fit, T_EVAL, ys_data)
 
 
 if __name__ == "__main__":

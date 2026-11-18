@@ -138,28 +138,27 @@ The executables depend on the number of lanes `B`. `B` is known only after
 `jax.vmap`, so the lowering rule of each solve compiles the callbacks for its
 `B`.
 
-## Pytree variables
+## Pytree parameters
 
 The solver core works on a flat `f64[B, nparams]` parameter buffer — the right
 representation for the callbacks, the sensitivity lanes, and the FFI. The pytree
-API (`System` and `variables_like`, in `_params.py`) is a thin boundary layer
-over it:
+`args` of a solve (`_params.py`) is a thin boundary layer over it:
 
-- At model construction the leaves of the example pytree are split into
-  **trainable** (float or complex arrays) and **static** (everything else,
-  including the tree structure itself). The user functions are wrapped once so
-  the callbacks see the pytree; the wrapper rebuilds it from the flat vector
-  with slices and reshapes, which are traced into the compiled callbacks and
-  fuse away.
-- At the solve boundary, `solve` flattens the trainable leaves to the flat
-  vector. The ravel is built from `reshape`/`concatenate`/`astype`, so JAX AD
-  and `vmap` compose through it: `jax.grad` returns a pytree of the same
-  structure (each leaf's gradient in that leaf's own dtype — an f32 leaf gets
-  an f32 gradient), and a vmapped leaf batches the flat vector into solver
-  lanes.
-- The pytree **structure** is part of the model: changing it changes `nparams`
-  and the compiled callbacks, so it needs a new `Model`. Changing leaf values
-  is the hot path and costs nothing.
+- `solve` flattens `args` and splits the leaves into **parameters** (float or
+  complex arrays) and **constants** (everything else, including the tree
+  structure itself). The user functions are wrapped once so the callbacks see
+  the pytree; the wrapper rebuilds it from the flat vector with slices and
+  reshapes, which are traced into the compiled callbacks and fuse away.
+- The ravel of the parameter leaves is built from
+  `reshape`/`concatenate`/`astype`, so JAX AD and `vmap` compose through it:
+  `jax.grad` returns a pytree of the same structure (each leaf's gradient in
+  that leaf's own dtype — an f32 leaf gets an f32 gradient), and a vmapped leaf
+  batches the flat vector into solver lanes.
+- The pytree **structure**, the leaf shapes and the values of the constant
+  leaves are what the callbacks are compiled for, so they are part of the key
+  the `Model` is cached under (in `_problem.py`): a solve with a new structure
+  builds a new solver, the way `jax.jit` traces again for a new shape. Changing
+  the parameter values is the hot path and costs nothing.
 
 Nothing below `Model.__init__` knows about pytrees; `_lower.py`,
 `_primitives.py` and the C++ are unchanged by this layer.
@@ -167,9 +166,9 @@ Nothing below `Model.__init__` knows about pytrees; `_lower.py`,
 ## The initial state
 
 diffsol takes the initial state as `init(p, t)`, a function of the parameters,
-with `init_sens` and `init_sens_adjoint` supplying `dy0/dp`. `solve(y0, params,
-t_eval)` exposes it as an argument by making the internal parameter vector the
-concatenation `[params, y0]`, of width `nparams + nstates`:
+with `init_sens` and `init_sens_adjoint` supplying `dy0/dp`. `solve(problem, y0,
+t_eval, args)` exposes it as an argument by making the internal parameter vector
+the concatenation `[params, y0]`, of width `nparams + nstates`:
 
 - `init(p, t)` is the slice `p[nparams:]`, so `init_sens` is the constant
   selection matrix `[0 | I]` and `init_sens_adjoint` its transpose. Both are
@@ -189,7 +188,7 @@ forward mode (`ad="forward"`, where `P = nparams`) the augmented system grows by
 
 Reverse mode (`ad="adjoint"`, the default) uses the diffsol VJP. The forward
 solve keeps the checkpoint in C++ and gives an int64 handle to the backward
-solve. The model keeps at most `max_checkpoints` checkpoints. If the checkpoint
+solve. The solver keeps at most `max_checkpoints` checkpoints. If the checkpoint
 of a backward solve was freed (for example in `jax.grad` of a `lax.scan` with
 many solves), the backward solve runs the forward solve again from `params` and
 `t_eval`. The gradient is the same; `max_checkpoints` controls only memory.

@@ -16,20 +16,17 @@ an int (the last states are algebraic) or a boolean mask:
 
 ```python
 # y' = -p0 * y   and   0 = z - p1 * y
-model = Model(
+problem = ODEProblem(
     rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
-    nstates=2,
-    nparams=2,
     algebraic=1,  # or algebraic=[False, True]
 )
 
 p = jnp.array([0.7, 2.0])
-ys = model.solve(jnp.array([1.0, p[1]]), p, t_eval)  # a consistent y0
+ys = solve(problem, jnp.array([1.0, p[1]]), t_eval, p)  # a consistent y0
 ```
 
-`algebraic=` combines with a
-[`System`](getting-started.md#systems-classes-instead-of-flat-vectors) the same
-way: `Model(system, nstates=2, algebraic=1)`.
+A DAE needs one of the implicit solvers (`solver="bdf"`, the default,
+`"esdirk34"` or `"tr_bdf2"`); the explicit `"tsit45"` is rejected.
 
 A classic example: the Robertson system with its conservation law as a
 constraint,
@@ -41,12 +38,7 @@ def rhs(x, p, t):
     return jnp.array([-r1, r1 - r2, x[0] + x[1] + x[2] - 1.0])
 
 
-robertson = Model(
-    rhs=rhs,
-    nstates=3,
-    nparams=3,
-    algebraic=1,
-)
+robertson = ODEProblem(rhs, algebraic=1)
 ```
 
 ## Consistent initial conditions

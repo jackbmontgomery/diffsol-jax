@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
-from diffsol_jax import Model
+from diffsol_jax import ODEProblem, solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -26,20 +26,14 @@ def rhs(x, p, t):
     )
 
 
-model = Model(
-    rhs=rhs,
-    nstates=NSTATES,
-    nparams=5,
-    algebraic=ALGEBRAIC,
-    ode_solver="bdf",
-)
+problem = ODEProblem(rhs, algebraic=ALGEBRAIC)
 
 R, L, C, V0, OMEGA = 100.0, 1.0, 1e-3, 10.0, 100.0
 params = jnp.array([R, L, C, V0, OMEGA])
 t_eval = jnp.linspace(0.0, 1.0, 2000)
 
 y0 = jnp.zeros(NSTATES)
-ys = model.solve(y0, params, t_eval)
+ys = solve(problem, y0, t_eval, params, solver="bdf")
 
 fig, ax = plt.subplots(figsize=(8, 4))
 ax.plot(t_eval, ys[:, 0], label="i_R")

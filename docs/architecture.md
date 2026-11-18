@@ -174,7 +174,7 @@ Nothing below `ODEProblem.__init__` knows about pytrees; `_lower.py`,
 
 diffsol takes the initial state as `init(p, t)`, a function of the parameters,
 with `init_sens` and `init_sens_adjoint` supplying `dy0/dp`. `solve(problem, y0,
-t_eval, params)` exposes it as an argument by making the internal parameter
+params, t_eval)` exposes it as an argument by making the internal parameter
 vector the concatenation `[params, y0]`, of width `nparams + nstates`:
 
 - `init(p, t)` is the slice `p[nparams:]`, so `init_sens` is the constant

@@ -44,7 +44,7 @@ def rhs(x: Array, p: LotkaVolterraParams, _t: float) -> Array:
 def trajectory(
     prob: ODEProblem, y0: Array, p: LotkaVolterraParams, t_eval: Array, **options
 ) -> Array:
-    return solve(prob, y0, t_eval, p, **options)
+    return solve(prob, y0, p, t_eval, **options)
 
 
 def generate_data(

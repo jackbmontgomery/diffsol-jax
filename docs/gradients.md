@@ -29,7 +29,7 @@ where $u(t) \in \mathbb{R}^{n}$ is the state, $p \in \mathbb{R}^{m}$ the
 parameters, and $M$ an optional [mass matrix](dae.md). `solve` returns the
 solution sampled at the times in `t_eval`.
 
-`solve(problem, y0, t_eval, params)` makes the initial state an argument, and
+`solve(problem, y0, params, t_eval)` makes the initial state an argument, and
 $p$ above is the concatenation $(\texttt{params}, \texttt{y0})$, with
 $u_0(p) = \texttt{y0}$. Everything below therefore applies to `y0` unchanged:
 $\partial u_0 / \partial p = [\,0 \mid I\,]$, and the `y0` gradient is the tail

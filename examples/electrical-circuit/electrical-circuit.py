@@ -33,7 +33,7 @@ params = jnp.array([R, L, C, V0, OMEGA])
 t_eval = jnp.linspace(0.0, 1.0, 2000)
 
 y0 = jnp.zeros(NSTATES)
-ys = solve(problem, y0, t_eval, params)
+ys = solve(problem, y0, params, t_eval)
 
 fig, ax = plt.subplots(figsize=(8, 4))
 ax.plot(t_eval, ys[:, 0], label="i_R")

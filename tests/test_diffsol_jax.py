@@ -16,7 +16,7 @@ LOGISTIC = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]), state=1, para
 
 
 def logistic(y0, p, t_eval=T_EVAL, **kw):
-    return solve(LOGISTIC, y0, t_eval, p, **{**TOL, **kw})
+    return solve(LOGISTIC, y0, p, t_eval, **{**TOL, **kw})
 
 
 def logistic_exact(r, t):
@@ -43,7 +43,7 @@ ROBERTSON_40 = np.array([0.7158270687193, 9.185534764529e-6, 0.2841637457471])
 
 
 def robertson(y0, p, t_eval, problem=ROBERTSON, **kw):
-    return solve(problem, y0, t_eval, p, **{**ROBERTSON_TOL, **kw})
+    return solve(problem, y0, p, t_eval, **{**ROBERTSON_TOL, **kw})
 
 
 def test_logistic_solve():
@@ -59,7 +59,7 @@ def test_logistic_out():
         params=1,
         out=lambda x, p, t: jnp.array([2.0 * x[0], x[0] ** 2]),
     )
-    ys = solve(problem, Y0, T_EVAL, jnp.array([1.0]), **TOL)
+    ys = solve(problem, Y0, jnp.array([1.0]), T_EVAL, **TOL)
     x = logistic_exact(1.0, T_EVAL)
     np.testing.assert_allclose(ys, jnp.stack([2 * x, x**2], axis=-1), rtol=1e-7)
 
@@ -72,7 +72,7 @@ def test_nout_is_inferred():
         out=lambda x, p, t: jnp.concatenate([x, x, x]),
     )
     assert (problem.nstates, problem.nparams, problem.nout) == (1, 1, 3)
-    assert solve(problem, Y0, T_EVAL, jnp.array([1.0])).shape == (5, 3)
+    assert solve(problem, Y0, jnp.array([1.0]), T_EVAL).shape == (5, 3)
 
 
 @pytest.mark.parametrize("solver", ["bdf", "esdirk34", "tr_bdf2"])
@@ -175,7 +175,7 @@ def test_replace_builds_another_solver():
     assert other._id != LOGISTIC._id
     p = jnp.array([1.0, 1.0])
     np.testing.assert_allclose(
-        solve(other, Y0, T_EVAL, p, **TOL), logistic(Y0, p), rtol=1e-7
+        solve(other, Y0, p, T_EVAL, **TOL), logistic(Y0, p), rtol=1e-7
     )
     with pytest.raises(DiffsolJaxError, match="unknown arguments"):
         LOGISTIC.replace(ode_solver="bdf")
@@ -194,7 +194,7 @@ def test_evicted_checkpoint_is_recomputed():
     p = jnp.array([1.0, 1.0])
 
     def f(p):
-        return solve(problem, Y0, T_EVAL, p, **TOL)
+        return solve(problem, Y0, p, T_EVAL, **TOL)
 
     ys, vjp = jax.vjp(f, p)
     (expected,) = vjp(jnp.ones_like(ys))
@@ -213,7 +213,7 @@ def test_grad_of_scan_with_more_solves_than_checkpoints():
 
     def f(p):
         def body(acc, r):
-            return acc + jnp.sum(solve(problem, Y0, T_EVAL, p * r, **TOL) ** 2), None
+            return acc + jnp.sum(solve(problem, Y0, p * r, T_EVAL, **TOL) ** 2), None
 
         return jax.lax.scan(body, 0.0, jnp.linspace(0.8, 1.2, 6))[0]
 
@@ -271,9 +271,9 @@ def test_lanes_come_from_vmap_only():
     """An extra axis is a shape error, not a lane count: batching is `jax.vmap`."""
     p = jnp.array([1.0, 1.0])
     with pytest.raises(DiffsolJaxError, match="batch with jax.vmap"):
-        solve(LOGISTIC, Y0, T_EVAL, jnp.ones((4, 2)))
+        solve(LOGISTIC, Y0, jnp.ones((4, 2)), T_EVAL)
     with pytest.raises(DiffsolJaxError, match="batch with jax.vmap"):
-        solve(LOGISTIC, jnp.ones((3, 1)), T_EVAL, p)
+        solve(LOGISTIC, jnp.ones((3, 1)), p, T_EVAL)
     lanes = jax.vmap(lambda y0: logistic(y0, p))(jnp.ones((3, 1)) * X0)
     # one batched solve takes one step sequence for all its lanes, so it agrees with a loop of
     # single-lane solves to the solver accuracy, not to round-off
@@ -283,15 +283,15 @@ def test_lanes_come_from_vmap_only():
 def test_solve_argument_errors():
     p = jnp.array([1.0, 1.0])
     with pytest.raises(DiffsolJaxError, match="t_eval must have one axis"):
-        solve(LOGISTIC, Y0, jnp.ones((2, 2)), p)
+        solve(LOGISTIC, Y0, p, jnp.ones((2, 2)))
     with pytest.raises(
         DiffsolJaxError, match=r"y0 has the shape \(2,\), expected \(1,\)"
     ):
-        solve(LOGISTIC, jnp.ones(2), T_EVAL, p)
+        solve(LOGISTIC, jnp.ones(2), p, T_EVAL)
     with pytest.raises(DiffsolJaxError, match=r"params has the shape \(3,\)"):
-        solve(LOGISTIC, Y0, T_EVAL, jnp.ones(3))
+        solve(LOGISTIC, Y0, jnp.ones(3), T_EVAL)
     with pytest.raises(DiffsolJaxError, match="ad must be"):
-        solve(LOGISTIC, Y0, T_EVAL, p, ad="reverse")
+        solve(LOGISTIC, Y0, p, T_EVAL, ad="reverse")
 
 
 def test_problem_argument_errors():
@@ -318,8 +318,8 @@ def test_problem_argument_errors():
         ODEProblem(rhs, state={"a": 1}, params=1)
     with pytest.raises(DiffsolJaxError, match="the result of rhs"):
         solve(
-            ODEProblem(lambda x, p, t: x[:1] * p, state=2, params=1),
+            ODEProblem(lambda y, p, t: y[:1] * p, state=2, params=1),
             jnp.ones(2),
-            T_EVAL,
             jnp.ones(1),
+            T_EVAL,
         )

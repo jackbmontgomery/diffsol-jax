@@ -33,7 +33,7 @@ DIAGONAL_MASS = dae_problem()
 
 
 def linear_dae(y0, p, problem=DIAGONAL_MASS, **kw):
-    return solve(problem, y0, T_EVAL, p, **{**TOL, **kw})
+    return solve(problem, y0, p, T_EVAL, **{**TOL, **kw})
 
 
 def exact(p, t):
@@ -116,8 +116,8 @@ def test_robertson_dae_matches_ode_form():
     ode, dae = robertson(dae=False), robertson(dae=True)
     y0 = jnp.array([1.0, 0.0, 0.0])
     np.testing.assert_allclose(
-        solve(dae, y0, t, p, **ROBERTSON_TOL),
-        solve(ode, y0, t, p, **ROBERTSON_TOL),
+        solve(dae, y0, p, t, **ROBERTSON_TOL),
+        solve(ode, y0, p, t, **ROBERTSON_TOL),
         rtol=1e-6,
         atol=1e-10,
     )
@@ -126,7 +126,7 @@ def test_robertson_dae_matches_ode_form():
     # so the gradient entries span many orders of magnitude
     def loss(problem):
         return lambda q: (
-            solve(problem, y0, t, q * p, **ROBERTSON_TOL)[:, 1] * 1e4
+            solve(problem, y0, q * p, t, **ROBERTSON_TOL)[:, 1] * 1e4
         ).sum()
 
     one = jnp.ones(3)
@@ -144,11 +144,11 @@ def test_time_dependent_mass():
         mass=lambda v, p, t: (1.0 + t) * v,
     )
     y0 = jnp.array([1.0])
-    ys = solve(problem, y0, T_EVAL, P, **TOL)
+    ys = solve(problem, y0, P, T_EVAL, **TOL)
     np.testing.assert_allclose(ys[:, 0], (1.0 + T_EVAL) ** -P[0], rtol=1e-6)
 
     def loss(p):
-        return solve(problem, y0, T_EVAL, p, **TOL).sum()
+        return solve(problem, y0, p, T_EVAL, **TOL).sum()
 
     np.testing.assert_allclose(jax.grad(loss)(P), finite_difference(loss, P), rtol=1e-5)
 

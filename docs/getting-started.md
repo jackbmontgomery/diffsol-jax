@@ -85,7 +85,7 @@ points at which the solution is returned:
 y0 = jnp.array([1.0, 0.5])
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
 t_eval = jnp.linspace(0.0, 10.0, 200)
-ys = solve(problem, y0, t_eval, params)  # float64[200, 2]
+ys = solve(problem, y0, params, t_eval)  # float64[200, 2]
 ```
 
 `solve` works under `jax.jit`, and under `jax.vmap`: a vmapped axis of `y0` or
@@ -93,9 +93,9 @@ of `params` becomes more lanes in **one** batched solve, with the equations of
 all the lanes evaluated together:
 
 ```python
-ys = jax.jit(solve)(problem, y0, t_eval, params)
-many = jax.vmap(solve, (None, None, None, 0))(problem, y0, t_eval, param_batch)
-ics = jax.vmap(solve, (None, 0, None, None))(problem, y0_batch, t_eval, params)
+ys = jax.jit(solve)(problem, y0, params, t_eval)
+many = jax.vmap(solve, (None, None, 0, None))(problem, y0, param_batch, t_eval)
+ics = jax.vmap(solve, (None, 0, None, None))(problem, y0_batch, params, t_eval)
 ```
 
 `jax.vmap` is the *only* way to batch: the leaves of `y0` and `params` must have
@@ -113,12 +113,12 @@ forward sensitivities. Both differentiate `y0` and the parameters:
 
 ```python
 def loss(p):
-    return jnp.sum(solve(problem, y0, t_eval, p) ** 2)
+    return jnp.sum(solve(problem, y0, p, t_eval) ** 2)
 
 
 grad = jax.grad(loss)(params)
-jac = jax.jacfwd(lambda p: solve(problem, y0, t_eval, p))(params)
-g_y0 = jax.grad(lambda y0: jnp.sum(solve(problem, y0, t_eval, params) ** 2))(y0)
+jac = jax.jacfwd(lambda p: solve(problem, y0, p, t_eval))(params)
+g_y0 = jax.grad(lambda y0: jnp.sum(solve(problem, y0, params, t_eval) ** 2))(y0)
 ```
 
 An initial state that depends on the parameters needs no special support — write
@@ -126,7 +126,7 @@ it as a function and let JAX compose:
 
 ```python
 # y(0) = 1 and z(0) = p1, fitted together with p
-jnp.sum(solve(problem, jnp.array([1.0, p[1]]), t_eval, p) ** 2)
+jnp.sum(solve(problem, jnp.array([1.0, p[1]]), p, t_eval) ** 2)
 ```
 
 The maths, the `ad=` option, and checkpointing are described in
@@ -149,7 +149,7 @@ problem = ODEProblem(
     params=Spring(k=jnp.array(1.0)),
 )
 
-ys = solve(problem, {"pos": pos0, "vel": vel0}, t_eval, params)
+ys = solve(problem, {"pos": pos0, "vel": vel0}, params, t_eval)
 ys["pos"]  # [nt, 3]
 ys["vel"]  # [nt, 3]
 ```
@@ -169,7 +169,7 @@ net = SomeNeuralNetwork()  # any pytree of weights
 problem = ODEProblem(
     lambda y, net, t: net(y), state=nstates, params=net, solver="tsit45"
 )
-ys = solve(problem, y0, t_eval, net)
+ys = solve(problem, y0, net, t_eval)
 ```
 
 Only the shapes and dtypes of the parameter leaves are read from the template,
@@ -181,7 +181,7 @@ ones.
 leaf's own dtype, so optax updates it directly:
 
 ```python
-loss = lambda net: jnp.sum((solve(problem, y0, t_eval, net) - data) ** 2)
+loss = lambda net: jnp.sum((solve(problem, y0, net, t_eval) - data) ** 2)
 grads = jax.grad(loss)(net)
 updates, opt_state = opt.update(grads, opt_state, net)
 net = optax.apply_updates(net, updates)
@@ -199,8 +199,8 @@ class Fit(eqx.Module):
 
 v = Fit(y0=jnp.ones(nstates), net=net)
 problem = ODEProblem(lambda y, v, t: v.net(y), state=nstates, params=v)
-ys = solve(problem, v.y0, t_eval, v)
-grads = jax.grad(lambda v: loss(solve(problem, v.y0, t_eval, v)))(v)  # a Fit
+ys = solve(problem, v.y0, v, t_eval)
+grads = jax.grad(lambda v: loss(solve(problem, v.y0, v, t_eval)))(v)  # a Fit
 ```
 
 Two notes on the structure:

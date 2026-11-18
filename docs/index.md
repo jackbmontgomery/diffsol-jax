@@ -56,16 +56,16 @@ problem = ODEProblem(lotka_volterra, state=2, params=4)
 y0 = jnp.array([1.0, 0.5])
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
 t_eval = jnp.linspace(0.0, 10.0, 200)
-ys = solve(problem, y0, t_eval, params)  # [200, 2]
+ys = solve(problem, y0, params, t_eval)  # [200, 2]
 
 
 def loss(p):
-    return jnp.sum(solve(problem, y0, t_eval, p) ** 2)
+    return jnp.sum(solve(problem, y0, p, t_eval) ** 2)
 
 
 grad = jax.grad(loss)(params)  # adjoint gradient w.r.t. the parameters
-many = jax.vmap(solve, (None, None, None, 0))(
-    problem, y0, t_eval, jnp.stack([params] * 64)
+many = jax.vmap(solve, (None, None, 0, None))(
+    problem, y0, jnp.stack([params] * 64), t_eval
 )  # one solve, 64 lanes
 ```
 
@@ -80,8 +80,8 @@ problem = ODEProblem(
     lambda y, net, t: net(y), state=4, params=net, solver="tsit45"
 )
 
-ys = solve(problem, y0, t_eval, net)  # the current weights
-grads = jax.grad(lambda net: loss(solve(problem, y0, t_eval, net)))(net)
+ys = solve(problem, y0, net, t_eval)  # the current weights
+grads = jax.grad(lambda net: loss(solve(problem, y0, net, t_eval)))(net)
 ```
 
 `grads` is a network of gradients, which optax applies directly. See

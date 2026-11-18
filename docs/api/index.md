@@ -51,10 +51,10 @@ from what a solve passes.
 ```python
 problem = ODEProblem(rhs, state=2, params=4)                        # both flat
 problem = ODEProblem(rhs, state=4, params=net, solver="tsit45")     # a pytree of weights
-ys = solve(problem, y0, t_eval, params, rtol=1e-6, ad="adjoint")
+ys = solve(problem, y0, params, t_eval, rtol=1e-6, ad="adjoint")
 ```
 
-`solve(problem, y0, t_eval, params)` takes `y0` and `params` in the declared layouts and
+`solve(problem, y0, params, t_eval)` takes `y0` and `params` in the declared layouts and
 `t_eval` of shape `[nt]`, and returns `ys` in the output layout, each leaf `[nt, *leaf_shape]`
 — for a flat `state=n` and no `out`, one array `[nt, n]`.
 
@@ -65,7 +65,7 @@ rather than a lane count.
 The solve is differentiable in `y0` as well as in `params`: internally `y0` is appended to the
 parameter vector, so it reaches the diffsol sensitivity and adjoint equations by the same path.
 An initial state that is a function of the parameters needs no special support — pass
-`solve(problem, f(params), t_eval, params)` and JAX composes the derivatives.
+`solve(problem, f(params), params, t_eval)` and JAX composes the derivatives.
 
 ## What belongs where
 

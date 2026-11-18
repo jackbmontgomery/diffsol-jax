@@ -342,7 +342,7 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
 
     def diffsol_solve(p, t):
         # p is [B, npar]: a vmapped axis of the parameters is lanes of one batched solve
-        return jax.vmap(lambda q: solve(problem, y0, t, q, rtol=RTOL, atol=ATOL))(p)
+        return jax.vmap(lambda q: solve(problem, y0, q, t, rtol=RTOL, atol=ATOL))(p)
 
     jax_solve = jax.jit(diffsol_solve)
     jax_grad = jax.jit(jax.grad(lambda p: diffsol_solve(p, t_jax)[..., 0].sum()))

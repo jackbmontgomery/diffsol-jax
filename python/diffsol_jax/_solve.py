@@ -13,8 +13,8 @@ from ._types import Ad, ArrayLike, PyTree
 def solve(
     problem: ODEProblem,
     y0: PyTree,
+    params: PyTree,
     t_eval: ArrayLike,
-    params: PyTree = None,
     *,
     rtol: float = 1e-6,
     atol: float = 1e-6,
@@ -31,8 +31,9 @@ def solve(
             diffsol solver. The options it was built with (`solver`, `linear_solver`,
             `matrix_type`, `max_checkpoints`) belong to it, not to the solve.
         y0: the initial state, in the problem's `state` structure.
+        params: the parameter values, in the problem's `params` structure, or `None` for a
+            problem with no parameters.
         t_eval: the times to return the solution at, `[nt]`, increasing from `t0`.
-        params: the parameter values, in the problem's `params` structure.
         rtol: the relative tolerance of the solver.
         atol: the absolute tolerance of the solver.
         ad: how to take the reverse-mode derivative: `adjoint`, the diffsol adjoint with

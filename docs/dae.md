@@ -25,7 +25,7 @@ problem = ODEProblem(
 )
 
 p = jnp.array([0.7, 2.0])
-ys = solve(problem, jnp.array([1.0, p[1]]), t_eval, p)  # a consistent y0
+ys = solve(problem, jnp.array([1.0, p[1]]), p, t_eval)  # a consistent y0
 ```
 
 A DAE needs one of the implicit solvers (`solver="bdf"`, the default,

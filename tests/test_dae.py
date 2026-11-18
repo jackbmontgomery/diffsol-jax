@@ -24,7 +24,12 @@ def linear_dae_rhs(x, p, t):
     return jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]])
 
 
-DIAGONAL_MASS = ODEProblem(linear_dae_rhs, mass=lambda v, p, t: jnp.array([v[0], 0.0]))
+def dae_problem(**kw):
+    kw.setdefault("mass", lambda v, p, t: jnp.array([v[0], 0.0]))
+    return ODEProblem(linear_dae_rhs, nstates=2, params=2, **kw)
+
+
+DIAGONAL_MASS = dae_problem()
 
 
 def linear_dae(y0, p, problem=DIAGONAL_MASS, **kw):
@@ -43,14 +48,14 @@ def finite_difference(f, p, eps=1e-6):
 
 @pytest.mark.parametrize("solver", ["bdf", "esdirk34", "tr_bdf2"])
 def test_dae_matches_analytic(solver):
-    ys = linear_dae(y0_of(P), P, solver=solver)
+    ys = linear_dae(y0_of(P), P, dae_problem(solver=solver))
     np.testing.assert_allclose(ys, exact(P, T_EVAL), rtol=1e-6)
 
 
 def test_algebraic_shortcut_matches_mass():
     ys = linear_dae(y0_of(P), P)
     for algebraic in (1, [False, True], np.array([False, True])):
-        problem = ODEProblem(linear_dae_rhs, algebraic=algebraic)
+        problem = dae_problem(mass=None, algebraic=algebraic)
         np.testing.assert_allclose(linear_dae(y0_of(P), P, problem), ys, rtol=1e-9)
 
 
@@ -99,7 +104,7 @@ def robertson(dae):
         last = x[0] + x[1] + x[2] - 1.0 if dae else r2
         return jnp.array([-r1, r1 - r2, last])
 
-    return ODEProblem(rhs, algebraic=1 if dae else None)
+    return ODEProblem(rhs, nstates=3, params=3, algebraic=1 if dae else None)
 
 
 ROBERTSON_TOL = {"rtol": 1e-10, "atol": 1e-12}
@@ -133,7 +138,10 @@ def test_robertson_dae_matches_ode_form():
 def test_time_dependent_mass():
     # (1 + t) y' = -p0 y: y = (1 + t) ** -p0
     problem = ODEProblem(
-        rhs=lambda x, p, t: -p[0] * x, mass=lambda v, p, t: (1.0 + t) * v
+        rhs=lambda x, p, t: -p[0] * x,
+        nstates=1,
+        params=2,
+        mass=lambda v, p, t: (1.0 + t) * v,
     )
     y0 = jnp.array([1.0])
     ys = solve(problem, y0, T_EVAL, P, **TOL)
@@ -148,29 +156,31 @@ def test_time_dependent_mass():
 def test_parameter_dependent_mass_raises():
     # the diffsol sensitivity and adjoint equations have no dM/dp term, so the gradient of a
     # parameter-dependent mass would silently miss it (checked against finite differences)
-    problem = ODEProblem(rhs=lambda x, p, t: -p[0] * x, mass=lambda v, p, t: p[1] * v)
     with pytest.raises(DiffsolJaxError, match="dM/dp"):
-        solve(problem, jnp.ones(1), T_EVAL, P)
+        ODEProblem(
+            rhs=lambda x, p, t: -p[0] * x,
+            nstates=1,
+            params=2,
+            mass=lambda v, p, t: p[1] * v,
+        )
 
 
 def test_explicit_solver_raises():
     with pytest.raises(DiffsolJaxError, match="implicit"):
-        linear_dae(y0_of(P), P, solver="tsit45")
+        dae_problem(solver="tsit45")
 
 
 def test_nonlinear_mass_raises():
-    problem = ODEProblem(linear_dae_rhs, mass=lambda v, p, t: v**2)
     with pytest.raises(DiffsolJaxError, match="linear"):
-        linear_dae(y0_of(P), P, problem)
+        dae_problem(mass=lambda v, p, t: v**2)
 
 
 def test_bad_algebraic_raises():
     with pytest.raises(DiffsolJaxError, match="not both"):
-        ODEProblem(linear_dae_rhs, mass=lambda v, p, t: v, algebraic=1)
+        dae_problem(algebraic=1)  # dae_problem also sets mass
     with pytest.raises(DiffsolJaxError, match="not a bool"):
-        ODEProblem(linear_dae_rhs, algebraic=True)
+        dae_problem(mass=None, algebraic=True)
     with pytest.raises(DiffsolJaxError, match="algebraic must be in"):
-        # all the states algebraic
-        linear_dae(y0_of(P), P, ODEProblem(linear_dae_rhs, algebraic=2))
+        dae_problem(mass=None, algebraic=2)  # all the states algebraic
     with pytest.raises(DiffsolJaxError, match="length"):
-        linear_dae(y0_of(P), P, ODEProblem(linear_dae_rhs, algebraic=[True]))
+        dae_problem(mass=None, algebraic=[True])

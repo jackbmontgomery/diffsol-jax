@@ -18,6 +18,8 @@ an int (the last states are algebraic) or a boolean mask:
 # y' = -p0 * y   and   0 = z - p1 * y
 problem = ODEProblem(
     rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
+    nstates=2,
+    params=2,
     algebraic=1,  # or algebraic=[False, True]
 )
 
@@ -26,7 +28,8 @@ ys = solve(problem, jnp.array([1.0, p[1]]), t_eval, p)  # a consistent y0
 ```
 
 A DAE needs one of the implicit solvers (`solver="bdf"`, the default,
-`"esdirk34"` or `"tr_bdf2"`); the explicit `"tsit45"` is rejected.
+`"esdirk34"` or `"tr_bdf2"`); building a problem with the explicit `"tsit45"`
+and a mass matrix is rejected.
 
 A classic example: the Robertson system with its conservation law as a
 constraint,
@@ -38,7 +41,7 @@ def rhs(x, p, t):
     return jnp.array([-r1, r1 - r2, x[0] + x[1] + x[2] - 1.0])
 
 
-robertson = ODEProblem(rhs, algebraic=1)
+robertson = ODEProblem(rhs, nstates=3, params=3, algebraic=1)
 ```
 
 ## Consistent initial conditions

@@ -1,8 +1,8 @@
 """The parameter layout: how the `args` of a solve become the flat `f64[nparams]` vector that
-the diffsol equations take, and back."""
+the diffsol equations take, and back. The layout is declared once, by the `params` of an
+`ODEProblem`: an int (a flat vector of that width) or a template pytree."""
 
 import math
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -14,37 +14,14 @@ F64 = jnp.float64
 
 
 def is_array(x) -> bool:
-    return isinstance(x, (jax.Array, np.ndarray))
+    """An array, or a shape and dtype standing in for one (`jax.eval_shape` of a network)."""
+    return isinstance(x, (jax.Array, np.ndarray, jax.ShapeDtypeStruct))
 
 
-def _is_trainable(leaf) -> bool:
+def _is_param(leaf) -> bool:
     """A leaf is a parameter if it is an array with a float (or complex) dtype; every other leaf
     is captured by the equations as a constant."""
     return is_array(leaf) and jnp.issubdtype(jnp.result_type(leaf), jnp.inexact)
-
-
-def _constant_key(leaf, path):
-    """A hashable key for a leaf that the equations capture as a constant: its value, since the
-    value is compiled into the callbacks."""
-    if not is_array(leaf):
-        try:
-            hash(leaf)
-        except TypeError:
-            raise DiffsolJaxError(
-                f"args{path} is not an array and is not hashable, so it cannot be captured "
-                "by the equations as a constant. Close over it in the equations instead"
-            ) from None
-        return leaf
-    try:
-        value = np.asarray(leaf)
-    except Exception:
-        raise DiffsolJaxError(
-            f"args{path} has the dtype {jnp.result_type(leaf)}, which is not differentiable, "
-            "so the equations capture its value -- but here it is a tracer (inside jax.jit or "
-            "another transformation), so there is no value to capture. Close over it in the "
-            "equations, or give it a float dtype to make it a parameter"
-        ) from None
-    return (value.dtype.str, value.shape, value.tobytes())
 
 
 class _Layout:
@@ -52,7 +29,6 @@ class _Layout:
     vector."""
 
     nparams: int
-    key: Any
 
     def bind(self, flat):
         raise NotImplementedError
@@ -72,47 +48,64 @@ class _Layout:
 
 
 class Flat(_Layout):
-    """`args` is one array `[..., nparams]`: the equations get it as `p [nparams]`, and its
-    leading axes are lanes of a batched solve."""
+    """`params=<int>`: the equations get the parameters as one vector `p [nparams]`, and the
+    leading axes of the `args` of a solve are lanes of a batched solve."""
 
-    def __init__(self, args):
-        self.nparams = int(jnp.shape(args)[-1])
-        self.key = ("flat", self.nparams)
+    def __init__(self, nparams: int):
+        if nparams < 0:
+            raise DiffsolJaxError(f"params must not be negative, got {nparams}")
+        self.nparams = int(nparams)
+
+    def __repr__(self):
+        return f"params={self.nparams}"
 
     def bind(self, flat):
         return flat
 
     def ravel(self, args) -> jax.Array:
-        return jnp.asarray(args, F64)
+        args = jnp.asarray(args, F64)
+        if args.ndim < 1 or args.shape[-1] != self.nparams:
+            raise DiffsolJaxError(
+                f"args must have the shape [..., {self.nparams}], got {args.shape}"
+            )
+        return args
 
 
 class Tree(_Layout):
-    """`args` is a pytree: the float-array leaves are the parameters (in flatten order), every
-    other leaf is a constant of the equations. Batch with `jax.vmap`, not with extra axes."""
+    """`params=<pytree>`: a template. Its float-array leaves are the parameters (in flatten
+    order), and its other leaves are captured by the equations as constants. The `args` of a
+    solve must match it; batch with `jax.vmap`, not with extra axes."""
 
-    def __init__(self, args):
-        leaves, self.treedef = jax.tree_util.tree_flatten_with_path(args)
-        self.trainable, self.constants, self.shapes, key = [], [], [], []
-        for path, leaf in leaves:
-            trainable = _is_trainable(leaf)
-            self.trainable.append(trainable)
-            self.constants.append(None if trainable else leaf)
-            self.shapes.append(jnp.shape(leaf) if trainable else None)
-            key.append(
-                ("p", jnp.shape(leaf), jnp.result_type(leaf).str)
-                if trainable
-                else ("c", _constant_key(leaf, jax.tree_util.keystr(path)))
-            )
+    def __init__(self, template):
+        leaves, self.treedef = jax.tree_util.tree_flatten_with_path(template)
+        self.paths = [jax.tree_util.keystr(path) for path, _ in leaves]
+        self.is_param = [_is_param(leaf) for _, leaf in leaves]
+        self.shapes = [
+            jnp.shape(leaf) if p else None
+            for p, (_, leaf) in zip(self.is_param, leaves)
+        ]
+        self.constants = []
+        for p, path, (_, leaf) in zip(self.is_param, self.paths, leaves):
+            if p:
+                self.constants.append(None)
+            elif isinstance(leaf, jax.ShapeDtypeStruct):
+                raise DiffsolJaxError(
+                    f"params{path} has the dtype {leaf.dtype}, which is not differentiable, so "
+                    "the equations capture its value -- but a ShapeDtypeStruct has no value. "
+                    "Give the value itself, or a float dtype to make it a parameter"
+                )
+            else:
+                self.constants.append(leaf)
         self.nparams = sum(math.prod(s) for s in self.shapes if s is not None)
-        self.key = (self.treedef, tuple(key))
+
+    def __repr__(self):
+        return f"nparams={self.nparams} (a pytree)"
 
     def bind(self, flat):
         """The pytree rebuilt from the flat `f64[nparams]` vector."""
         leaves, i = [], 0
-        for trainable, shape, constant in zip(
-            self.trainable, self.shapes, self.constants
-        ):
-            if not trainable:
+        for param, shape, constant in zip(self.is_param, self.shapes, self.constants):
+            if not param:
                 leaves.append(constant)
                 continue
             assert shape is not None
@@ -123,22 +116,41 @@ class Tree(_Layout):
 
     def ravel(self, args) -> jax.Array:
         """The parameter leaves of `args` as one `f64[nparams]` vector."""
-        leaves = jax.tree_util.tree_leaves(args)
-        if len(leaves) != len(self.trainable):
+        leaves, treedef = jax.tree_util.tree_flatten_with_path(args)
+        if treedef != self.treedef:
             raise DiffsolJaxError(
-                f"args has {len(leaves)} leaves, expected {len(self.trainable)}"
+                f"args does not match the params template: got {treedef}, expected "
+                f"{self.treedef}"
             )
-        flat = [
-            jnp.asarray(leaf).ravel().astype(F64)
-            for trainable, leaf in zip(self.trainable, leaves)
-            if trainable
-        ]
+        flat = []
+        for param, shape, path, (_, leaf) in zip(
+            self.is_param, self.shapes, self.paths, leaves
+        ):
+            if not param:
+                if _is_param(leaf):
+                    raise DiffsolJaxError(
+                        f"args{path} is an inexact array, but the matching leaf of the params "
+                        "template was not, so the equations captured it as a constant. Build "
+                        "the problem with a float leaf there to make it a parameter, or pass "
+                        "the value it was built with"
+                    )
+                continue
+            leaf = jnp.asarray(leaf)
+            if leaf.shape != shape:
+                raise DiffsolJaxError(
+                    f"args{path} has the shape {leaf.shape}, expected {shape}: batch a pytree "
+                    "of parameters with jax.vmap, or declare params=<int> for a flat parameter "
+                    "vector whose leading axes are lanes"
+                )
+            flat.append(leaf.ravel().astype(F64))
         return jnp.concatenate(flat) if flat else jnp.zeros((0,), F64)
 
 
-def layout(args) -> _Layout:
-    """The parameter layout of `args`: one array is the parameter vector itself, anything else is
-    a pytree of parameters (`None` for a problem with no parameters)."""
-    if is_array(args) and jnp.ndim(args) >= 1:
-        return Flat(args)
-    return Tree(args)
+def layout(params) -> _Layout:
+    """The layout declared by `params`: an int is a flat parameter vector of that width, `None`
+    is no parameters, and anything else is a template pytree."""
+    if isinstance(params, bool):
+        raise DiffsolJaxError("params must be an int or a pytree, not a bool")
+    if isinstance(params, (int, np.integer)):
+        return Flat(params)
+    return Tree(params)

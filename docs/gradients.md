@@ -70,7 +70,7 @@ cotangent directions through a single backward solve.
 
 The backward solve needs the forward trajectory. The forward pass keeps a
 checkpoint in C++ and hands JAX an opaque `int64` handle; the backward solve
-interpolates from the checkpoint. A solver keeps at most `max_checkpoints`
+interpolates from the checkpoint. A problem keeps at most `max_checkpoints`
 checkpoints. The backward solve also receives the parameters and `t_eval`, so if its
 checkpoint has been evicted (for example in `jax.grad` of a `lax.scan` with many
 solves) it **re-runs the forward solve** and the gradient is unchanged.

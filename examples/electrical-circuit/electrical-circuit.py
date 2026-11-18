@@ -26,14 +26,14 @@ def rhs(x, p, t):
     )
 
 
-problem = ODEProblem(rhs, algebraic=ALGEBRAIC)
+problem = ODEProblem(rhs, nstates=NSTATES, params=5, algebraic=ALGEBRAIC, solver="bdf")
 
 R, L, C, V0, OMEGA = 100.0, 1.0, 1e-3, 10.0, 100.0
 params = jnp.array([R, L, C, V0, OMEGA])
 t_eval = jnp.linspace(0.0, 1.0, 2000)
 
 y0 = jnp.zeros(NSTATES)
-ys = solve(problem, y0, t_eval, params, solver="bdf")
+ys = solve(problem, y0, t_eval, params)
 
 fig, ax = plt.subplots(figsize=(8, 4))
 ax.plot(t_eval, ys[:, 0], label="i_R")

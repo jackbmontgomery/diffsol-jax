@@ -51,7 +51,7 @@ def lotka_volterra(x, p, t):
     )
 
 
-problem = ODEProblem(lotka_volterra)
+problem = ODEProblem(lotka_volterra, nstates=2, params=4)
 
 y0 = jnp.array([1.0, 0.5])
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
@@ -69,14 +69,16 @@ many = jax.vmap(solve, (None, None, None, 0))(
 )  # one solve, 64 lanes
 ```
 
-A problem holds the equations; a solve takes the state, the times, the
-parameters and the solver options. For ML — a neural network inside the ODE,
-trained by gradient descent — the parameters are the network:
+A problem holds the equations, the sizes and the solver; a solve takes the
+state, the times and the parameter values. For ML — a neural network inside the
+ODE, trained by gradient descent — the parameters are the network:
 
 ```python
-problem = ODEProblem(lambda x, net, t: net(x))
+problem = ODEProblem(
+    lambda x, net, t: net(x), nstates=4, params=net, solver="tsit45"
+)
 
-ys = solve(problem, y0, t_eval, net, solver="tsit45")
+ys = solve(problem, y0, t_eval, net)  # the current weights
 grads = jax.grad(lambda net: loss(solve(problem, y0, t_eval, net)))(net)
 ```
 
@@ -88,8 +90,8 @@ training loop.
 ## Sharp bits :knife
 
 - **`f64` is required.** diffsol is built for `f64` like most scientific
-  solvers; enable x64 (`jax.config.update("jax_enable_x64", True)`) before the
-  first solve.
+  solvers; enable x64 (`jax.config.update("jax_enable_x64", True)`) before
+  building a problem.
 - **A CPU PJRT plugin is required.** jaxlib does not ship one; put it in
   `~/.local/share/pjrt/` (found automatically) or set
   `DIFFSOL_JAX_PJRT_PLUGIN` to its path (see

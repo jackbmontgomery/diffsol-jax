@@ -62,14 +62,18 @@ def make_network(data_dim: int, key: jax.Array) -> NeuralNetwork:
     )
 
 
-PROBLEM = ODEProblem(lambda x, net, t: net(x))
-
 y0 = ys[0]
 net0 = make_network(DATA_DIM, key=jr.key(0))
 
+# the network is the parameters: the problem declares its structure, each solve passes the
+# current weights
+PROBLEM = ODEProblem(
+    lambda x, net, t: net(x), nstates=DATA_DIM, params=net0, solver="tsit45"
+)
+
 
 def predict(net, t_eval):
-    return solve(PROBLEM, y0, t_eval, net, solver="tsit45")
+    return solve(PROBLEM, y0, t_eval, net)
 
 
 def loss_fn(net, ts_batch, ys_batch):

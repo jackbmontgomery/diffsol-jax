@@ -144,10 +144,10 @@ The solver core works on a flat `f64[B, nparams]` parameter buffer — the right
 representation for the callbacks, the sensitivity lanes, and the FFI. The pytree
 `args` of a solve (`_params.py`) is a thin boundary layer over it:
 
-- `solve` flattens `args` and splits the leaves into **parameters** (float or
-  complex arrays) and **constants** (everything else, including the tree
-  structure itself). The user functions are wrapped once so the callbacks see
-  the pytree; the wrapper rebuilds it from the flat vector with slices and
+- `ODEProblem` splits the leaves of the `params` template into **parameters**
+  (float or complex arrays) and **constants** (everything else, including the
+  tree structure itself). The user functions are wrapped once so the callbacks
+  see the pytree; the wrapper rebuilds it from the flat vector with slices and
   reshapes, which are traced into the compiled callbacks and fuse away.
 - The ravel of the parameter leaves is built from
   `reshape`/`concatenate`/`astype`, so JAX AD and `vmap` compose through it:
@@ -155,12 +155,12 @@ representation for the callbacks, the sensitivity lanes, and the FFI. The pytree
   that leaf's own dtype — an f32 leaf gets an f32 gradient), and a vmapped leaf
   batches the flat vector into solver lanes.
 - The pytree **structure**, the leaf shapes and the values of the constant
-  leaves are what the callbacks are compiled for, so they are part of the key
-  the `Model` is cached under (in `_problem.py`): a solve with a new structure
-  builds a new solver, the way `jax.jit` traces again for a new shape. Changing
-  the parameter values is the hot path and costs nothing.
+  leaves are what the callbacks are compiled for, which is why they are declared
+  once by `params=` rather than taken from each solve: a solve checks its `args`
+  against the template and raises on a mismatch. Changing the parameter values
+  is the hot path and costs nothing.
 
-Nothing below `Model.__init__` knows about pytrees; `_lower.py`,
+Nothing below `ODEProblem.__init__` knows about pytrees; `_lower.py`,
 `_primitives.py` and the C++ are unchanged by this layer.
 
 ## The initial state
@@ -188,7 +188,7 @@ forward mode (`ad="forward"`, where `P = nparams`) the augmented system grows by
 
 Reverse mode (`ad="adjoint"`, the default) uses the diffsol VJP. The forward
 solve keeps the checkpoint in C++ and gives an int64 handle to the backward
-solve. The solver keeps at most `max_checkpoints` checkpoints. If the checkpoint
+solve. The problem's solver keeps at most `max_checkpoints` checkpoints. If the checkpoint
 of a backward solve was freed (for example in `jax.grad` of a `lax.scan` with
 many solves), the backward solve runs the forward solve again from `params` and
 `t_eval`. The gradient is the same; `max_checkpoints` controls only memory.

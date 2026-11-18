@@ -12,7 +12,7 @@ X0 = 0.1
 Y0 = jnp.array([X0])
 TOL = {"rtol": 1e-10, "atol": 1e-10}
 
-LOGISTIC = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]))
+LOGISTIC = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]), nstates=1, params=2)
 
 
 def logistic(y0, p, t_eval=T_EVAL, **kw):
@@ -34,7 +34,7 @@ def robertson_rhs(x, p, t):
     )
 
 
-ROBERTSON = ODEProblem(robertson_rhs)
+ROBERTSON = ODEProblem(robertson_rhs, nstates=3, params=3)
 ROBERTSON_TOL = {"rtol": 1e-8, "atol": 1e-10}
 ROBERTSON_P = jnp.array([0.04, 3e7, 1e4])
 Y0_ROB = jnp.array([1.0, 0.0, 0.0])
@@ -42,8 +42,8 @@ Y0_ROB = jnp.array([1.0, 0.0, 0.0])
 ROBERTSON_40 = np.array([0.7158270687193, 9.185534764529e-6, 0.2841637457471])
 
 
-def robertson(y0, p, t_eval, **kw):
-    return solve(ROBERTSON, y0, t_eval, p, **{**ROBERTSON_TOL, **kw})
+def robertson(y0, p, t_eval, problem=ROBERTSON, **kw):
+    return solve(problem, y0, t_eval, p, **{**ROBERTSON_TOL, **kw})
 
 
 def test_logistic_solve():
@@ -55,6 +55,8 @@ def test_logistic_solve():
 def test_logistic_out():
     problem = ODEProblem(
         rhs=lambda x, p, t: p[0] * x * (1.0 - x),
+        nstates=1,
+        params=1,
         out=lambda x, p, t: jnp.array([2.0 * x[0], x[0] ** 2]),
     )
     ys = solve(problem, Y0, T_EVAL, jnp.array([1.0]), **TOL)
@@ -64,16 +66,19 @@ def test_logistic_out():
 
 def test_nout_is_inferred():
     problem = ODEProblem(
-        rhs=lambda x, p, t: -x, out=lambda x, p, t: jnp.concatenate([x, x, x])
+        rhs=lambda x, p, t: -x,
+        nstates=1,
+        params=1,
+        out=lambda x, p, t: jnp.concatenate([x, x, x]),
     )
-    model = problem.compile(Y0, jnp.array([1.0]))
-    assert (model.nstates, model.nparams, model.nout) == (1, 1, 3)
+    assert (problem.nstates, problem.nparams, problem.nout) == (1, 1, 3)
     assert solve(problem, Y0, T_EVAL, jnp.array([1.0])).shape == (5, 3)
 
 
 @pytest.mark.parametrize("solver", ["bdf", "esdirk34", "tr_bdf2"])
 def test_robertson(solver):
-    ys = jax.jit(lambda y0, p: robertson(y0, p, jnp.array([0.0, 40.0]), solver=solver))(
+    problem = ROBERTSON.replace(solver=solver)
+    ys = jax.jit(lambda y0, p: robertson(y0, p, jnp.array([0.0, 40.0]), problem))(
         Y0_ROB, ROBERTSON_P
     )
     np.testing.assert_allclose(ys[-1], ROBERTSON_40, rtol=1e-4)
@@ -116,7 +121,8 @@ def test_forward_and_adjoint_jacobians_agree():
 
 def test_jacobians_with_either_ad_mode():
     # one primitive carries both AD rules: jacfwd works with ad="adjoint" (the forward
-    # sensitivities), and jacrev with ad="forward" (their transpose)
+    # sensitivities), and jacrev with ad="forward" (their transpose). Both modes are per solve,
+    # so they share one problem and one diffsol solver
     p = jnp.array([1.2, 1.5])
     fwd = jax.jacfwd(lambda p: logistic(Y0, p, ad="adjoint"))(p)
     rev = jax.jacrev(lambda p: logistic(Y0, p, ad="forward"))(p)
@@ -162,96 +168,102 @@ def test_vjp_function_can_run_two_times():
     np.testing.assert_allclose(g1, g2)
 
 
-def test_solves_of_one_problem_share_a_solver():
-    """The solver (and so its compiled callbacks and its checkpoints) is cached on the problem,
-    the shapes and the compile-time options; the solve-time options do not build a new one."""
+def test_replace_builds_another_solver():
+    other = LOGISTIC.replace(solver="tsit45")
+    assert other is not LOGISTIC
+    assert other.solver == "tsit45" and LOGISTIC.solver == "bdf"
+    assert other._id != LOGISTIC._id
     p = jnp.array([1.0, 1.0])
-    model = LOGISTIC.compile(Y0, p)
-    assert LOGISTIC.compile(Y0, p) is model
-    assert LOGISTIC.compile(Y0, p, solver="tsit45") is not model
-    logistic(Y0, p)
-    logistic(Y0, p, rtol=1e-8, ad="forward")
-    assert LOGISTIC.compile(Y0, p) is model
-    # a different state size, parameter layout or compile-time option is a different solver
-    assert LOGISTIC.compile(jnp.ones(2), p) is not model
-    assert LOGISTIC.compile(Y0, {"r": p[0], "k": p[1]}) is not model
-    assert LOGISTIC.compile(Y0, p, max_checkpoints=1) is not model
+    np.testing.assert_allclose(
+        solve(other, Y0, T_EVAL, p, **TOL), logistic(Y0, p), rtol=1e-7
+    )
+    with pytest.raises(DiffsolJaxError, match="unknown arguments"):
+        LOGISTIC.replace(ode_solver="bdf")
+
+
+def test_the_solver_is_freed_with_the_problem():
+    problem = ODEProblem(lambda x, p, t: -x, nstates=1, params=1)
+    finalizer = problem._finalizer
+    assert finalizer.alive
+    del problem
+    assert not finalizer.alive
 
 
 def test_evicted_checkpoint_is_recomputed():
+    problem = LOGISTIC.replace(max_checkpoints=1)
     p = jnp.array([1.0, 1.0])
-    model = LOGISTIC.compile(Y0, p, max_checkpoints=1)
-    ys, vjp = jax.vjp(lambda p: logistic(Y0, p, max_checkpoints=1), p)
+
+    def f(p):
+        return solve(problem, Y0, T_EVAL, p, **TOL)
+
+    ys, vjp = jax.vjp(f, p)
     (expected,) = vjp(jnp.ones_like(ys))
-    before = model.num_recomputes()
+    assert problem.num_recomputes() == 0
     # a second forward solve frees the first checkpoint
-    jax.vjp(lambda p: logistic(Y0, p, max_checkpoints=1), jnp.array([2.0, 1.0]))
+    jax.vjp(f, jnp.array([2.0, 1.0]))
     (grad,) = vjp(jnp.ones_like(ys))
-    assert model.num_recomputes() == before + 1
+    assert problem.num_recomputes() == 1
     np.testing.assert_allclose(grad, expected, rtol=1e-12)
 
 
 def test_grad_of_scan_with_more_solves_than_checkpoints():
     """`jax.grad` of a scan runs all the forward solves before the backward solves, so most of
     the checkpoints are freed; the backward solves run the forward solves again."""
-    model = LOGISTIC.compile(Y0, jnp.zeros(2), max_checkpoints=2)
+    problem = LOGISTIC.replace(max_checkpoints=2)
 
     def f(p):
         def body(acc, r):
-            return acc + jnp.sum(logistic(Y0, p * r, max_checkpoints=2) ** 2), None
+            return acc + jnp.sum(solve(problem, Y0, T_EVAL, p * r, **TOL) ** 2), None
 
         return jax.lax.scan(body, 0.0, jnp.linspace(0.8, 1.2, 6))[0]
 
     p = jnp.array([1.0, 1.5])
-    before = model.num_recomputes()
     grad = jax.jit(jax.grad(f))(p)
     np.testing.assert_allclose(grad, finite_difference(f, p), rtol=1e-5)
-    assert model.num_recomputes() > before
+    assert problem.num_recomputes() > 0
 
 
-def _bkwd(model, handle, params, ct):
+def _bkwd(problem, handle, params, ct):
     """Call the backward primitive directly, as a wrong residual would reach it."""
     from diffsol_jax import _primitives
 
-    kw = {"model": model, **TOL}
+    kw = {"problem": problem, **TOL}
     prim = _primitives.VjpBkwd(
         jax.typeof(handle), jax.typeof(params), jax.typeof(T_EVAL), jax.typeof(ct), **kw
     )
     return prim(handle, params, T_EVAL, ct)
 
 
-def _fwd(model, params):
+def _fwd(problem, params):
     """`params` here is the internal vector `[p0, p1, y0]` that the primitives take."""
     from diffsol_jax import _primitives
 
-    kw = {"model": model, **TOL}
+    kw = {"problem": problem, **TOL}
     prim = _primitives._VjpFwdOp(jax.typeof(params), jax.typeof(T_EVAL), **kw)
     return prim(params, T_EVAL)
 
 
 def test_handle_with_other_params_is_not_used():
-    model = LOGISTIC.compile(Y0, jnp.zeros(2))
     p1, p2 = jnp.array([[1.0, 1.0, X0]]), jnp.array([[2.0, 1.5, X0]])
-    ys, h1 = _fwd(model, p1)
+    ys, h1 = _fwd(LOGISTIC, p1)
     ct = jnp.ones_like(ys)
-    expected = _bkwd(model, _fwd(model, p2)[1], p2, ct)
-    before = model.num_recomputes()
-    grad = _bkwd(model, h1, p2, ct)  # the handle of p1 with the params p2
-    assert model.num_recomputes() == before + 1
+    expected = _bkwd(LOGISTIC, _fwd(LOGISTIC, p2)[1], p2, ct)
+    before = LOGISTIC.num_recomputes()
+    grad = _bkwd(LOGISTIC, h1, p2, ct)  # the handle of p1 with the params p2
+    assert LOGISTIC.num_recomputes() == before + 1
     np.testing.assert_allclose(grad, expected, rtol=1e-12)
 
 
 def test_mixed_handles_are_not_used():
-    model = LOGISTIC.compile(Y0, jnp.zeros(2))
     p = jnp.array([[1.0, 1.0, X0], [2.0, 1.5, X0]])
-    ys, h = _fwd(model, p)
+    ys, h = _fwd(LOGISTIC, p)
     ct = jnp.ones_like(ys)
-    expected = _bkwd(model, h, p, ct)
+    expected = _bkwd(LOGISTIC, h, p, ct)
     # lane 1 has the id of a different forward solve
-    _, other = _fwd(model, p[1:])
-    before = model.num_recomputes()
-    grad = _bkwd(model, h.at[1].set(other[0]), p, ct)
-    assert model.num_recomputes() == before + 1
+    _, other = _fwd(LOGISTIC, p[1:])
+    before = LOGISTIC.num_recomputes()
+    grad = _bkwd(LOGISTIC, h.at[1].set(other[0]), p, ct)
+    assert LOGISTIC.num_recomputes() == before + 1
     np.testing.assert_allclose(grad, expected, rtol=1e-12)
 
 
@@ -260,24 +272,33 @@ def test_mismatched_batch_axes_raise():
         solve(LOGISTIC, jnp.ones((3, 1)), T_EVAL, jnp.ones((4, 2)))
 
 
-def test_argument_errors():
+def test_solve_argument_errors():
     p = jnp.array([1.0, 1.0])
     with pytest.raises(DiffsolJaxError, match="t_eval must have one axis"):
         solve(LOGISTIC, Y0, jnp.ones((2, 2)), p)
     with pytest.raises(DiffsolJaxError, match="y0 must have the shape"):
-        solve(LOGISTIC, jnp.float64(0.1), T_EVAL, p)
+        solve(LOGISTIC, jnp.ones(2), T_EVAL, p)
+    with pytest.raises(DiffsolJaxError, match="args must have the shape"):
+        solve(LOGISTIC, Y0, T_EVAL, jnp.ones(3))
     with pytest.raises(DiffsolJaxError, match="ad must be"):
         solve(LOGISTIC, Y0, T_EVAL, p, ad="reverse")
-    with pytest.raises(DiffsolJaxError, match="solver must be one of"):
-        solve(LOGISTIC, Y0, T_EVAL, p, solver="rk4")
+
+
+def test_problem_argument_errors():
+    rhs = lambda x, p, t: -x  # noqa: E731
     with pytest.raises(DiffsolJaxError, match="rhs must be a function"):
-        ODEProblem(rhs=None)
-
-
-def test_model_is_not_the_entry_point():
-    from diffsol_jax import Model
-
-    with pytest.raises(DiffsolJaxError, match="no longer the entry point"):
-        Model(rhs=lambda x, p, t: -x, nstates=1, nparams=1)
-    with pytest.raises(DiffsolJaxError, match="no longer the entry point"):
-        Model(lambda x, p, t: -x)
+        ODEProblem(None, nstates=1)
+    with pytest.raises(DiffsolJaxError, match="nstates must be an int"):
+        ODEProblem(rhs, nstates=None)
+    with pytest.raises(DiffsolJaxError, match="nstates must be at least 1"):
+        ODEProblem(rhs, nstates=0)
+    with pytest.raises(DiffsolJaxError, match="solver must be one of"):
+        ODEProblem(rhs, nstates=1, params=1, solver="rk4")
+    with pytest.raises(DiffsolJaxError, match="matrix_type must be one of"):
+        ODEProblem(rhs, nstates=1, params=1, matrix_type="dense")
+    with pytest.raises(DiffsolJaxError, match="max_checkpoints"):
+        ODEProblem(rhs, nstates=1, params=1, max_checkpoints=0)
+    with pytest.raises(DiffsolJaxError, match="params must not be negative"):
+        ODEProblem(rhs, nstates=1, params=-1)
+    with pytest.raises(DiffsolJaxError, match="out must return"):
+        ODEProblem(rhs, nstates=1, params=1, out=lambda x, p, t: jnp.outer(x, x))

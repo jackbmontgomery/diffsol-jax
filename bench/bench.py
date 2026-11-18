@@ -331,13 +331,17 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
     nst, npar, t_eval = m["nstates"], m["nparams"], m["t_eval"]
     t_jax = jnp.asarray(t_eval)
     y0 = jnp.asarray(m["y0"])
-    problem = ODEProblem(m["rhs"])
-    # one checkpoint: the registry is cleared after each gradient timing anyway
-    opts = {"solver": m["solver"], "rtol": RTOL, "atol": ATOL, "max_checkpoints": 1}
-    model = problem.compile(y0, np.zeros(npar), solver=m["solver"], max_checkpoints=1)
+    problem = ODEProblem(
+        m["rhs"],
+        nstates=nst,
+        params=npar,
+        solver=m["solver"],
+        # one checkpoint: the registry is cleared after each gradient timing anyway
+        max_checkpoints=1,
+    )
 
     def diffsol_solve(p, t):
-        return solve(problem, y0, t, p, **opts)
+        return solve(problem, y0, t, p, rtol=RTOL, atol=ATOL)
 
     jax_solve = jax.jit(diffsol_solve)
     jax_grad = jax.jit(jax.grad(lambda p: diffsol_solve(p, t_jax)[..., 0].sum()))
@@ -369,9 +373,9 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
 
         ys = np.asarray(jax_solve(pj, t_jax))  # [B, nt, nst]
         t_js = bench(lambda: jax_solve(pj, t_jax).block_until_ready())
-        model.callback_stats(B, reset=True)
+        problem.callback_stats(B, reset=True)
         jax_solve(pj, t_jax).block_until_ready()
-        ncalls, _, _ = model.callback_stats(B, reset=True)
+        ncalls, _, _ = problem.callback_stats(B, reset=True)
         # a VJP tape (and the diffrax checkpoints) can be several GiB for many lanes and states:
         # skip the gradients above the limit (a run with a 16 GiB machine crashed)
         est = tape_gib(ncalls, m["solver"], nst, B)
@@ -387,7 +391,7 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
         if do_grad:
             g_jax = np.asarray(jax_grad(pj))
             t_jg = bench(lambda: jax_grad(pj).block_until_ready())
-            model.clear_checkpoints()
+            problem.clear_checkpoints()
 
         nat = dc.native_ode(m["native"], m["solver"], B)
         ys_nat = dc.solve(nat, p, t_eval, B, nst)

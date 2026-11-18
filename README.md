@@ -24,7 +24,7 @@ from diffsol_jax import ODEProblem, solve
 jax.config.update("jax_enable_x64", True)
 
 # one lane of the equations: x [nstates], p the parameters, t the time
-problem = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x))
+problem = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x), nstates=1, params=1)
 y0, p = jnp.array([0.1]), jnp.array([1.0])
 t = jnp.linspace(0.0, 5.0, 11)
 ys = solve(problem, y0, t, p)  # [nt, nstates]
@@ -32,13 +32,12 @@ ys = jax.vmap(solve, (None, None, None, 0))(problem, y0, t, jnp.ones((64, 1)))
 g_y0, g_p = jax.grad(lambda y, p: solve(problem, y, t, p).sum(), (0, 1))(y0, p)
 ```
 
-An `ODEProblem` is the equations and nothing else. Everything a solve needs
-comes from the call: `solve(problem, y0, t_eval, args, solver=..., rtol=...,
-atol=..., ad=...)`. The sizes are taken from the arguments — `nstates` from
-`y0`, the parameters from `args`, `nout` from what `out` returns — and the
-diffsol solver for those shapes is built on the first solve and reused by the
-next (`problem.compile(y0, args, ...)` returns it, for its counters or to pay
-the cost up front).
+An `ODEProblem` is the equations plus the sizes and solver options they are
+built into: constructing one builds the diffsol solver, with its compiled
+callbacks and its adjoint checkpoints, and that solver lives as long as the
+problem. A solve then supplies the values — `solve(problem, y0, t_eval, args,
+rtol=..., atol=..., ad=...)`. To change the solver, make another problem:
+`problem.replace(solver="tsit45")`.
 
 `solve` is differentiable in both `y0` and `args`. Reverse mode
 (`ad="adjoint"`, the default) uses the diffsol adjoint with checkpointing;
@@ -52,25 +51,32 @@ special case.
 
 ## Neural ODEs
 
-`args` is any pytree, so the parameters can be a network: its float-array
-leaves are the parameters, and every other leaf is captured by the equations as
-a constant. `jax.grad` returns a pytree of the same structure, so optax updates
-it directly:
+`params` is either an int, a flat parameter vector of that width, or a template
+pytree — so the parameters can be a network: its float-array leaves are the
+parameters, and every other leaf is captured by the equations as a constant.
+`jax.grad` returns a pytree of the same structure, so optax updates it
+directly:
 
 ```python
 import equinox as eqx
 from diffsol_jax import ODEProblem, solve
 
 net = eqx.nn.MLP(4, 4, 64, 2, key=jax.random.key(0))  # any pytree of weights
-problem = ODEProblem(lambda x, net, t: net(x))
+problem = ODEProblem(
+    lambda x, net, t: net(x), nstates=4, params=net, solver="tsit45"
+)
 
 def loss(net):
-    ys = solve(problem, y0, t_eval, net, solver="tsit45")
+    ys = solve(problem, y0, t_eval, net)  # the current weights
     return jnp.sum((ys - data) ** 2)
 
 grads = jax.grad(loss)(net)  # an MLP of gradients
 net = optax.apply_updates(net, optimizer.update(grads, opt_state, net)[0])
 ```
+
+Only the shapes and dtypes of the parameter leaves are read, so
+`params=jax.eval_shape(make_net, key)` is a complete declaration — the problem
+never holds the weights, each solve passes them.
 
 To train the initial state with the weights, make it a leaf of the same pytree
 and pass it as both: `solve(problem, v.y0, t_eval, v)`. Its gradient comes back
@@ -92,6 +98,8 @@ a boolean mask):
 # y' = -p0 * y   and   0 = z - p1 * y
 problem = ODEProblem(
     rhs=lambda x, p, t: jnp.array([-p[0] * x[0], x[1] - p[1] * x[0]]),
+    nstates=2,
+    params=2,
     algebraic=1,
 )
 p = jnp.array([0.7, 2.0])

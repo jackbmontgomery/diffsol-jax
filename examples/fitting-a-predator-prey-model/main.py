@@ -67,11 +67,12 @@ def rhs(x: Array, p: LotkaVolterra, t: Array) -> Array:
     )
 
 
-PROBLEM = ODEProblem(rhs)
+V_LIKE = LotkaVolterra(y0=jnp.zeros(2), rates=Rates())
+PROBLEM = ODEProblem(rhs, nstates=2, params=V_LIKE, solver="tsit45")
 
 
 def trajectory(v: LotkaVolterra, t_eval: Array, **options) -> Array:
-    return solve(PROBLEM, v.y0, t_eval, v, solver="tsit45", **options)
+    return solve(PROBLEM, v.y0, t_eval, v, **options)
 
 
 def generate_data(v: LotkaVolterra, t_eval: Array, *, key: Array) -> Array:

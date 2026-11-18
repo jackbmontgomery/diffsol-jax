@@ -53,10 +53,10 @@ jax.config.update("jax_enable_x64", True)
 
 ## First forward solve
 
-A problem is defined by one plain `jax.numpy` function, the right-hand side
-`rhs(x, p, t)`, with `x` of shape `[nstates]` and `p` the parameters. Neither
-the initial state nor the sizes are part of the problem: they are arguments of
-each solve.
+A problem is the right-hand side `rhs(x, p, t)` — a plain `jax.numpy` function
+of one lane, with `x` of shape `[nstates]` and `p` the parameters — together
+with the sizes and the solver options it is built with. The initial state is not
+part of it: that is an argument of each solve.
 
 ```python
 def lotka_volterra(x, p, t):
@@ -66,8 +66,14 @@ def lotka_volterra(x, p, t):
     )
 
 
-problem = ODEProblem(lotka_volterra)
+problem = ODEProblem(lotka_volterra, nstates=2, params=4)
 ```
+
+Constructing the problem builds the diffsol solver for it, and that solver — its
+compiled callbacks, its adjoint checkpoints — lives as long as the problem, so
+build it once, outside the loop that solves it. To solve the same equations with
+a different solver or tolerance structure, make another problem:
+`problem.replace(solver="tsit45")`.
 
 Solve from an initial state, over a vector of output times. `t_eval` lists the
 points at which the solution is returned:
@@ -79,11 +85,6 @@ t_eval = jnp.linspace(0.0, 10.0, 200)
 ys = solve(problem, y0, t_eval, params)  # float64[200, 2]
 ```
 
-`nstates` is the last axis of `y0` and `nparams` the last axis of `params`. The
-diffsol solver for those sizes is built on the first solve and reused by every
-solve that matches; `problem.compile(y0, params, **options)` returns the same
-object, to build it up front or to read its counters.
-
 `solve` works under `jax.jit`, and under `jax.vmap`: a vmapped axis of `y0` or
 of `params` becomes more lanes in **one** batched solve, with the equations of
 all the lanes evaluated together:
@@ -94,8 +95,8 @@ many = jax.vmap(solve, (None, None, None, 0))(problem, y0, t_eval, param_batch)
 ics = jax.vmap(solve, (None, 0, None, None))(problem, y0_batch, t_eval, params)
 ```
 
-(A problem is a static pytree — it holds functions, never arrays — so it can be
-an argument of a jitted or vmapped function without being traced.)
+(A problem is a static pytree — it holds functions and sizes, never JAX arrays —
+so it can be an argument of a jitted or vmapped function without being traced.)
 
 ## Computing gradients
 
@@ -125,11 +126,12 @@ The maths, the `ad=` option, and checkpointing are described in
 
 ## Parameters as a pytree
 
-`args` — the fourth argument of `solve` — does not have to be a flat vector. Any
-pytree works: its **float-array leaves are the parameters** (differentiated, in
-flatten order), and every other leaf (ints, bools, callables, the structure
-itself) is captured by the equations as a constant. The equations receive the
-pytree, rebuilt, in place of `p`.
+`params=4` above declares a flat parameter vector. It can be any pytree
+instead: a **template** whose float-array leaves are the parameters
+(differentiated, in flatten order) and whose other leaves (ints, bools,
+callables, the structure itself) the equations capture as constants. The
+equations then receive the pytree, rebuilt, in place of `p`, and the `args` of
+each solve supply the values.
 
 This is what makes a neural ODE ordinary: the network is the parameters.
 
@@ -139,9 +141,16 @@ import optax
 from diffsol_jax import ODEProblem, solve
 
 net = SomeNeuralNetwork()  # any pytree of weights
-problem = ODEProblem(lambda x, net, t: net(x))
-ys = solve(problem, y0, t_eval, net, solver="tsit45")
+problem = ODEProblem(
+    lambda x, net, t: net(x), nstates=nstates, params=net, solver="tsit45"
+)
+ys = solve(problem, y0, t_eval, net)
 ```
+
+Only the shapes and dtypes of the parameter leaves are read from the template,
+so `params=jax.eval_shape(make_net, key)` declares the layout without building
+the weights at all. The problem never holds them; each solve passes the current
+ones.
 
 `jax.grad` returns a pytree of the same structure, each leaf's gradient in that
 leaf's own dtype, so optax updates it directly:
@@ -164,19 +173,19 @@ class Fit(eqx.Module):
 
 
 v = Fit(y0=jnp.ones(nstates), net=net)
-problem = ODEProblem(lambda x, v, t: v.net(x))
+problem = ODEProblem(lambda x, v, t: v.net(x), nstates=nstates, params=v)
 ys = solve(problem, v.y0, t_eval, v)
 grads = jax.grad(lambda v: loss(solve(problem, v.y0, t_eval, v)))(v)  # a Fit
 ```
 
 Two notes on the structure:
 
-- batch a pytree of parameters with `jax.vmap` over its leaves, not with extra
-  axes on the leaves (only a flat-array `args` reads its leading axes as lanes);
-- the structure, the leaf shapes and the values of the constant leaves are what
-  the callbacks are compiled for. Changing any of them builds another solver on
-  the next solve, the way `jax.jit` traces again for a new shape; changing the
-  parameter values is the hot path and costs nothing.
+- the `args` of a solve must match the template: same structure, same leaf
+  shapes. Batch a pytree of parameters with `jax.vmap` over its leaves, not with
+  extra axes on the leaves — only a flat `params=<int>` layout reads leading
+  axes as lanes.
+- the values of the **constant** leaves come from the template, since they are
+  compiled into the callbacks; the matching leaves of `args` are ignored.
 
 ## The equations
 
@@ -192,21 +201,25 @@ parameters, and `t` is a scalar. Any traceable JAX code is allowed.
 
 ## Solver options
 
-`solve` takes the solver configuration, so the same problem can be solved with
-different solvers, tolerances or AD modes without being redefined:
+The four options the diffsol solver is built with belong to the problem:
 
 | Argument          | Default            | Description                                                           |
 | ----------------- | ------------------ | --------------------------------------------------------------------- |
 | `solver`          | `"bdf"`            | `"bdf"`, `"esdirk34"`, `"tr_bdf2"` (implicit), `"tsit45"` (explicit). |
-| `rtol`, `atol`    | `1e-6`, `1e-6`     | Solver tolerances.                                                    |
-| `ad`              | `"adjoint"`        | Reverse mode: `"adjoint"` or `"forward"`.                             |
 | `max_checkpoints` | `8`                | Adjoint checkpoints kept.                                             |
 | `linear_solver`   | `"default"`        | `"lu"` or `"klu"` (with `matrix_type="faer_sparse"`).                 |
 | `matrix_type`     | `"nalgebra_dense"` | `"faer_dense"` or `"faer_sparse"` for larger systems.                 |
 
-All of them except `rtol`, `atol` and `ad` are part of what the diffsol solver
-is built with, so changing one builds another solver; `rtol`, `atol` and `ad`
-are per solve.
+The three that are per solve belong to `solve`:
+
+| Argument       | Default        | Description                                     |
+| -------------- | -------------- | ----------------------------------------------- |
+| `rtol`, `atol` | `1e-6`, `1e-6` | Solver tolerances.                              |
+| `ad`           | `"adjoint"`    | Reverse mode: `"adjoint"` or `"forward"`.       |
+
+So comparing the two reverse modes, or tightening a tolerance, needs no second
+problem; changing the solver does (`problem.replace(solver=...)`), because that
+is a second diffsol solver.
 
 ## Where to go next
 

@@ -47,10 +47,11 @@ struct CheckpointKey {
   std::vector<double> t_eval;
   double rtol = 0.0;
   double atol = 0.0;
+  double t0 = 0.0;
   // TODO(GPU): the device ordinal, when there is more than one device.
 
   bool Matches(const double *p, size_t np, const double *t, size_t nt,
-               double rt, double at) const;
+               double rt, double at, double start) const;
 };
 
 // A VJP checkpoint of one solve. It is freed when the last user drops it: an

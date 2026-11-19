@@ -27,9 +27,9 @@ $$ M \frac{\mathrm{d}u}{\mathrm{d}t} = f(u, p, t), \qquad u(t_0) = u_0(p), $$
 
 where $u(t) \in \mathbb{R}^{n}$ is the state, $p \in \mathbb{R}^{m}$ the
 parameters, and $M$ an optional [mass matrix](dae.md). `solve` returns the
-solution sampled at the times in `t_eval`.
+solution sampled at the times `saveat` asks for.
 
-`solve(problem, y0, params, t_eval)` makes the initial state an argument, and
+`solve(problem, y0, params, t0, t1)` makes the initial state an argument, and
 $p$ above is the concatenation $(\texttt{params}, \texttt{y0})$, with
 $u_0(p) = \texttt{y0}$. Everything below therefore applies to `y0` unchanged:
 $\partial u_0 / \partial p = [\,0 \mid I\,]$, and the `y0` gradient is the tail
@@ -71,7 +71,7 @@ cotangent directions through a single backward solve.
 The backward solve needs the forward trajectory. The forward pass keeps a
 checkpoint in C++ and hands JAX an opaque `int64` handle; the backward solve
 interpolates from the checkpoint. A problem keeps at most `max_checkpoints`
-checkpoints. The backward solve also receives the parameters and `t_eval`, so if
+checkpoints. The backward solve also receives the parameters and the times, so if
 its
 checkpoint has been evicted (for example in `jax.grad` of a `lax.scan` with many
 solves) it **re-runs the forward solve** and the gradient is unchanged.
@@ -80,7 +80,7 @@ solves) it **re-runs the forward solve** and the gradient is unchanged.
 
 - **No higher-order derivatives.** `grad(grad(...))` is not supported - the
   sensitivity and adjoint solves are not themselves differentiated.
-- **No gradient with respect to `t_eval`.** Output times are constants; their
+- **No gradient with respect to `t0`, `t1` or `saveat`.** The times are constants; their
   cotangent is a symbolic zero.
 - **No `dM/dp`.** A mass matrix must not depend on the parameters — see
   [DAEs](dae.md).

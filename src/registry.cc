@@ -154,11 +154,13 @@ Instance *Model::Acquire(size_t nbatch, std::unique_lock<std::mutex> *lock,
 }
 
 bool CheckpointKey::Matches(const double *p, size_t np, const double *t,
-                            size_t nt, double rt, double at) const {
+                            size_t nt, double rt, double at,
+                            double start) const {
   // compare bits, not values: NaN params must not match, and -0.0 is not 0.0
   return np == params.size() && nt == t_eval.size() &&
          std::memcmp(&rt, &rtol, sizeof(double)) == 0 &&
          std::memcmp(&at, &atol, sizeof(double)) == 0 &&
+         std::memcmp(&start, &t0, sizeof(double)) == 0 &&
          std::memcmp(p, params.data(), np * sizeof(double)) == 0 &&
          std::memcmp(t, t_eval.data(), nt * sizeof(double)) == 0;
 }

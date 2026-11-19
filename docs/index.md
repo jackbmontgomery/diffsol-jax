@@ -55,17 +55,18 @@ problem = ODEProblem(lotka_volterra, state=2, params=4)
 
 y0 = jnp.array([1.0, 0.5])
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
-t_eval = jnp.linspace(0.0, 10.0, 200)
-ys = solve(problem, y0, params, t_eval)  # [200, 2]
+t0, t1 = 0.0, 10.0
+saveat = jnp.linspace(t0, t1, 200)
+ys = solve(problem, y0, params, t0, t1, saveat=saveat)  # [200, 2]
 
 
 def loss(p):
-    return jnp.sum(solve(problem, y0, p, t_eval) ** 2)
+    return jnp.sum(solve(problem, y0, p, t0, t1, saveat=saveat) ** 2)
 
 
 grad = jax.grad(loss)(params)  # adjoint gradient w.r.t. the parameters
-many = jax.vmap(solve, (None, None, 0, None))(
-    problem, y0, jnp.stack([params] * 64), t_eval
+many = jax.vmap(solve, (None, None, 0, None, None))(
+    problem, y0, jnp.stack([params] * 64), t0, t1
 )  # one solve, 64 lanes
 ```
 
@@ -76,12 +77,10 @@ and a template declares anything else. For ML — a neural network inside the OD
 trained by gradient descent — the parameters are the network:
 
 ```python
-problem = ODEProblem(
-    lambda y, net, t: net(y), state=4, params=net, solver="tsit45"
-)
+problem = ODEProblem(lambda y, net, t: net(y), state=4, params=net, solver="tsit45")
 
-ys = solve(problem, y0, net, t_eval)  # the current weights
-grads = jax.grad(lambda net: loss(solve(problem, y0, net, t_eval)))(net)
+ys = solve(problem, y0, net, t0, t1, saveat=saveat)  # the current weights
+grads = jax.grad(lambda net: loss(solve(problem, y0, net, t0, t1, saveat=saveat)))(net)
 ```
 
 `grads` is a network of gradients, which optax applies directly. See
@@ -99,7 +98,7 @@ training loop.
   `DIFFSOL_JAX_PJRT_PLUGIN` to its path (see
   [Getting started](getting-started.md)).
 - **No higher-order derivatives.** `grad(grad(solve(...)))` does not work.
-- **No derivative with respect to `t_eval`.** Output times are constants.
+- **No derivative with respect to `t0`, `t1` or `saveat`.** The times are constants.
 - **CPU only, for now.** The PJRT C API is backend-agnostic, so GPU arrives with
   diffsol's GPU backend by loading the CUDA PJRT plugin instead.
 - **Small non-stiff systems are not fast.** Each solver callback costs ~2.5 µs

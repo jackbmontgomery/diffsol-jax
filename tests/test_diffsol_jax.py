@@ -8,6 +8,7 @@ from diffsol_jax import DiffsolJaxError, ODEProblem, solve
 jax.config.update("jax_enable_x64", True)
 
 T_EVAL = jnp.array([0.0, 0.5, 1.0, 2.0, 4.0])
+T0, T1 = T_EVAL[0], T_EVAL[-1]
 X0 = 0.1
 Y0 = jnp.array([X0])
 TOL = {"rtol": 1e-10, "atol": 1e-10}
@@ -15,8 +16,8 @@ TOL = {"rtol": 1e-10, "atol": 1e-10}
 LOGISTIC = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]), state=1, params=2)
 
 
-def logistic(y0, p, t_eval=T_EVAL, **kw):
-    return solve(LOGISTIC, y0, p, t_eval, **{**TOL, **kw})
+def logistic(y0, p, saveat=T_EVAL, **kw):
+    return solve(LOGISTIC, y0, p, saveat[0], saveat[-1], saveat=saveat, **{**TOL, **kw})
 
 
 def logistic_exact(r, t):
@@ -42,8 +43,10 @@ Y0_ROB = jnp.array([1.0, 0.0, 0.0])
 ROBERTSON_40 = np.array([0.7158270687193, 9.185534764529e-6, 0.2841637457471])
 
 
-def robertson(y0, p, t_eval, problem=ROBERTSON, **kw):
-    return solve(problem, y0, p, t_eval, **{**ROBERTSON_TOL, **kw})
+def robertson(y0, p, saveat, problem=ROBERTSON, **kw):
+    return solve(
+        problem, y0, p, saveat[0], saveat[-1], saveat=saveat, **{**ROBERTSON_TOL, **kw}
+    )
 
 
 def test_logistic_solve():
@@ -59,7 +62,7 @@ def test_logistic_out():
         params=1,
         out=lambda x, p, t: jnp.array([2.0 * x[0], x[0] ** 2]),
     )
-    ys = solve(problem, Y0, jnp.array([1.0]), T_EVAL, **TOL)
+    ys = solve(problem, Y0, jnp.array([1.0]), T0, T1, saveat=T_EVAL, **TOL)
     x = logistic_exact(1.0, T_EVAL)
     np.testing.assert_allclose(ys, jnp.stack([2 * x, x**2], axis=-1), rtol=1e-7)
 
@@ -72,7 +75,7 @@ def test_nout_is_inferred():
         out=lambda x, p, t: jnp.concatenate([x, x, x]),
     )
     assert (problem.nstates, problem.nparams, problem.nout) == (1, 1, 3)
-    assert solve(problem, Y0, jnp.array([1.0]), T_EVAL).shape == (5, 3)
+    assert solve(problem, Y0, jnp.array([1.0]), T0, T1, saveat=T_EVAL).shape == (5, 3)
 
 
 @pytest.mark.parametrize("solver", ["bdf", "esdirk34", "tr_bdf2"])
@@ -175,7 +178,7 @@ def test_replace_builds_another_solver():
     assert other._id != LOGISTIC._id
     p = jnp.array([1.0, 1.0])
     np.testing.assert_allclose(
-        solve(other, Y0, p, T_EVAL, **TOL), logistic(Y0, p), rtol=1e-7
+        solve(other, Y0, p, T0, T1, saveat=T_EVAL, **TOL), logistic(Y0, p), rtol=1e-7
     )
     with pytest.raises(DiffsolJaxError, match="unknown arguments"):
         LOGISTIC.replace(ode_solver="bdf")
@@ -194,7 +197,7 @@ def test_evicted_checkpoint_is_recomputed():
     p = jnp.array([1.0, 1.0])
 
     def f(p):
-        return solve(problem, Y0, p, T_EVAL, **TOL)
+        return solve(problem, Y0, p, T0, T1, saveat=T_EVAL, **TOL)
 
     ys, vjp = jax.vjp(f, p)
     (expected,) = vjp(jnp.ones_like(ys))
@@ -213,7 +216,9 @@ def test_grad_of_scan_with_more_solves_than_checkpoints():
 
     def f(p):
         def body(acc, r):
-            return acc + jnp.sum(solve(problem, Y0, p * r, T_EVAL, **TOL) ** 2), None
+            return acc + jnp.sum(
+                solve(problem, Y0, p * r, T0, T1, saveat=T_EVAL, **TOL) ** 2
+            ), None
 
         return jax.lax.scan(body, 0.0, jnp.linspace(0.8, 1.2, 6))[0]
 
@@ -229,9 +234,14 @@ def _bkwd(problem, handle, params, ct):
 
     kw = {"problem": problem, **TOL}
     prim = _primitives.VjpBkwd(
-        jax.typeof(handle), jax.typeof(params), jax.typeof(T_EVAL), jax.typeof(ct), **kw
+        jax.typeof(handle),
+        jax.typeof(params),
+        jax.typeof(T0),
+        jax.typeof(T_EVAL),
+        jax.typeof(ct),
+        **kw,
     )
-    return prim(handle, params, T_EVAL, ct)
+    return prim(handle, params, T0, T_EVAL, ct)
 
 
 def _fwd(problem, params):
@@ -239,8 +249,10 @@ def _fwd(problem, params):
     from diffsol_jax import _primitives
 
     kw = {"problem": problem, **TOL}
-    prim = _primitives._VjpFwdOp(jax.typeof(params), jax.typeof(T_EVAL), **kw)
-    return prim(params, T_EVAL)
+    prim = _primitives._VjpFwdOp(
+        jax.typeof(params), jax.typeof(T0), jax.typeof(T_EVAL), **kw
+    )
+    return prim(params, T0, T_EVAL)
 
 
 def test_handle_with_other_params_is_not_used():
@@ -271,9 +283,9 @@ def test_lanes_come_from_vmap_only():
     """An extra axis is a shape error, not a lane count: batching is `jax.vmap`."""
     p = jnp.array([1.0, 1.0])
     with pytest.raises(DiffsolJaxError, match="batch with jax.vmap"):
-        solve(LOGISTIC, Y0, jnp.ones((4, 2)), T_EVAL)
+        solve(LOGISTIC, Y0, jnp.ones((4, 2)), T0, T1, saveat=T_EVAL)
     with pytest.raises(DiffsolJaxError, match="batch with jax.vmap"):
-        solve(LOGISTIC, jnp.ones((3, 1)), p, T_EVAL)
+        solve(LOGISTIC, jnp.ones((3, 1)), p, T0, T1, saveat=T_EVAL)
     lanes = jax.vmap(lambda y0: logistic(y0, p))(jnp.ones((3, 1)) * X0)
     # one batched solve takes one step sequence for all its lanes, so it agrees with a loop of
     # single-lane solves to the solver accuracy, not to round-off
@@ -282,16 +294,16 @@ def test_lanes_come_from_vmap_only():
 
 def test_solve_argument_errors():
     p = jnp.array([1.0, 1.0])
-    with pytest.raises(DiffsolJaxError, match="t_eval must have one axis"):
-        solve(LOGISTIC, Y0, p, jnp.ones((2, 2)))
+    with pytest.raises(DiffsolJaxError, match="saveat must have one axis"):
+        solve(LOGISTIC, Y0, p, T0, T1, saveat=jnp.ones((2, 2)))
     with pytest.raises(
         DiffsolJaxError, match=r"y0 has the shape \(2,\), expected \(1,\)"
     ):
-        solve(LOGISTIC, jnp.ones(2), p, T_EVAL)
+        solve(LOGISTIC, jnp.ones(2), p, T0, T1, saveat=T_EVAL)
     with pytest.raises(DiffsolJaxError, match=r"params has the shape \(3,\)"):
-        solve(LOGISTIC, Y0, jnp.ones(3), T_EVAL)
+        solve(LOGISTIC, Y0, jnp.ones(3), T0, T1, saveat=T_EVAL)
     with pytest.raises(DiffsolJaxError, match="ad must be"):
-        solve(LOGISTIC, Y0, p, T_EVAL, ad="reverse")
+        solve(LOGISTIC, Y0, p, T0, T1, saveat=T_EVAL, ad="reverse")
 
 
 def test_problem_argument_errors():
@@ -321,5 +333,7 @@ def test_problem_argument_errors():
             ODEProblem(lambda y, p, t: y[:1] * p, state=2, params=1),
             jnp.ones(2),
             jnp.ones(1),
-            T_EVAL,
+            T0,
+            T1,
+            saveat=T_EVAL,
         )

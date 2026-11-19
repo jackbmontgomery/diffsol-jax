@@ -14,6 +14,7 @@ from diffsol_jax import DiffsolJaxError, ODEProblem, solve
 jax.config.update("jax_enable_x64", True)
 
 T_EVAL = jnp.array([0.0, 0.5, 1.0, 2.0, 4.0])
+T0, T1 = T_EVAL[0], T_EVAL[-1]
 TOL = {"rtol": 1e-10, "atol": 1e-10}
 Y0 = jnp.array([0.1])
 
@@ -35,11 +36,11 @@ def flat_of(v):
 
 
 def tree(y0, v, **kw):
-    return solve(TREE, y0, v, T_EVAL, **{**TOL, **kw})
+    return solve(TREE, y0, v, T0, T1, saveat=T_EVAL, **{**TOL, **kw})
 
 
 def flat(y0, p, **kw):
-    return solve(FLAT, y0, p, T_EVAL, **{**TOL, **kw})
+    return solve(FLAT, y0, p, T0, T1, saveat=T_EVAL, **{**TOL, **kw})
 
 
 def test_solve_matches_flat():
@@ -82,7 +83,9 @@ def test_y0_as_a_parameter_leaf():
         lambda x, p, t: p.rates.r * x * (1.0 - x / p.rates.k), state=1, params=v
     )
     assert problem.nparams == 3
-    g = jax.grad(lambda v: solve(problem, v.y0, v, T_EVAL, **TOL).sum())(v)
+    g = jax.grad(lambda v: solve(problem, v.y0, v, T0, T1, saveat=T_EVAL, **TOL).sum())(
+        v
+    )
     assert isinstance(g, WithY0)
     # the rhs does not use y0, so its gradient comes only from the initial state
     gy = jax.grad(lambda y0: flat(y0, flat_of(LOGISTIC)).sum())(Y0)
@@ -128,7 +131,9 @@ def test_a_template_of_shapes_needs_no_values():
     )
     assert problem.nparams == 2
     np.testing.assert_allclose(
-        solve(problem, Y0, LOGISTIC, T_EVAL, **TOL), tree(Y0, LOGISTIC), rtol=1e-12
+        solve(problem, Y0, LOGISTIC, T0, T1, saveat=T_EVAL, **TOL),
+        tree(Y0, LOGISTIC),
+        rtol=1e-12,
     )
 
 
@@ -136,9 +141,13 @@ def test_no_params():
     problem = ODEProblem(lambda x, p, t: x * (1.0 - x), state=1)
     assert problem.nparams == 0
     np.testing.assert_allclose(
-        solve(problem, Y0, None, T_EVAL, **TOL), flat(Y0, jnp.ones(2)), rtol=1e-9
+        solve(problem, Y0, None, T0, T1, saveat=T_EVAL, **TOL),
+        flat(Y0, jnp.ones(2)),
+        rtol=1e-9,
     )
-    g = jax.grad(lambda y0: solve(problem, y0, None, T_EVAL, **TOL).sum())(Y0)
+    g = jax.grad(
+        lambda y0: solve(problem, y0, None, T0, T1, saveat=T_EVAL, **TOL).sum()
+    )(Y0)
     gf = jax.grad(lambda y0: flat(y0, jnp.ones(2)).sum())(Y0)
     np.testing.assert_allclose(g, gf, rtol=1e-7)
 
@@ -152,10 +161,12 @@ def test_out_with_tree_params():
     )
     assert problem.nout == 2
     ys = tree(Y0, LOGISTIC)
-    outs = solve(problem, Y0, LOGISTIC, T_EVAL, **TOL)
+    outs = solve(problem, Y0, LOGISTIC, T0, T1, saveat=T_EVAL, **TOL)
     np.testing.assert_allclose(outs[:, 0], 2.0 * ys[:, 0], rtol=1e-12)
     np.testing.assert_allclose(outs[:, 1], ys[:, 0] ** 2, rtol=1e-12)
-    g = jax.grad(lambda v: solve(problem, Y0, v, T_EVAL, **TOL).sum())(LOGISTIC)
+    g = jax.grad(lambda v: solve(problem, Y0, v, T0, T1, saveat=T_EVAL, **TOL).sum())(
+        LOGISTIC
+    )
     assert np.isfinite(g.r)
 
 
@@ -167,10 +178,14 @@ def test_dict_params_and_a_callable_leaf():
     )
     assert problem.nparams == 1
     np.testing.assert_allclose(
-        solve(problem, Y0, template, T_EVAL, **TOL), flat(Y0, jnp.ones(2)), rtol=1e-12
+        solve(problem, Y0, template, T0, T1, saveat=T_EVAL, **TOL),
+        flat(Y0, jnp.ones(2)),
+        rtol=1e-12,
     )
     g = jax.grad(
-        lambda r: solve(problem, Y0, {**template, "r": r}, T_EVAL, **TOL).sum()
+        lambda r: solve(
+            problem, Y0, {**template, "r": r}, T0, T1, saveat=T_EVAL, **TOL
+        ).sum()
     )(template["r"])
     assert np.isfinite(g)
 
@@ -180,7 +195,9 @@ def test_f32_leaf_gets_f32_grad():
     problem = ODEProblem(
         lambda x, p, t: p.r * x * (1.0 - x / p.k), state=1, params=template
     )
-    g = jax.grad(lambda v: solve(problem, Y0, v, T_EVAL, **TOL).sum())(template)
+    g = jax.grad(lambda v: solve(problem, Y0, v, T0, T1, saveat=T_EVAL, **TOL).sum())(
+        template
+    )
     assert g.r.dtype == jnp.float32
     assert g.k.dtype == jnp.float64
     gf = jax.grad(lambda p: flat(Y0, p).sum())(flat_of(LOGISTIC))
@@ -194,9 +211,9 @@ def test_integer_leaf_is_captured_as_a_constant():
     cubic = ODEProblem(rhs, state=1, params={"r": jnp.array(1.0), "n": jnp.array(3)})
     assert (linear.nparams, cubic.nparams) == (1, 1)
     args = {"r": jnp.array(1.0), "n": 99}  # the value passed to solve is ignored
-    ys_linear = solve(linear, Y0, args, T_EVAL, **TOL)
+    ys_linear = solve(linear, Y0, args, T0, T1, saveat=T_EVAL, **TOL)
     np.testing.assert_allclose(ys_linear, flat(Y0, jnp.ones(2)), rtol=1e-12)
-    ys_cubic = solve(cubic, Y0, args, T_EVAL, **TOL)
+    ys_cubic = solve(cubic, Y0, args, T0, T1, saveat=T_EVAL, **TOL)
     assert np.all(ys_cubic[1:] > ys_linear[1:])
 
 
@@ -215,7 +232,15 @@ def test_newly_inexact_constant_leaf_raises():
         params={"r": jnp.array(1.0), "n": 2},
     )
     with pytest.raises(DiffsolJaxError, match="captured it as a constant"):
-        solve(problem, Y0, {"r": jnp.array(1.0), "n": jnp.array(2.0)}, T_EVAL, **TOL)
+        solve(
+            problem,
+            Y0,
+            {"r": jnp.array(1.0), "n": jnp.array(2.0)},
+            T0,
+            T1,
+            saveat=T_EVAL,
+            **TOL,
+        )
 
 
 def test_a_shape_only_constant_leaf_raises():
@@ -245,10 +270,12 @@ def test_dae_with_tree_params():
         params=v,
         algebraic=1,
     )
-    ys = solve(problem, y0, v, T_EVAL, **TOL)
+    ys = solve(problem, y0, v, T0, T1, saveat=T_EVAL, **TOL)
     np.testing.assert_allclose(ys[:, 0], jnp.exp(-v.r * T_EVAL), rtol=1e-6)
     np.testing.assert_allclose(ys[:, 1], v.c * ys[:, 0], rtol=1e-6)
-    g = jax.grad(lambda v: solve(problem, y0, v, T_EVAL, **TOL)[:, 1].sum())(v)
+    g = jax.grad(
+        lambda v: solve(problem, y0, v, T0, T1, saveat=T_EVAL, **TOL)[:, 1].sum()
+    )(v)
     np.testing.assert_allclose(g.c, jnp.exp(-v.r * T_EVAL).sum(), rtol=1e-6)
 
 

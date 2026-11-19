@@ -174,7 +174,7 @@ Nothing below `ODEProblem.__init__` knows about pytrees; `_lower.py`,
 
 diffsol takes the initial state as `init(p, t)`, a function of the parameters,
 with `init_sens` and `init_sens_adjoint` supplying `dy0/dp`. `solve(problem, y0,
-params, t_eval)` exposes it as an argument by making the internal parameter
+params, t0, t1)` exposes it as an argument by making the internal parameter
 vector the concatenation `[params, y0]`, of width `nparams + nstates`:
 
 - `init(p, t)` is the slice `p[nparams:]`, so `init_sens` is the constant
@@ -197,12 +197,13 @@ Reverse mode (`ad="adjoint"`, the default) uses the diffsol VJP. The forward
 solve keeps the checkpoint in C++ and gives an int64 handle to the backward
 solve. The problem's solver keeps at most `max_checkpoints` checkpoints. If the checkpoint
 of a backward solve was freed (for example in `jax.grad` of a `lax.scan` with
-many solves), the backward solve runs the forward solve again from `params` and
-`t_eval`. The gradient is the same; `max_checkpoints` controls only memory.
+many solves), the backward solve runs the forward solve again from `params`,
+`t0` and the output times. The gradient is the same; `max_checkpoints` controls
+only memory.
 Forward mode (`ad="forward"`) uses diffsol forward sensitivities.
 
 Limits of the prototype: CPU only, `f64` only, no `root`/`reset`, no derivative
-with respect to `t_eval`, no `vmap` over `t_eval`.
+with respect to the times, no `vmap` over them.
 
 ## Build
 

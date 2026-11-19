@@ -47,7 +47,7 @@ def rober_dae(y: jax.Array, k: jax.Array, _t: float) -> jax.Array:
 def z_end(
     prob: ODEProblem, y0: jax.Array, k: jax.Array, t_eval: jax.Array
 ) -> jax.Array:
-    return solve(prob, y0, k, t_eval, **TOL)[-1, 2]
+    return solve(prob, y0, k, t_eval[0], t_eval[-1], saveat=t_eval, **TOL)[-1, 2]
 
 
 def grad_log_k(prob: ODEProblem, y0: jax.Array, k: jax.Array, t_eval: jax.Array):
@@ -113,7 +113,10 @@ def main():
     prob_dae = ODEProblem(rober_dae, state=y0, params=k, solver="bdf", algebraic=1)
     forms = (("ode", prob_ode), ("dae", prob_dae))
 
-    ys = {name: solve(prob, y0, k, t_eval, **TOL) for name, prob in forms}
+    ys = {
+        name: solve(prob, y0, k, t_eval[0], t_eval[-1], saveat=t_eval, **TOL)
+        for name, prob in forms
+    }
     plot_forms(t_eval, ys["ode"], ys["dae"], BASE_DIR / "robertson-problem.png")
     diff = jnp.abs(ys["ode"] - ys["dae"]).max()
     print(f"the two forms agree on the trajectory to {diff:.1e}")

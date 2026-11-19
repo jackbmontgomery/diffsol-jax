@@ -63,7 +63,9 @@ def train_one_round(prob, y0, net, ts_batch, ys_batch, round_idx):
     opt_state = opt.init(net)
 
     def loss_fn(p, t_eval, ys):
-        return jnp.sum((solve(prob, y0, p, t_eval) - ys) ** 2)
+        return jnp.sum(
+            (solve(prob, y0, p, t_eval[0], t_eval[-1], saveat=t_eval) - ys) ** 2
+        )
 
     value_and_grad = jax.value_and_grad(loss_fn)
 
@@ -116,7 +118,7 @@ def main():
         ys_batch = ys[:batch_len]
         net = train_one_round(prob, y0, net, ts_batch, ys_batch, i)
 
-        predict_ys = solve(prob, y0, net, ts)
+        predict_ys = solve(prob, y0, net, ts[0], ts[-1], saveat=ts)
 
         plot_round(
             i, batch_len, ts, ys, predict_ys, PLOT_DIR / f"neural-ode-weather_{i}.png"

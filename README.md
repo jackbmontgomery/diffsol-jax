@@ -3,8 +3,11 @@
 </p>
 
 JAX bindings for [diffsol](https://github.com/martinjrobins/diffsol). Write the
-ODE equations as ordinary JAX functions and use the solves in `jax.jit`,
-`jax.vmap`, `jax.grad`, `jax.jacfwd` and `jax.jacrev`.
+ODE equations as ordinary JAX functions solve them with diffsol while staying
+compatible with `jax.jit`, `jax.vmap`, `jax.grad`, `jax.jacfwd` and
+`jax.jacrev`.
+
+## Key features
 
 ## Example usage
 
@@ -16,18 +19,25 @@ jax.config.update("jax_enable_x64", True)
 
 problem = ODEProblem(lambda y, p, t: p[0] * y * (1.0 - y), state=1, params=1)
 y0, p = jnp.array([0.1]), jnp.array([1.0])
-ts = jnp.linspace(0.0, 5.0, 11)
-ys = solve(problem, y0, p, ts)  # [nt, nstates]
-ys = jax.vmap(solve, (None, None, 0, None))(problem, y0, jnp.ones((64, 1)), ts)
-g_y0, g_p = jax.grad(lambda y, p: solve(problem, y, p, ts).sum(), (0, 1))(y0, p)
+t0, t1 = 0.0, 5.0
+ys = solve(problem, y0, p, t0, t1)  # [1, nstates], the solution at t1
+ts = jnp.linspace(t0, t1, 11)
+ys = solve(problem, y0, p, t0, t1, saveat=ts)  # [11, nstates]
+ys = jax.vmap(solve, (None, None, 0, None, None))(
+    problem, y0, jnp.ones((64, 1)), t0, t1
+)
+g_y0, g_p = jax.grad(lambda y, p: solve(problem, y, p, t0, t1).sum(), (0, 1))(y0, p)
 ```
 
 An `ODEProblem` is the equations plus the layouts and solver options they are
 built into: constructing one builds the diffsol solver, with its compiled
 callbacks and its adjoint checkpoints, and that solver lives as long as the
 problem. A solve then supplies the values —
-`solve(problem, y0, params, t_eval, rtol=..., atol=..., ad=...)`. To change the
-solver, make another problem: `problem.replace(solver="tsit45")`.
+`solve(problem, y0, params, t0, t1, saveat=..., rtol=..., atol=..., ad=...)`.
+`y0` is the state at `t0` and the solve ends at `t1`; by default the solution
+comes back at `t1` alone, and `saveat` asks for it at other times in `[t0, t1]`.
+To change the solver, make another problem:
+`problem.replace(solver="tsit45")`.
 
 `solve` is differentiable in both `y0` and `params`. Reverse mode
 (`ad="adjoint"`, the default) uses the diffsol adjoint with checkpointing;
@@ -37,8 +47,8 @@ batched solve, not a loop of solves, so an ensemble over initial conditions
 costs one solve.
 
 An initial state that is itself a function of the parameters is ordinary JAX
-composition: `solve(problem, f(p), p, t)` differentiates through `f` without any
-special case.
+composition: `solve(problem, f(p), p, t0, t1)` differentiates through `f`
+without any special case.
 
 ## Pytrees
 
@@ -55,7 +65,7 @@ problem = ODEProblem(
     params=Spring(k=jnp.array(1.0)),
 )
 
-ys = solve(problem, {"pos": pos0, "vel": vel0}, params, t_eval)
+ys = solve(problem, {"pos": pos0, "vel": vel0}, params, t0, t1, saveat=ts)
 ys["pos"]  # [nt, 3]
 ```
 
@@ -68,13 +78,13 @@ ordinary — and optax updates the gradients directly:
 import equinox as eqx
 
 net = eqx.nn.MLP(4, 4, 64, 2, key=jax.random.key(0))  # any pytree of weights
-problem = ODEProblem(
-    lambda y, net, t: net(y), state=4, params=net, solver="tsit45"
-)
+problem = ODEProblem(lambda y, net, t: net(y), state=4, params=net, solver="tsit45")
+
 
 def loss(net):
-    ys = solve(problem, y0, net, t_eval)  # the current weights
+    ys = solve(problem, y0, net, t0, t1, saveat=ts)  # the current weights
     return jnp.sum((ys - data) ** 2)
+
 
 grads = jax.grad(loss)(net)  # an MLP of gradients
 net = optax.apply_updates(net, optimizer.update(grads, opt_state, net)[0])
@@ -84,7 +94,7 @@ Only the shapes and dtypes of the parameter leaves are read, so
 `params=jax.eval_shape(make_net, key)` is a complete declaration — the problem
 never holds the weights, each solve passes them. To train the initial state with
 them, make it a leaf of the same pytree and pass it as both:
-`solve(problem, v.y0, v, t_eval)`. For full training loops, see
+`solve(problem, v.y0, v, t0, t1)`. For full training loops, see
 [examples/neural-ode-weather-prediction](examples/neural-ode-weather-prediction)
 and
 [examples/fitting-a-predator-prey-model](examples/fitting-a-predator-prey-model).
@@ -106,7 +116,7 @@ problem = ODEProblem(
     algebraic=1,
 )
 p = jnp.array([0.7, 2.0])
-ys = solve(problem, jnp.array([1.0, p[1]]), p, t_eval)  # a consistent y0
+ys = solve(problem, jnp.array([1.0, p[1]]), p, t0, t1)  # a consistent y0
 ```
 
 The initial state is projected onto the algebraic constraints automatically

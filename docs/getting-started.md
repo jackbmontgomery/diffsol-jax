@@ -78,24 +78,42 @@ compiled callbacks, its adjoint checkpoints — lives as long as the problem, so
 build it once, outside the loop that solves it. To solve the same equations with
 a different solver, make another problem: `problem.replace(solver="tsit45")`.
 
-Solve from an initial state, over a vector of output times. `t_eval` lists the
-points at which the solution is returned:
+Solve from the state `y0` at `t0` to `t1`. `y0` belongs to `t0`, and by default
+the solution comes back at `t1` alone:
 
 ```python
 y0 = jnp.array([1.0, 0.5])
 params = jnp.array([1.5, 1.0, 0.75, 3.0])
-t_eval = jnp.linspace(0.0, 10.0, 200)
-ys = solve(problem, y0, params, t_eval)  # float64[200, 2]
+t0, t1 = 0.0, 10.0
+ys = solve(problem, y0, params, t0, t1)  # float64[1, 2]
 ```
+
+`saveat` asks for the solution at other times, each of them in `[t0, t1]`:
+
+```python
+saveat = jnp.linspace(t0, t1, 200)
+ys = solve(problem, y0, params, t0, t1, saveat=saveat)  # float64[200, 2]
+```
+
+The window `saveat` asks for need not reach back to `t0`, so a solve can warm up
+before the part you want to look at:
+
+```python
+ys = solve(problem, y0, params, 0.0, 10.0, saveat=jnp.linspace(5.0, 10.0, 100))
+```
+
+Here `y0` is the state at `t = 0`, the solver integrates from there, and only
+the window `[5, 10]` comes back. The solve ends at the last time it returns, so
+a `saveat` that stops short of `t1` does less work than one that reaches it.
 
 `solve` works under `jax.jit`, and under `jax.vmap`: a vmapped axis of `y0` or
 of `params` becomes more lanes in **one** batched solve, with the equations of
 all the lanes evaluated together:
 
 ```python
-ys = jax.jit(solve)(problem, y0, params, t_eval)
-many = jax.vmap(solve, (None, None, 0, None))(problem, y0, param_batch, t_eval)
-ics = jax.vmap(solve, (None, 0, None, None))(problem, y0_batch, params, t_eval)
+ys = jax.jit(solve)(problem, y0, params, t0, t1)
+many = jax.vmap(solve, (None, None, 0, None, None))(problem, y0, param_batch, t0, t1)
+ics = jax.vmap(solve, (None, 0, None, None, None))(problem, y0_batch, params, t0, t1)
 ```
 
 `jax.vmap` is the *only* way to batch: the leaves of `y0` and `params` must have
@@ -113,12 +131,12 @@ forward sensitivities. Both differentiate `y0` and the parameters:
 
 ```python
 def loss(p):
-    return jnp.sum(solve(problem, y0, p, t_eval) ** 2)
+    return jnp.sum(solve(problem, y0, p, t0, t1) ** 2)
 
 
 grad = jax.grad(loss)(params)
-jac = jax.jacfwd(lambda p: solve(problem, y0, p, t_eval))(params)
-g_y0 = jax.grad(lambda y0: jnp.sum(solve(problem, y0, params, t_eval) ** 2))(y0)
+jac = jax.jacfwd(lambda p: solve(problem, y0, p, t0, t1))(params)
+g_y0 = jax.grad(lambda y0: jnp.sum(solve(problem, y0, params, t0, t1) ** 2))(y0)
 ```
 
 An initial state that depends on the parameters needs no special support — write
@@ -126,7 +144,7 @@ it as a function and let JAX compose:
 
 ```python
 # y(0) = 1 and z(0) = p1, fitted together with p
-jnp.sum(solve(problem, jnp.array([1.0, p[1]]), p, t_eval) ** 2)
+jnp.sum(solve(problem, jnp.array([1.0, p[1]]), p, t0, t1) ** 2)
 ```
 
 The maths, the `ad=` option, and checkpointing are described in
@@ -149,7 +167,7 @@ problem = ODEProblem(
     params=Spring(k=jnp.array(1.0)),
 )
 
-ys = solve(problem, {"pos": pos0, "vel": vel0}, params, t_eval)
+ys = solve(problem, {"pos": pos0, "vel": vel0}, params, t0, t1)
 ys["pos"]  # [nt, 3]
 ys["vel"]  # [nt, 3]
 ```
@@ -169,7 +187,7 @@ net = SomeNeuralNetwork()  # any pytree of weights
 problem = ODEProblem(
     lambda y, net, t: net(y), state=nstates, params=net, solver="tsit45"
 )
-ys = solve(problem, y0, net, t_eval)
+ys = solve(problem, y0, net, t0, t1)
 ```
 
 Only the shapes and dtypes of the parameter leaves are read from the template,
@@ -181,7 +199,7 @@ ones.
 leaf's own dtype, so optax updates it directly:
 
 ```python
-loss = lambda net: jnp.sum((solve(problem, y0, net, t_eval) - data) ** 2)
+loss = lambda net: jnp.sum((solve(problem, y0, net, t0, t1) - data) ** 2)
 grads = jax.grad(loss)(net)
 updates, opt_state = opt.update(grads, opt_state, net)
 net = optax.apply_updates(net, updates)
@@ -199,8 +217,8 @@ class Fit(eqx.Module):
 
 v = Fit(y0=jnp.ones(nstates), net=net)
 problem = ODEProblem(lambda y, v, t: v.net(y), state=nstates, params=v)
-ys = solve(problem, v.y0, v, t_eval)
-grads = jax.grad(lambda v: loss(solve(problem, v.y0, v, t_eval)))(v)  # a Fit
+ys = solve(problem, v.y0, v, t0, t1)
+grads = jax.grad(lambda v: loss(solve(problem, v.y0, v, t0, t1)))(v)  # a Fit
 ```
 
 Two notes on the structure:

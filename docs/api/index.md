@@ -49,13 +49,14 @@ from what a solve passes.
 ## Solving
 
 ```python
-problem = ODEProblem(rhs, state=2, params=4)                        # both flat
-problem = ODEProblem(rhs, state=4, params=net, solver="tsit45")     # a pytree of weights
-ys = solve(problem, y0, params, t_eval, rtol=1e-6, ad="adjoint")
+problem = ODEProblem(rhs, state=2, params=4)  # both flat
+problem = ODEProblem(rhs, state=4, params=net, solver="tsit45")  # a pytree of weights
+ys = solve(problem, y0, params, t0, t1, saveat=saveat, rtol=1e-6, ad="adjoint")
 ```
 
-`solve(problem, y0, params, t_eval)` takes `y0` and `params` in the declared layouts and
-`t_eval` of shape `[nt]`, and returns `ys` in the output layout, each leaf `[nt, *leaf_shape]`
+`solve(problem, y0, params, t0, t1, saveat=saveat)` takes `y0` and `params` in the declared
+layouts, the scalars `t0` and `t1`, and `saveat` of shape `[nt]` (by default `t1` alone), and
+returns `ys` in the output layout, each leaf `[nt, *leaf_shape]`
 — for a flat `state=n` and no `out`, one array `[nt, n]`.
 
 Batching is `jax.vmap`, and a vmapped axis of `y0` or of `params` becomes more lanes of one
@@ -65,7 +66,7 @@ rather than a lane count.
 The solve is differentiable in `y0` as well as in `params`: internally `y0` is appended to the
 parameter vector, so it reaches the diffsol sensitivity and adjoint equations by the same path.
 An initial state that is a function of the parameters needs no special support — pass
-`solve(problem, f(params), params, t_eval)` and JAX composes the derivatives.
+`solve(problem, f(params), params, t0, t1)` and JAX composes the derivatives.
 
 ## What belongs where
 

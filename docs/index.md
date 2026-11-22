@@ -31,7 +31,8 @@ or with [uv](https://docs.astral.sh/uv/):
 uv add diffsol-jax
 ```
 
-Requires Python $\geq$ 3.12 and JAX $\geq$ 0.12, plus a CPU PJRT plugin (see
+Requires Python $\geq$ 3.12 and JAX $\geq$ 0.12, plus a CPU PJRT plugin, which
+the `cpu` extra installs: `pip install "diffsol-jax[cpu]"` (see
 [Getting started](getting-started.md)).
 
 ## Quick example
@@ -93,9 +94,9 @@ training loop.
 - **`f64` is required.** diffsol is built for `f64` like most scientific
   solvers; enable x64 (`jax.config.update("jax_enable_x64", True)`) before
   building a problem.
-- **A CPU PJRT plugin is required.** jaxlib does not ship one; put it in
-  `~/.local/share/pjrt/` (found automatically) or set
-  `DIFFSOL_JAX_PJRT_PLUGIN` to its path (see
+- **A CPU PJRT plugin is required.** jaxlib does not ship one; install it with
+  the `cpu` extra (`pip install "diffsol-jax[cpu]"`) or set
+  `DIFFSOL_JAX_PJRT_PLUGIN` to the path of one (see
   [Getting started](getting-started.md)).
 - **No higher-order derivatives.** `grad(grad(solve(...)))` does not work.
 - **No derivative with respect to `t0`, `t1` or `saveat`.** The times are constants.

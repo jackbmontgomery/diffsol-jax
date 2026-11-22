@@ -176,6 +176,11 @@ dependencies = [
     { name = "jax" },
 ]
 
+[package.optional-dependencies]
+cpu = [
+    { name = "diffsol-jax-pjrt-cpu" },
+]
+
 [package.dev-dependencies]
 bench = [
     { name = "diffrax" },
@@ -196,7 +201,11 @@ docs = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "jax", specifier = ">=0.12" }]
+requires-dist = [
+    { name = "diffsol-jax-pjrt-cpu", marker = "extra == 'cpu'", specifier = "==0.12.*" },
+    { name = "jax", specifier = ">=0.12" },
+]
+provides-extras = ["cpu"]
 
 [package.metadata.requires-dev]
 bench = [{ name = "diffrax", specifier = ">=0.7.2" }]
@@ -213,6 +222,17 @@ dev = [
 docs = [
     { name = "mkdocstrings-python", specifier = ">=2.0.3" },
     { name = "zensical", specifier = ">=0.0.37" },
+]
+
+[[package]]
+name = "diffsol-jax-pjrt-cpu"
+version = "0.12.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/54/9893bc374037034024e13f86071dbfccca34d9693b8d66d56cbc3b5285da/diffsol_jax_pjrt_cpu-0.12.0.1.tar.gz", hash = "sha256:27596279449018d2a43076178ca96e320ea29854be7dfdff9c5dbbe3eb508e0f", size = 11763, upload-time = "2026-11-22T14:16:31.937Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/c9/3c942c6e6c51f56974918ca53fff84c5289aaeb571b24d1eed6faca5f432/diffsol_jax_pjrt_cpu-0.12.0.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:f1a0265c0ff45189880d1488dba0c8de84e4ebe9a5bac5c9903d94bacbdb01fd", size = 43760598, upload-time = "2026-11-22T14:16:23.561Z" },
+    { url = "https://files.pythonhosted.org/packages/36/25/01ea6cf6f239e9a8366c5d800906f263cbf62d577e9c2979bde999fad761/diffsol_jax_pjrt_cpu-0.12.0.1-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:d3720041844d9dad3048cc56b78972364c8354ebc2ee5639680e1c25b4286213", size = 59526363, upload-time = "2026-11-22T14:16:26.367Z" },
+    { url = "https://files.pythonhosted.org/packages/84/af/23f06a692e3fb19a772a053c1cf2497b83368c720f0dea3034e0b1133dbe/diffsol_jax_pjrt_cpu-0.12.0.1-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:0b1200b59637e97c06c454f56fcecab8191b4d802a27e55d12e0e6a2cef0c405", size = 66388572, upload-time = "2026-11-22T14:16:29.608Z" },
 ]
 
 [[package]]

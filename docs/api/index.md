@@ -76,8 +76,8 @@ and is freed with it, so build the problem once and reuse it.
 
 The four options that the solver is built with — `solver`, `linear_solver`, `matrix_type`,
 `max_checkpoints` — are therefore arguments of `ODEProblem`, and changing one means another
-solver: `problem.replace(solver="tsit45")` returns a second problem. `rtol`, `atol` and `ad` are
-per solve and are arguments of `solve`.
+solver: `problem.replace(solver="tsit45")` returns a second problem. `rtol`, `atol`, `max_steps`
+and `ad` are per solve and are arguments of `solve`.
 
 `ODEProblem` also exposes the solver's counters: `num_recomputes()`, `num_checkpoints()`,
 `clear_checkpoints()`, and `callback_stats(nbatch)`.

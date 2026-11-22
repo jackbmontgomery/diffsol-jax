@@ -154,10 +154,10 @@ Instance *Model::Acquire(size_t nbatch, std::unique_lock<std::mutex> *lock,
 }
 
 bool CheckpointKey::Matches(const double *p, size_t np, const double *t,
-                            size_t nt, double rt, double at,
-                            double start) const {
+                            size_t nt, double rt, double at, double start,
+                            int64_t steps) const {
   // compare bits, not values: NaN params must not match, and -0.0 is not 0.0
-  return np == params.size() && nt == t_eval.size() &&
+  return np == params.size() && nt == t_eval.size() && steps == max_steps &&
          std::memcmp(&rt, &rtol, sizeof(double)) == 0 &&
          std::memcmp(&at, &atol, sizeof(double)) == 0 &&
          std::memcmp(&start, &t0, sizeof(double)) == 0 &&

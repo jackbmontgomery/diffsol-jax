@@ -32,6 +32,12 @@ def _find_plugin() -> str:
     env = os.environ.get("DIFFSOL_JAX_PJRT_PLUGIN")
     if env:
         return env
+    try:
+        import diffsol_jax_pjrt_cpu
+    except ImportError:
+        pass
+    else:
+        return str(diffsol_jax_pjrt_cpu.library_path())
     name = "pjrt_c_api_cpu_plugin.so"
     here = Path(__file__).resolve()
     for candidate in (
@@ -42,8 +48,9 @@ def _find_plugin() -> str:
         if candidate.exists():
             return str(candidate)
     raise DiffsolJaxError(
-        "no CPU PJRT plugin found: set DIFFSOL_JAX_PJRT_PLUGIN to the path of "
-        f"{name}, or put it in ~/.local/share/pjrt"
+        'no CPU PJRT plugin found: install one with `pip install "diffsol-jax[cpu]"`, '
+        f"set DIFFSOL_JAX_PJRT_PLUGIN to the path of a {name}, or put one in "
+        "~/.local/share/pjrt"
     )
 
 
@@ -53,8 +60,10 @@ def lib() -> ctypes.CDLL:
     Environment variables:
     - `DIFFSOL_JAX_LIB`: the path of `libdiffsol_jax` (default: bundled, else `build/` at the
       repository root).
-    - `DIFFSOL_JAX_PJRT_PLUGIN`: the path of the CPU PJRT plugin (`pjrt_c_api_cpu_plugin.so`;
-      default: bundled, else `~/.local/share/pjrt`, else `.pjrt` at the repository root).
+    - `DIFFSOL_JAX_PJRT_PLUGIN`: the path of the CPU PJRT plugin (default: the
+      `diffsol-jax-pjrt-cpu` package of the `cpu` extra, else a bundled
+      `pjrt_c_api_cpu_plugin.so`, else `~/.local/share/pjrt`, else `.pjrt` at the
+      repository root).
     """
     global _lib
     if _lib is not None:

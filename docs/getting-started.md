@@ -18,18 +18,26 @@ Requires Python $\geq$ 3.12 and JAX $\geq$ 0.12.
 
 The equation callbacks are compiled and executed through the
 [PJRT C API](https://openxla.org/xla/pjrt), so diffsol-jax needs a CPU PJRT
-plugin. jaxlib does not ship one as a loadable library. A prebuilt plugin for
-linux/amd64 is inside [gopjrt](https://github.com/gomlx/gopjrt)'s
-`gomlx_xlabuilder_linux_amd64.tar.gz` release asset (at
-`lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so`; the macOS arm64 asset is
-`gopjrt_cpu_darwin_arm64.tar.gz`), or you can build `pjrt_c_api_cpu_plugin.so`
-from [openxla/xla](https://github.com/openxla/xla). Put it in
-`~/.local/share/pjrt/`, where it is found automatically, or point the
-environment variable at it:
+plugin. jaxlib does not ship one as a loadable library, so the `cpu` extra
+installs the plugin from its own wheel,
+[diffsol-jax-pjrt-cpu](https://github.com/jackbmontgomery/diffsol-jax-pjrt-cpu):
+
+```bash
+pip install "diffsol-jax[cpu]"
+```
+
+To use another plugin instead — for example one you built yourself from
+[openxla/xla](https://github.com/openxla/xla), or a prebuilt
+`pjrt_c_api_cpu_plugin.so` from [gopjrt](https://github.com/gomlx/gopjrt)'s
+release assets — point the environment variable at it, which wins over the
+installed package:
 
 ```bash
 export DIFFSOL_JAX_PJRT_PLUGIN=/path/to/pjrt_c_api_cpu_plugin.so
 ```
+
+A plugin in `~/.local/share/pjrt/` is also found automatically when neither of
+the above is present.
 
 !!! tip "Building from source"
 
@@ -252,11 +260,12 @@ The four options the diffsol solver is built with belong to the problem:
 | `linear_solver`   | `"default"`        | `"lu"` or `"klu"` (with `matrix_type="faer_sparse"`).                 |
 | `matrix_type`     | `"nalgebra_dense"` | `"faer_dense"` or `"faer_sparse"` for larger systems.                 |
 
-The three that are per solve belong to `solve`:
+The ones that are per solve belong to `solve`:
 
 | Argument       | Default        | Description                                     |
 | -------------- | -------------- | ----------------------------------------------- |
 | `rtol`, `atol` | `1e-6`, `1e-6` | Solver tolerances.                              |
+| `max_steps`    | `10000`        | The most time steps one solve may take.         |
 | `ad`           | `"adjoint"`    | Reverse mode: `"adjoint"` or `"forward"`.       |
 
 So comparing the two reverse modes, or tightening a tolerance, needs no second

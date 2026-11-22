@@ -12,6 +12,9 @@ T0, T1 = T_EVAL[0], T_EVAL[-1]
 X0 = 0.1
 Y0 = jnp.array([X0])
 TOL = {"rtol": 1e-10, "atol": 1e-10}
+# the primitives take every solve option explicitly; the two helpers below must pass the same
+# ones, or the backward solve would miss the checkpoint of the forward solve
+PRIM_KW = {**TOL, "max_steps": 10_000}
 
 LOGISTIC = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]), state=1, params=2)
 
@@ -228,11 +231,11 @@ def test_grad_of_scan_with_more_solves_than_checkpoints():
     assert problem.num_recomputes() > 0
 
 
-def _bkwd(problem, handle, params, ct):
+def _bkwd(problem, handle, params, ct, **over):
     """Call the backward primitive directly, as a wrong residual would reach it."""
     from diffsol_jax import _primitives
 
-    kw = {"problem": problem, **TOL}
+    kw = {"problem": problem, **PRIM_KW, **over}
     prim = _primitives.VjpBkwd(
         jax.typeof(handle),
         jax.typeof(params),
@@ -244,11 +247,11 @@ def _bkwd(problem, handle, params, ct):
     return prim(handle, params, T0, T_EVAL, ct)
 
 
-def _fwd(problem, params):
+def _fwd(problem, params, **over):
     """`params` here is the internal vector `[p0, p1, y0]` that the primitives take."""
     from diffsol_jax import _primitives
 
-    kw = {"problem": problem, **TOL}
+    kw = {"problem": problem, **PRIM_KW, **over}
     prim = _primitives._VjpFwdOp(
         jax.typeof(params), jax.typeof(T0), jax.typeof(T_EVAL), **kw
     )
@@ -275,6 +278,48 @@ def test_mixed_handles_are_not_used():
     _, other = _fwd(LOGISTIC, p[1:])
     before = LOGISTIC.num_recomputes()
     grad = _bkwd(LOGISTIC, h.at[1].set(other[0]), p, ct)
+    assert LOGISTIC.num_recomputes() == before + 1
+    np.testing.assert_allclose(grad, expected, rtol=1e-12)
+
+
+P = jnp.array([1.0, 1.0])  # the logistic `r` and `k`
+
+
+def test_max_steps_is_enforced():
+    """A budget too small to reach `t1` fails the solve, rather than letting it run on."""
+    with pytest.raises(Exception, match="maximum number of timesteps"):
+        logistic(Y0, P, max_steps=1)
+
+
+def test_max_steps_reaches_the_backward_solve():
+    def loss(ms):
+        return lambda p: logistic(Y0, p, max_steps=ms).sum()
+
+    with pytest.raises(Exception, match="maximum number of timesteps"):
+        jax.grad(loss(1))(P)
+    # a generous budget is not a constraint: the same gradient as the default
+    np.testing.assert_allclose(
+        jax.grad(loss(100_000))(P), jax.grad(loss(10_000))(P), rtol=1e-12
+    )
+
+
+def test_max_steps_must_be_positive():
+    for bad in (0, -1):
+        with pytest.raises(DiffsolJaxError, match="max_steps must be at least 1"):
+            logistic(Y0, P, max_steps=bad)
+    with pytest.raises(TypeError):
+        logistic(Y0, P, max_steps=1.5)
+
+
+def test_handle_with_other_max_steps_is_not_used():
+    """`max_steps` is part of the checkpoint key: a backward solve under a different budget
+    runs the forward solve again rather than reusing the checkpoint."""
+    p = jnp.array([[1.0, 1.0, X0]])
+    ys, h = _fwd(LOGISTIC, p)
+    ct = jnp.ones_like(ys)
+    expected = _bkwd(LOGISTIC, h, p, ct)
+    before = LOGISTIC.num_recomputes()
+    grad = _bkwd(LOGISTIC, h, p, ct, max_steps=9_999)
     assert LOGISTIC.num_recomputes() == before + 1
     np.testing.assert_allclose(grad, expected, rtol=1e-12)
 

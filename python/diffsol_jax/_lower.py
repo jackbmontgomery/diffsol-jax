@@ -7,8 +7,6 @@ import jax.numpy as jnp
 
 
 class CallbackId(enum.IntEnum):
-    """The same values as `CallbackId` in `src/callbacks.h`."""
-
     RHS = 0
     RHS_JAC = 1
     RHS_SENS = 2
@@ -26,8 +24,6 @@ class CallbackId(enum.IntEnum):
     OUT_SENS_ADJOINT = 14
 
 
-# The callbacks that diffsol calls with more than one lane on `P`: in a forward sensitivity solve
-# (`P = nparams`) and in a VJP backward solve (`P = ndirections`).
 FWD_SENS_MULTI_P = (CallbackId.RHS_JAC, CallbackId.OUT_JAC, CallbackId.MASS)
 VJP_BKWD_MULTI_P = (
     CallbackId.RHS_ADJOINT,
@@ -50,7 +46,6 @@ class Equations:
     mass: Callable | None = None
 
     def available(self):
-        """The callbacks of this model."""
         ids = [
             CallbackId.RHS,
             CallbackId.RHS_JAC,
@@ -83,7 +78,6 @@ def _neg_vjp(f, primal, cotangent):
 
 
 def _lane_fn(eq: Equations, cb: CallbackId):
-    """The callback for one lane, its kind, and the lengths `(nv, ny)`."""
     n, npar = eq.nstates, eq.nparams
     f, g, h, m = eq.rhs, eq.init, eq.out, eq.mass
     no = eq.nout
@@ -217,8 +211,6 @@ def batched(eq: Equations, cb: CallbackId):
 
 
 def _serialize(module) -> bytes:
-    """StableHLO as a portable artifact (VHLO), so that a PJRT plugin of a different version can
-    read it."""
     from jax._src.lib.mlir.dialects import hlo
 
     return hlo.serialize_portable_artifact_str(str(module), hlo.get_minimum_version())
@@ -227,6 +219,5 @@ def _serialize(module) -> bytes:
 def lower(eq: Equations, cb: CallbackId, B: int, P: int) -> bytes:
     """The StableHLO of callback `cb` for `B` lanes and `P` lanes on `P`."""
     all_lanes, shapes = batched(eq, cb)
-    # the trampolines always give all the arguments, also those that the function does not use
     lowered = jax.jit(all_lanes, keep_unused=True).lower(*shapes(B, P))
     return _serialize(lowered.compiler_ir("stablehlo"))

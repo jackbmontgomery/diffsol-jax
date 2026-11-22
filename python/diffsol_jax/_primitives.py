@@ -12,13 +12,14 @@ from jax.experimental.hijax import (
 )
 
 
-def _ffi(target, out_avals, *args, problem, rtol, atol):
+def _ffi(target, out_avals, *args, problem, rtol, atol, max_steps):
     out_types = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in out_avals]
     return jax.ffi.ffi_call(target, out_types)(
         *args,
         model_id=np.int64(problem._id),
         rtol=np.float64(rtol),
         atol=np.float64(atol),
+        max_steps=np.int64(max_steps),
     )
 
 
@@ -35,14 +36,34 @@ class _LaneOp(HiPrim):
     becomes more lanes: the axis goes to the front, and the operation runs once for all the
     lanes. `t0` and `t_eval` are the same for every lane."""
 
-    def __init__(self, params_aval, t0_aval, t_eval_aval, *, problem, rtol, atol):
+    def __init__(
+        self,
+        params_aval,
+        t0_aval,
+        t_eval_aval,
+        *,
+        problem,
+        rtol,
+        atol,
+        max_steps,
+    ):
         self.in_avals = (params_aval, t0_aval, t_eval_aval)
         self.out_aval = self._out_aval(params_aval, t_eval_aval, problem)
-        self.params = {"_problem": problem, "rtol": rtol, "atol": atol}
+        self.params = {
+            "_problem": problem,
+            "rtol": rtol,
+            "atol": atol,
+            "max_steps": max_steps,
+        }
         super().__init__()
 
     def _kw(self):
-        return {"problem": self._problem, "rtol": self.rtol, "atol": self.atol}
+        return {
+            "problem": self._problem,
+            "rtol": self.rtol,
+            "atol": self.atol,
+            "max_steps": self.max_steps,
+        }
 
     def _nbatch(self):
         return math.prod(self.in_avals[0].shape[:-1])
@@ -180,14 +201,25 @@ class VjpBkwd(HiPrim):
         problem,
         rtol,
         atol,
+        max_steps,
     ):
         self.in_avals = (handle_aval, params_aval, t0_aval, t_eval_aval, dgdu_aval)
         self.out_aval = _f64(dgdu_aval.shape[:-2] + (params_aval.shape[-1],))
-        self.params = {"_problem": problem, "rtol": rtol, "atol": atol}
+        self.params = {
+            "_problem": problem,
+            "rtol": rtol,
+            "atol": atol,
+            "max_steps": max_steps,
+        }
         super().__init__()
 
     def _kw(self):
-        return {"problem": self._problem, "rtol": self.rtol, "atol": self.atol}
+        return {
+            "problem": self._problem,
+            "rtol": self.rtol,
+            "atol": self.atol,
+            "max_steps": self.max_steps,
+        }
 
     def expand(self, handle, params, t0, t_eval, dgdu):
         nbatch = math.prod(handle.shape)

@@ -100,8 +100,27 @@ ffi::ErrorOr<double> StartTime(ffi::Buffer<ffi::F64> &t0,
   return start;
 }
 
+// Set the step budget on `ode`. `diffsol_ode_get_options` hands back an owned
+// handle onto the same ODE, so a set through it reaches the solver; it must be
+// freed either way.
+ffi::Error SetMaxSteps(Instance *instance, int64_t max_steps) {
+  if (max_steps < 1)
+    return ffi::Error::InvalidArgument("max_steps must be at least 1");
+  OdeSolverOptions *options = nullptr;
+  if (diffsol_ode_get_options(instance->ode, &options) != DIFFSOL_OK ||
+      options == nullptr) {
+    return ffi::Error::Internal(DiffsolError(instance));
+  }
+  int rc = diffsol_ode_options_set_max_number_timesteps(
+      options, static_cast<size_t>(max_steps));
+  diffsol_ode_options_free(options);
+  if (rc != DIFFSOL_OK)
+    return ffi::Error::Internal(DiffsolError(instance));
+  return ffi::Error::Success();
+}
+
 ffi::Error Acquire(int64_t model_id, double rtol, double atol, double t0,
-                   size_t nbatch, Solver *s) {
+                   int64_t max_steps, size_t nbatch, Solver *s) {
   s->model = FindModel(model_id);
   if (!s->model) {
     return ffi::Error::InvalidArgument("unknown diffsol model " +
@@ -118,6 +137,8 @@ ffi::Error Acquire(int64_t model_id, double rtol, double atol, double t0,
       diffsol_ode_set_t0(s->instance->ode, t0) != DIFFSOL_OK) {
     return ffi::Error::Internal(DiffsolError(s->instance));
   }
+  if (auto e = SetMaxSteps(s->instance, max_steps); e.failure())
+    return e;
   // clear the callback error of an earlier solve
   s->instance->callbacks.TakeError();
   return ffi::Error::Success();
@@ -139,7 +160,7 @@ ffi::Error Lanes(const std::shared_ptr<Model> &model,
 // Run a solve that returns a solution, and copy its values into `ys`.
 template <typename SolveFn>
 ffi::Error SolveAndCopyYs(int64_t model_id, double rtol, double atol,
-                          ffi::Buffer<ffi::F64> &t0,
+                          int64_t max_steps, ffi::Buffer<ffi::F64> &t0,
                           ffi::Buffer<ffi::F64> &params,
                           ffi::Buffer<ffi::F64> &t_eval, double *ys, Solver *s,
                           double *t0_used, SolutionWrapper **solution,
@@ -151,7 +172,8 @@ ffi::Error SolveAndCopyYs(int64_t model_id, double rtol, double atol,
   if (!start.has_value())
     return std::move(start.error());
   *t0_used = start.value();
-  if (auto e = Acquire(model_id, rtol, atol, *t0_used, nbatch, s); e.failure())
+  if (auto e = Acquire(model_id, rtol, atol, *t0_used, max_steps, nbatch, s);
+      e.failure())
     return e;
   size_t nt = t_eval.element_count();
   if (solve(s->instance->ode, params.typed_data(), s->nparams, nbatch,
@@ -169,11 +191,11 @@ ffi::Error SolveDenseImpl(ffi::Buffer<ffi::F64> params,
                           ffi::Buffer<ffi::F64> t0,
                           ffi::Buffer<ffi::F64> t_eval,
                           ffi::ResultBuffer<ffi::F64> ys, int64_t model_id,
-                          double rtol, double atol) {
+                          double rtol, double atol, int64_t max_steps) {
   Solver s;
   SolutionWrapper *solution = nullptr;
   double start = 0.0;
-  auto e = SolveAndCopyYs(model_id, rtol, atol, t0, params, t_eval,
+  auto e = SolveAndCopyYs(model_id, rtol, atol, max_steps, t0, params, t_eval,
                           ys->typed_data(), &s, &start, &solution,
                           diffsol_ode_solve_dense);
   if (solution)
@@ -186,11 +208,11 @@ ffi::Error SolveFwdSensImpl(ffi::Buffer<ffi::F64> params,
                             ffi::Buffer<ffi::F64> t_eval,
                             ffi::ResultBuffer<ffi::F64> ys,
                             ffi::ResultBuffer<ffi::F64> sens, int64_t model_id,
-                            double rtol, double atol) {
+                            double rtol, double atol, int64_t max_steps) {
   Solver s;
   SolutionWrapper *solution = nullptr;
   double start = 0.0;
-  auto e = SolveAndCopyYs(model_id, rtol, atol, t0, params, t_eval,
+  auto e = SolveAndCopyYs(model_id, rtol, atol, max_steps, t0, params, t_eval,
                           ys->typed_data(), &s, &start, &solution,
                           diffsol_ode_solve_fwd_sens);
   if (e.success()) {
@@ -228,7 +250,7 @@ ffi::Error SolveVjpFwdImpl(ffi::Buffer<ffi::F64> params,
                            ffi::Buffer<ffi::F64> t_eval,
                            ffi::ResultBuffer<ffi::F64> ys,
                            ffi::ResultBuffer<ffi::S64> handle, int64_t model_id,
-                           double rtol, double atol) {
+                           double rtol, double atol, int64_t max_steps) {
   Solver s;
   SolutionWrapper *solution = nullptr;
   VjpCheckpointWrapper *checkpoint = nullptr;
@@ -239,7 +261,7 @@ ffi::Error SolveVjpFwdImpl(ffi::Buffer<ffi::F64> params,
                                      &checkpoint);
   };
   double start = 0.0;
-  auto e = SolveAndCopyYs(model_id, rtol, atol, t0, params, t_eval,
+  auto e = SolveAndCopyYs(model_id, rtol, atol, max_steps, t0, params, t_eval,
                           ys->typed_data(), &s, &start, &solution, solve);
   if (solution)
     diffsol_solution_wrapper_free(solution);
@@ -256,6 +278,7 @@ ffi::Error SolveVjpFwdImpl(ffi::Buffer<ffi::F64> params,
   key.rtol = rtol;
   key.atol = atol;
   key.t0 = start;
+  key.max_steps = max_steps;
   int64_t id = s.model->AddCheckpoint(s.instance, checkpoint, std::move(key));
   for (size_t b = 0; b < s.nbatch; b++)
     handle->typed_data()[b] = id;
@@ -264,17 +287,17 @@ ffi::Error SolveVjpFwdImpl(ffi::Buffer<ffi::F64> params,
 
 // The backward solve. It uses the checkpoint of `handle` only if the registry
 // still has it, all the lanes of `handle` have the same id, and the checkpoint
-// was made from exactly the same `params`, `t_eval`, `rtol` and `atol`. If not
-// (for example the registry freed it, or the handle comes from a different
-// process), it runs the forward solve again into a temporary checkpoint. Thus
-// the gradient never depends on what the registry holds.
+// was made from exactly the same `params`, `t_eval`, `rtol`, `atol` and
+// `max_steps`. If not (for example the registry freed it, or the handle comes
+// from a different process), it runs the forward solve again into a temporary
+// checkpoint. Thus the gradient never depends on what the registry holds.
 ffi::Error SolveVjpBkwdImpl(ffi::Buffer<ffi::S64> handle,
                             ffi::Buffer<ffi::F64> params,
                             ffi::Buffer<ffi::F64> t0,
                             ffi::Buffer<ffi::F64> t_eval,
                             ffi::Buffer<ffi::F64> dgdu,
                             ffi::ResultBuffer<ffi::F64> grad, int64_t model_id,
-                            double rtol, double atol) {
+                            double rtol, double atol, int64_t max_steps) {
   auto model = FindModel(model_id);
   if (!model)
     return ffi::Error::InvalidArgument("unknown diffsol model");
@@ -311,7 +334,7 @@ ffi::Error SolveVjpBkwdImpl(ffi::Buffer<ffi::S64> handle,
       (checkpoint->instance->callbacks.nbatch != nbatch ||
        !checkpoint->key.Matches(params.typed_data(), params.element_count(),
                                 t_eval.typed_data(), nt, rtol, atol,
-                                start.value()))) {
+                                start.value(), max_steps))) {
     checkpoint = nullptr;
   }
 
@@ -326,7 +349,8 @@ ffi::Error SolveVjpBkwdImpl(ffi::Buffer<ffi::S64> handle,
     use = checkpoint->checkpoint;
   } else {
     // recompute: the same forward solve as `diffsol_solve_vjp_fwd`
-    if (auto e = Acquire(model_id, rtol, atol, start.value(), nbatch, &s);
+    if (auto e =
+            Acquire(model_id, rtol, atol, start.value(), max_steps, nbatch, &s);
         e.failure())
       return e;
     SolutionWrapper *solution = nullptr;
@@ -362,7 +386,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveDense, diffsol_jax::SolveDenseImpl,
                                   .Ret<ffi::Buffer<ffi::F64>>()
                                   .Attr<int64_t>("model_id")
                                   .Attr<double>("rtol")
-                                  .Attr<double>("atol"));
+                                  .Attr<double>("atol")
+                                  .Attr<int64_t>("max_steps"));
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveFwdSens,
                               diffsol_jax::SolveFwdSensImpl,
@@ -374,7 +399,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveFwdSens,
                                   .Ret<ffi::Buffer<ffi::F64>>()
                                   .Attr<int64_t>("model_id")
                                   .Attr<double>("rtol")
-                                  .Attr<double>("atol"));
+                                  .Attr<double>("atol")
+                                  .Attr<int64_t>("max_steps"));
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveVjpFwd, diffsol_jax::SolveVjpFwdImpl,
                               ffi::Ffi::Bind()
@@ -385,7 +411,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveVjpFwd, diffsol_jax::SolveVjpFwdImpl,
                                   .Ret<ffi::Buffer<ffi::S64>>()
                                   .Attr<int64_t>("model_id")
                                   .Attr<double>("rtol")
-                                  .Attr<double>("atol"));
+                                  .Attr<double>("atol")
+                                  .Attr<int64_t>("max_steps"));
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveVjpBkwd,
                               diffsol_jax::SolveVjpBkwdImpl,
@@ -398,4 +425,5 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveVjpBkwd,
                                   .Ret<ffi::Buffer<ffi::F64>>()
                                   .Attr<int64_t>("model_id")
                                   .Attr<double>("rtol")
-                                  .Attr<double>("atol"));
+                                  .Attr<double>("atol")
+                                  .Attr<int64_t>("max_steps"));

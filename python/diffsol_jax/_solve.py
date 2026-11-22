@@ -1,5 +1,7 @@
 """The solve: one function over a problem."""
 
+import operator
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -30,21 +32,16 @@ def solve(
     saveat: ArrayLike | None = None,
     rtol: float = 1e-6,
     atol: float = 1e-6,
+    max_steps: int = 10_000,
     ad: Ad = "adjoint",
 ) -> PyTree:
     """Solve `problem` from the state `y0` at `t0` to `t1`.
 
-    By default the solution comes back at `t1` only; `saveat` asks for it at other times.
-
-    Differentiable with respect to both `y0` and `params`, and a `jax.vmap` over either becomes
-    more lanes of one batched solve rather than a loop of solves. Batching is by `jax.vmap`:
-    the leaves of `y0` and `params` have the shapes the problem declares, with no extra axes.
-
+    Differentiable with respect to both `y0` and `params`.
     Args:
         problem: an [`ODEProblem`][diffsol_jax.ODEProblem]: the equations, the layouts, and the
-            diffsol solver. The options it was built with (`solver`, `linear_solver`,
-            `matrix_type`, `max_checkpoints`) belong to it, not to the solve.
-        y0: the state at `t0`, in the problem's `state` structure.
+            diffsol solver.
+        y0: the state at `t0`.
         params: the parameter values, in the problem's `params` structure, or `None` for a
             problem with no parameters.
         t0: the time of `y0`, where the solve starts.
@@ -54,6 +51,11 @@ def solve(
             so a `saveat` that stops short of `t1` does less work than one that reaches it.
         rtol: the relative tolerance of the solver.
         atol: the absolute tolerance of the solver.
+        max_steps: the most time steps the solver may take to reach the last time it
+            returns. A solve that needs more fails rather than running on, which is what a
+            stiff problem under a non-stiff solver, or too tight a tolerance, looks like.
+            It is a budget for one solve: each solve of a `jax.vmap` gets it in full, and
+            the backward solve of a gradient gets it again.
         ad: how to take the reverse-mode derivative: `adjoint`, the diffsol adjoint with
             checkpointing, or `forward`, the transpose of the diffsol forward sensitivities.
 
@@ -64,6 +66,10 @@ def solve(
     """
     if ad not in ("adjoint", "forward"):
         raise DiffsolJaxError("ad must be 'adjoint' or 'forward'")
+
+    max_steps = operator.index(max_steps)
+    if max_steps < 1:
+        raise DiffsolJaxError(f"max_steps must be at least 1, got {max_steps}")
 
     t0 = jnp.asarray(t0, F64)
     t1 = jnp.asarray(t1, F64)
@@ -89,6 +95,7 @@ def solve(
         problem=problem,
         rtol=float(rtol),
         atol=float(atol),
+        max_steps=max_steps,
     )
     return problem._unpack(prim(flat, t0, t_eval))
 

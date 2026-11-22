@@ -25,6 +25,12 @@ dependencies = [
     "jax>=0.12",
 ]
 
+[project.optional-dependencies]
+# The CPU PJRT plugin that runs the equation callbacks. jaxlib links its CPU client
+# statically and ships no plugin library, so the plugin comes from its own wheel, whose
+# version follows the JAX release it is built from.
+cpu = ["diffsol-jax-pjrt-cpu==0.12.*"]
+
 [project.urls]
 Homepage = "https://github.com/jackbmontgomery/diffsol-jax"
 Repository = "https://github.com/jackbmontgomery/diffsol-jax"

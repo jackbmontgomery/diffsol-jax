@@ -207,7 +207,9 @@ with respect to the times, no `vmap` over them.
 
 ## Build
 
-1. The CPU PJRT plugin. jaxlib does not include one. Build it from openxla/xla:
+1. The CPU PJRT plugin. jaxlib does not include one. The released wheel is
+   [diffsol-jax-pjrt-cpu](https://github.com/jackbmontgomery/diffsol-jax-pjrt-cpu)
+   (the `cpu` extra), or build it from openxla/xla:
 
    ```sh
    git clone --depth 1 https://github.com/openxla/xla.git && cd xla

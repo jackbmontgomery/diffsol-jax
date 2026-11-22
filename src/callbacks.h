@@ -9,6 +9,9 @@
 //   beta: []
 // and the only variable of the layout is `P`. Each callback has one executable
 // for each `P`.
+//
+// The views carry the solver's dtype (`CallbackSet::dtype`); the trampoline
+// signatures are still f64, which is what makes this f64-only for now.
 #pragma once
 
 #include <array>
@@ -17,8 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "backend.h"
 #include "diffsol.h"
-#include "pjrt_runtime.h"
 
 namespace diffsol_jax {
 
@@ -76,29 +79,32 @@ struct Variants {
   int Find(size_t p) const;
 };
 
-// A 64-byte aligned buffer that grows only when it must. The XLA CPU client
-// accepts a view of caller memory only if the pointer is 64-byte aligned (spike
-// 0.2); diffsol vectors are not always aligned, so an unaligned input is copied
-// into this buffer first.
+// An aligned buffer that grows only when it must, for an input whose pointer
+// does not meet `Backend::view_alignment()`: it is copied in here first.
 struct Staging {
   Staging() = default;
   Staging(const Staging &) = delete;
   Staging &operator=(const Staging &) = delete;
   ~Staging();
-  // A buffer of at least `bytes` bytes.
-  void *Reserve(size_t bytes);
+  // A buffer of at least `bytes` bytes, aligned to `align`.
+  void *Reserve(size_t bytes, size_t align);
   void *data = nullptr;
   size_t capacity = 0;
 };
 
-// A scalar argument, alone in its 64-byte block, for the same reason.
+// A scalar argument, alone in its own aligned block for the same reason, held
+// in the solver's dtype so that a view of it has that dtype.
 struct alignas(64) AlignedScalar {
-  double value = 0.0;
+  union {
+    double f64;
+    float f32;
+  } value = {0.0};
 };
 
 // The `user_data` of the callbacks of one `OdeWrapper` (one model, one `B`).
 struct CallbackSet {
-  PjrtRuntime *runtime = nullptr;
+  Backend *backend = nullptr;
+  Dtype dtype = Dtype::kF64;
   size_t nstates = 0;
   size_t nparams = 0;
   size_t nout = 0;

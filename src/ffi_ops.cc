@@ -43,7 +43,12 @@ template <typename Dims> size_t Product(const Dims &dims, size_t n) {
 
 // Copy a diffsol tensor into `dst` as a contiguous column-major array (which is
 // the row-major array with the axes in the opposite order). Free the tensor.
-ffi::Error CopyTensor(Tensor *tensor, double *dst, size_t expected) {
+//
+// `dtype` is the model's, which is the dtype diffsol gives its tensors in.
+// TODO(f32): `dst` is f64 because the FFI results are, so an f32 model needs a
+// widening copy here rather than a `memcpy`.
+ffi::Error CopyTensor(Tensor *tensor, Dtype dtype, double *dst,
+                      size_t expected) {
   size_t ndim = diffsol_tensor_ndim(tensor);
   size_t dims[3] = {1, 1, 1}, strides[3] = {0, 0, 0};
   for (size_t i = 0; i < ndim; i++) {
@@ -51,7 +56,8 @@ ffi::Error CopyTensor(Tensor *tensor, double *dst, size_t expected) {
     strides[i] = diffsol_tensor_stride(tensor, i);
   }
   if (dims[0] * dims[1] * dims[2] != expected ||
-      diffsol_tensor_dtype(tensor) != ScalarType_F64) {
+      diffsol_tensor_dtype(tensor) != DiffsolType(dtype) ||
+      dtype != Dtype::kF64) {
     diffsol_tensor_free(tensor);
     return ffi::Error::Internal(
         "diffsol returned a tensor with an unexpected shape or type");
@@ -184,7 +190,8 @@ ffi::Error SolveAndCopyYs(int64_t model_id, double rtol, double atol,
   if (diffsol_solution_wrapper_get_ys(*solution, &tensor) != DIFFSOL_OK) {
     return ffi::Error::Internal(DiffsolError(s->instance));
   }
-  return CopyTensor(tensor, ys, s->model->nsolution() * nt * nbatch);
+  return CopyTensor(tensor, s->model->config().dtype, ys,
+                    s->model->nsolution() * nt * nbatch);
 }
 
 ffi::Error SolveDenseImpl(ffi::Buffer<ffi::F64> params,
@@ -230,7 +237,8 @@ ffi::Error SolveFwdSensImpl(ffi::Buffer<ffi::F64> params,
       size_t block = s.model->nsolution() * t_eval.element_count();
       auto tmp = std::make_unique<double[]>(block * s.nbatch);
       for (size_t j = 0; j < len && e.success(); j++) {
-        e = CopyTensor(list[j], tmp.get(), block * s.nbatch);
+        e = CopyTensor(list[j], s.model->config().dtype, tmp.get(),
+                       block * s.nbatch);
         list[j] = nullptr;
         for (size_t b = 0; b < s.nbatch && e.success(); b++) {
           std::memcpy(sens->typed_data() + (b * s.nparams + j) * block,
@@ -371,7 +379,7 @@ ffi::Error SolveVjpBkwdImpl(ffi::Buffer<ffi::S64> handle,
     diffsol_vjp_checkpoint_free(fresh);
   if (rc != DIFFSOL_OK)
     return ffi::Error::Internal(DiffsolError(s.instance));
-  return CopyTensor(tensor, grad->typed_data(),
+  return CopyTensor(tensor, model->config().dtype, grad->typed_data(),
                     model->config().nparams * lanes);
 }
 

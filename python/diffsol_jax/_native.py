@@ -27,6 +27,9 @@ FFI_TARGETS = {
 ODE_SOLVERS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
 LINEAR_SOLVERS = {"default": 0, "lu": 1, "klu": 2}
 MATRIX_TYPES = {"nalgebra_dense": 0, "faer_dense": 1, "faer_sparse": 2}
+# diffsol-c's `ScalarType`. Only `f64` can be built yet: the callback
+# trampolines take their scalars as `double` and fill an `OdeCallbacksDesc_f64`.
+DTYPES = {"f32": 0, "f64": 1}
 
 # The trailing `err, err_len` of a function that can fail; `call` supplies them.
 _ERR = [c.c_char_p, c.c_size_t]
@@ -35,8 +38,10 @@ _U64 = c.POINTER(c.c_uint64)
 # name: (argtypes, restype)
 _SIGNATURES = {
     "diffsol_jax_init": ([c.c_char_p] + _ERR, c.c_int),
+    # nstates, nparams, nout, dtype, matrix_type, linear_solver, ode_solver,
+    # max_checkpoints
     "diffsol_jax_model_new": (
-        [c.c_size_t] * 3 + [c.c_int32] * 3 + [c.c_size_t] + _ERR,
+        [c.c_size_t] * 3 + [c.c_int32] * 4 + [c.c_size_t] + _ERR,
         c.c_int64,
     ),
     "diffsol_jax_model_free": ([c.c_int64], None),
@@ -157,15 +162,24 @@ class Model:
     """
 
     def __init__(
-        self, eq: Equations, *, solver, linear_solver, matrix_type, max_checkpoints
+        self,
+        eq: Equations,
+        *,
+        solver,
+        linear_solver,
+        matrix_type,
+        max_checkpoints,
+        dtype="f64",
     ):
         self.eq = eq
+        self.dtype = dtype
         so = lib()
         self.id = call(
             so.diffsol_jax_model_new,
             eq.nstates,
             eq.nparams,
             eq.nout,
+            one_of("dtype", dtype, DTYPES),
             one_of("matrix_type", matrix_type, MATRIX_TYPES),
             one_of("linear_solver", linear_solver, LINEAR_SOLVERS),
             one_of("solver", solver, ODE_SOLVERS),

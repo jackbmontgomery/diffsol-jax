@@ -10,7 +10,7 @@ namespace diffsol_jax {
 namespace {
 
 std::mutex g_mutex;
-PjrtRuntime *g_runtime = nullptr;
+Backend *g_backend = nullptr;
 std::unordered_map<int64_t, std::shared_ptr<Model>> g_models;
 std::atomic<int64_t> g_next_model{1};
 std::atomic<uint64_t> g_next_checkpoint{1};
@@ -51,7 +51,7 @@ bool Model::AddVariant(size_t nbatch, int id, size_t p, const std::string &code,
     *err = "unknown callback id " + std::to_string(id);
     return false;
   }
-  PJRT_LoadedExecutable *exe = runtime_->Compile(code, options, err);
+  PJRT_LoadedExecutable *exe = backend_->Compile(code, options, err);
   if (exe == nullptr) {
     *err = std::string("cannot compile callback '") + CallbackName(id) +
            "': " + *err;
@@ -64,7 +64,8 @@ bool Model::AddVariant(size_t nbatch, int id, size_t p, const std::string &code,
     if (!slot) {
       slot = std::make_unique<Instance>();
       CallbackSet &cbs = slot->callbacks;
-      cbs.runtime = runtime_;
+      cbs.backend = backend_;
+      cbs.dtype = config_.dtype;
       cbs.nstates = config_.nstates;
       cbs.nparams = config_.nparams;
       cbs.nout = config_.nout;
@@ -79,7 +80,7 @@ bool Model::AddVariant(size_t nbatch, int id, size_t p, const std::string &code,
   // (`_ensure_callbacks`), and only ever adds further `P` variants of those, so
   // this is unreachable from the Python package.
   if (instance->ode != nullptr && !instance->callbacks.Provides(id)) {
-    runtime_->Destroy(exe);
+    backend_->Destroy(exe);
     *err = std::string("cannot add the callback '") + CallbackName(id) +
            "' after the first solve of " + std::to_string(nbatch) + " lanes";
     return false;
@@ -190,32 +191,40 @@ size_t Model::NumCheckpoints() {
   return checkpoints_.size();
 }
 
-PjrtRuntime *GetRuntime() {
+Backend *GetBackend() {
   std::lock_guard<std::mutex> guard(g_mutex);
-  return g_runtime;
+  return g_backend;
 }
 
-bool InitRuntime(const std::string &plugin_path, std::string *err) {
+bool InitBackend(const std::string &plugin_path, std::string *err) {
   std::lock_guard<std::mutex> guard(g_mutex);
-  if (g_runtime)
+  if (g_backend)
     return true;
-  g_runtime = PjrtRuntime::Create(plugin_path, err);
-  return g_runtime != nullptr;
+  g_backend = Backend::Create(plugin_path, err);
+  return g_backend != nullptr;
 }
 
 int64_t NewModel(const ModelConfig &config, std::string *err) {
-  PjrtRuntime *runtime = GetRuntime();
-  if (runtime == nullptr) {
-    *err = "the PJRT runtime is not initialized";
+  Backend *backend = GetBackend();
+  if (backend == nullptr) {
+    *err = "the PJRT backend is not initialized";
     return 0;
   }
   if (config.nstates == 0) {
     *err = "nstates must be greater than 0";
     return 0;
   }
+  // The callback trampolines take their scalars as `double` and fill an
+  // `OdeCallbacksDesc_f64`, so only f64 can be built yet; everything that
+  // describes the data layout already carries the dtype.
+  if (config.dtype != Dtype::kF64) {
+    *err = std::string("the dtype ") + DtypeName(config.dtype) +
+           " is not supported yet, only f64";
+    return 0;
+  }
   int64_t id = g_next_model++;
   std::lock_guard<std::mutex> guard(g_mutex);
-  g_models[id] = std::make_shared<Model>(id, runtime, config);
+  g_models[id] = std::make_shared<Model>(id, backend, config);
   return id;
 }
 

@@ -1,5 +1,8 @@
-// A small wrapper of the PJRT C API: load a plugin, compile StableHLO, and run
-// an executable on views of caller memory.
+// The platform the callbacks run on: a PJRT plugin, its client and its device.
+// Besides wrapping the PJRT C API (load a plugin, compile StableHLO, run an
+// executable on views of caller memory), this is the one place that knows how
+// the platform wants its memory -- how a view of diffsol memory is made, and
+// how an output comes back out of a PJRT buffer.
 //
 // Only the PJRT C API header is used. There is no link to XLA: the plugin is
 // loaded with dlopen at run time.
@@ -9,6 +12,7 @@
 #include <cstdint>
 #include <string>
 
+#include "dtype.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 
 namespace diffsol_jax {
@@ -19,20 +23,21 @@ constexpr int kMaxArgs = 5;
 // The maximum number of axes of an argument.
 constexpr int kMaxDims = 3;
 
-// A view of caller memory: a dense row-major f64 array.
+// A view of caller memory: a dense row-major array of `dtype` values.
 struct ArgView {
   const void *ptr;
   int64_t dims[kMaxDims];
   int ndim;
+  Dtype dtype;
 };
 
 // One PJRT client (one process, one platform), and its first device.
-class PjrtRuntime {
+class Backend {
 public:
   // Load the plugin at `plugin_path` and make a client. Return nullptr and set
-  // `err` on a failure. The runtime is never freed (the plugin stays loaded
+  // `err` on a failure. The backend is never freed (the plugin stays loaded
   // until the process exits).
-  static PjrtRuntime *Create(const std::string &plugin_path, std::string *err);
+  static Backend *Create(const std::string &plugin_path, std::string *err);
 
   // Compile `code` (StableHLO: MLIR text, MLIR bytecode or a portable artifact)
   // with the serialized `xla.CompileOptionsProto` in `options`.
@@ -41,12 +46,19 @@ public:
 
   void Destroy(PJRT_LoadedExecutable *exe);
 
-  // A PJRT buffer that is a view of `arg` (no copy). On the CPU client,
-  // `arg.ptr` must be 64-byte aligned. The client reads the memory when an
-  // execution runs, so one view can be an argument of many executions while its
-  // memory stays valid. Free it with `DestroyBuffer`.
-  PJRT_Buffer *CreateView(const ArgView &arg, std::string *err);
+  // A PJRT buffer that is a view of `arg` (no copy). `arg.ptr` must be aligned
+  // to `view_alignment()`. The client reads the memory when an execution runs,
+  // so one view can be an argument of many executions while its memory stays
+  // valid. Free it with `DestroyBuffer`.
+  PJRT_Buffer *MakeView(const ArgView &arg, std::string *err);
   void DestroyBuffer(PJRT_Buffer *buffer);
+
+  // The alignment a view of caller memory must have. The XLA CPU client accepts
+  // a view only of 64-byte aligned memory (spike 0.2), and diffsol vectors are
+  // not always aligned, so the callbacks copy an unaligned input into a staging
+  // buffer first. A platform that has no such requirement returns 1.
+  // TODO(GPU): a device plugin's requirement, when there is one.
+  size_t view_alignment() const { return 64; }
 
   // Run `exe` with the `nargs` views `args` (never donated). Write the one
   // output (a dense row-major f64 array of `out_bytes` bytes) into `out`.
@@ -60,9 +72,12 @@ public:
   const PJRT_Api *api() const { return api_; }
 
 private:
-  PjrtRuntime() = default;
+  Backend() = default;
   bool Check(PJRT_Error *error, const char *what, std::string *err);
   void AwaitAndDestroy(PJRT_Event *event, std::string *err, bool *ok);
+  // Get the `out_bytes` of a finished execution's output buffer into `out`.
+  bool CopyOut(PJRT_Buffer *output, void *out, size_t out_bytes,
+               std::string *err);
 
   const PJRT_Api *api_ = nullptr;
   PJRT_Client *client_ = nullptr;

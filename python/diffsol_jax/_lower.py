@@ -12,7 +12,6 @@ import functools
 import jax
 
 from ._equations import FULL_ROLES, SCALAR_ROLES, CallbackId, Equations
-from ._types import F64
 
 # The callbacks a solve calls with `P > 1`: the forward-sensitivity solve puts all `nparams`
 # sensitivity columns through one call, and the backward solve all the directions.
@@ -52,7 +51,9 @@ def batched(eq: Equations, cb_id: CallbackId):
     all_lanes = jax.vmap(fn, tuple(None if r in SCALAR_ROLES else 0 for r in cb.args))
 
     def shapes(B, P):
-        return tuple(jax.ShapeDtypeStruct(shape[role](B, P), F64) for role in cb.args)
+        return tuple(
+            jax.ShapeDtypeStruct(shape[role](B, P), eq.dtype) for role in cb.args
+        )
 
     return all_lanes, shapes
 

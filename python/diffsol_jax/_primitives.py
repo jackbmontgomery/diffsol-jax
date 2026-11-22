@@ -12,12 +12,13 @@ from jax.experimental.hijax import (
 )
 
 
-def _f64(shape):
-    return ShapedArray(shape, jnp.float64)
-
-
 def _ys_aval(params_aval, t_eval_aval, problem):
-    return _f64(params_aval.shape[:-1] + (t_eval_aval.shape[0], problem.nsolution))
+    """`ys [*B, nt, nsolution]`, in the dtype of `params`: that is the model's dtype, since
+    `ODEProblem._pack` ravels into it."""
+    return ShapedArray(
+        params_aval.shape[:-1] + (t_eval_aval.shape[0], problem.nsolution),
+        params_aval.dtype,
+    )
 
 
 class _DiffsolPrim(HiPrim):
@@ -132,7 +133,10 @@ class _FwdSensOp(_LaneOp):
         ys = _ys_aval(params_aval, t_eval_aval, problem)
         return (
             ys,
-            _f64(params_aval.shape[:-1] + (params_aval.shape[-1],) + ys.shape[-2:]),
+            ShapedArray(
+                params_aval.shape[:-1] + (params_aval.shape[-1],) + ys.shape[-2:],
+                params_aval.dtype,
+            ),
         )
 
 
@@ -215,7 +219,9 @@ class VjpBkwd(_DiffsolPrim):
         max_steps,
     ):
         self.in_avals = (handle_aval, params_aval, t0_aval, t_eval_aval, dgdu_aval)
-        self.out_aval = _f64(dgdu_aval.shape[:-2] + (params_aval.shape[-1],))
+        self.out_aval = ShapedArray(
+            dgdu_aval.shape[:-2] + (params_aval.shape[-1],), params_aval.dtype
+        )
         self._configure(problem, rtol, atol, max_steps)
         super().__init__()
 

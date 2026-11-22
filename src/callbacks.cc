@@ -141,14 +141,16 @@ int32_t Run(CallbackSet *set, int id, ArgView *args, int nargs,
   return 0;
 }
 
-// The trampolines: one for each signature, with the callback id as a template
-// parameter. Each builds the argument list in the order the lowered executable
-// declares its parameters (`_lower.py`), which is the order of the callback
-// arguments.
+// The trampolines: one for each signature, with the scalar type and the
+// callback id as template parameters. `T` is only the type of the scalar
+// arguments diffsol passes by value; the array views take their dtype from the
+// set, and `ScalarArg` stores the value in that dtype. Each builds the argument
+// list in the order the lowered executable declares its parameters
+// (`_lower.py`), which is the order of the callback arguments.
 
-template <int Id>
-int32_t CbFn(const TensorView *x, const TensorView *p, double t,
-             TensorViewMut *y, void *ud) {
+template <typename T, int Id>
+int32_t CbFn(const TensorView *x, const TensorView *p, T t, TensorViewMut *y,
+             void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
   const Dtype d = set->dtype;
   ArgView args[3];
@@ -158,8 +160,8 @@ int32_t CbFn(const TensorView *x, const TensorView *p, double t,
   return Run(set, Id, args, 3, y);
 }
 
-template <int Id>
-int32_t CbMulFn(const TensorView *x, const TensorView *p, double t,
+template <typename T, int Id>
+int32_t CbMulFn(const TensorView *x, const TensorView *p, T t,
                 const TensorView *v, TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
   const Dtype d = set->dtype;
@@ -171,8 +173,8 @@ int32_t CbMulFn(const TensorView *x, const TensorView *p, double t,
   return Run(set, Id, args, 4, y);
 }
 
-template <int Id>
-int32_t CbInitFn(const TensorView *p, double t, TensorViewMut *y, void *ud) {
+template <typename T, int Id>
+int32_t CbInitFn(const TensorView *p, T t, TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
   const Dtype d = set->dtype;
   ArgView args[2];
@@ -182,8 +184,8 @@ int32_t CbInitFn(const TensorView *p, double t, TensorViewMut *y, void *ud) {
   return Run(set, Id, args, 2, y);
 }
 
-template <int Id>
-int32_t CbInitMulFn(const TensorView *p, double t, const TensorView *v,
+template <typename T, int Id>
+int32_t CbInitMulFn(const TensorView *p, T t, const TensorView *v,
                     TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
   const Dtype d = set->dtype;
@@ -197,9 +199,9 @@ int32_t CbInitMulFn(const TensorView *p, double t, const TensorView *v,
 // `y` is an input and the output: the executable gets a view of `y`, and writes
 // the result into the memory of `y` when it has finished. Thus the input and
 // the output can be the same memory.
-template <int Id>
-int32_t CbMassFn(const TensorView *v, const TensorView *p, double t,
-                 double beta, TensorViewMut *y, void *ud) {
+template <typename T, int Id>
+int32_t CbMassFn(const TensorView *v, const TensorView *p, T t, T beta,
+                 TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
   const Dtype d = set->dtype;
   ArgView args[5];
@@ -276,29 +278,40 @@ ArgView CallbackSet::ScalarArg(int slot, double value) {
   return ArgView{&s.value, {0, 0, 0}, 0, dtype};
 }
 
-void CallbackSet::Fill(OdeCallbacksDesc_f64 *d) {
-  auto has = [&](int id) { return Provides(id); };
-  d->rhs = has(kRhs) ? CbFn<kRhs> : nullptr;
-  d->rhs_jac = has(kRhsJac) ? CbMulFn<kRhsJac> : nullptr;
-  d->rhs_sens = has(kRhsSens) ? CbMulFn<kRhsSens> : nullptr;
-  d->rhs_adjoint = has(kRhsAdjoint) ? CbMulFn<kRhsAdjoint> : nullptr;
+namespace {
+
+// Point `d` at the trampolines of the callbacks that have an executable. The
+// two diffsol descriptor structs have the same field names, so one template
+// fills either; `T` is the scalar type of the matching one.
+template <typename T, typename Desc> void FillDesc(CallbackSet *set, Desc *d) {
+  auto has = [&](int id) { return set->Provides(id); };
+  d->rhs = has(kRhs) ? CbFn<T, kRhs> : nullptr;
+  d->rhs_jac = has(kRhsJac) ? CbMulFn<T, kRhsJac> : nullptr;
+  d->rhs_sens = has(kRhsSens) ? CbMulFn<T, kRhsSens> : nullptr;
+  d->rhs_adjoint = has(kRhsAdjoint) ? CbMulFn<T, kRhsAdjoint> : nullptr;
   d->rhs_sens_adjoint =
-      has(kRhsSensAdjoint) ? CbMulFn<kRhsSensAdjoint> : nullptr;
-  d->init = has(kInit) ? CbInitFn<kInit> : nullptr;
-  d->init_sens = has(kInitSens) ? CbInitMulFn<kInitSens> : nullptr;
+      has(kRhsSensAdjoint) ? CbMulFn<T, kRhsSensAdjoint> : nullptr;
+  d->init = has(kInit) ? CbInitFn<T, kInit> : nullptr;
+  d->init_sens = has(kInitSens) ? CbInitMulFn<T, kInitSens> : nullptr;
   d->init_sens_adjoint =
-      has(kInitSensAdjoint) ? CbInitMulFn<kInitSensAdjoint> : nullptr;
-  d->mass = has(kMass) ? CbMassFn<kMass> : nullptr;
-  d->mass_adjoint = has(kMassAdjoint) ? CbMassFn<kMassAdjoint> : nullptr;
-  d->out = has(kOut) ? CbFn<kOut> : nullptr;
-  d->out_jac = has(kOutJac) ? CbMulFn<kOutJac> : nullptr;
-  d->out_sens = has(kOutSens) ? CbMulFn<kOutSens> : nullptr;
-  d->out_adjoint = has(kOutAdjoint) ? CbMulFn<kOutAdjoint> : nullptr;
+      has(kInitSensAdjoint) ? CbInitMulFn<T, kInitSensAdjoint> : nullptr;
+  d->mass = has(kMass) ? CbMassFn<T, kMass> : nullptr;
+  d->mass_adjoint = has(kMassAdjoint) ? CbMassFn<T, kMassAdjoint> : nullptr;
+  d->out = has(kOut) ? CbFn<T, kOut> : nullptr;
+  d->out_jac = has(kOutJac) ? CbMulFn<T, kOutJac> : nullptr;
+  d->out_sens = has(kOutSens) ? CbMulFn<T, kOutSens> : nullptr;
+  d->out_adjoint = has(kOutAdjoint) ? CbMulFn<T, kOutAdjoint> : nullptr;
   d->out_sens_adjoint =
-      has(kOutSensAdjoint) ? CbMulFn<kOutSensAdjoint> : nullptr;
-  d->user_data = this;
+      has(kOutSensAdjoint) ? CbMulFn<T, kOutSensAdjoint> : nullptr;
+  d->user_data = set;
   d->free_user_data = nullptr;
 }
+
+} // namespace
+
+void CallbackSet::Fill(OdeCallbacksDesc_f64 *d) { FillDesc<double>(this, d); }
+
+void CallbackSet::Fill(OdeCallbacksDesc_f32 *d) { FillDesc<float>(this, d); }
 
 std::string CallbackSet::TakeError() {
   std::string e;

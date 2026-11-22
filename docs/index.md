@@ -73,7 +73,7 @@ many = jax.vmap(solve, (None, None, 0, None, None))(
 
 A problem holds the equations, the layouts and the solver; a solve takes the
 state, the times and the parameter values. Both layouts are pytrees: `state=2`
-and `params=4` above are shorthand for one flat `f64[2]` and one flat `f64[4]`,
+and `params=4` above are shorthand for one flat `[2]` and one flat `[4]` array,
 and a template declares anything else. For ML — a neural network inside the ODE,
 trained by gradient descent — the parameters are the network:
 

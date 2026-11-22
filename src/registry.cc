@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstring>
 #include <random>
+#include <type_traits>
 #include <unordered_map>
 
 namespace diffsol_jax {
@@ -23,6 +24,27 @@ uint64_t ProcessSalt() {
     return (static_cast<uint64_t>(rd()) << 32) ^ rd();
   }();
   return salt;
+}
+
+// Make the diffsol ODE of `instance` for the scalar type of `Desc`. The two
+// descriptor structs have the same field names, so one template builds either.
+template <typename Desc>
+OdeWrapper *MakeOde(Instance *instance, const ModelConfig &config,
+                    size_t nbatch) {
+  Desc desc = {};
+  desc.nstates = config.nstates;
+  desc.nparams = config.nparams;
+  desc.nout = config.nout;
+  instance->callbacks.Fill(&desc);
+  if constexpr (std::is_same_v<Desc, OdeCallbacksDesc_f32>) {
+    return diffsol_ode_new_callbacks_f32(&desc, config.matrix_type,
+                                         config.linear_solver,
+                                         config.ode_solver, nbatch);
+  } else {
+    return diffsol_ode_new_callbacks_f64(&desc, config.matrix_type,
+                                         config.linear_solver,
+                                         config.ode_solver, nbatch);
+  }
 }
 
 // splitmix64: a bijection, so different counters in one process give different
@@ -131,14 +153,11 @@ Instance *Model::Acquire(size_t nbatch, std::unique_lock<std::mutex> *lock,
   }
   *lock = std::unique_lock<std::mutex>(instance->mutex);
   if (instance->ode == nullptr) {
-    OdeCallbacksDesc_f64 desc = {};
-    desc.nstates = config_.nstates;
-    desc.nparams = config_.nparams;
-    desc.nout = config_.nout;
-    instance->callbacks.Fill(&desc);
-    instance->ode = diffsol_ode_new_callbacks_f64(&desc, config_.matrix_type,
-                                                  config_.linear_solver,
-                                                  config_.ode_solver, nbatch);
+    instance->ode = config_.dtype == Dtype::kF32
+                        ? MakeOde<OdeCallbacksDesc_f32>(instance, config_,
+                                                        nbatch)
+                        : MakeOde<OdeCallbacksDesc_f64>(instance, config_,
+                                                        nbatch);
     if (instance->ode == nullptr) {
       *err = "cannot make the diffsol ODE: " + DiffsolError(instance);
       lock->unlock();
@@ -212,14 +231,6 @@ int64_t NewModel(const ModelConfig &config, std::string *err) {
   }
   if (config.nstates == 0) {
     *err = "nstates must be greater than 0";
-    return 0;
-  }
-  // The callback trampolines take their scalars as `double` and fill an
-  // `OdeCallbacksDesc_f64`, so only f64 can be built yet; everything that
-  // describes the data layout already carries the dtype.
-  if (config.dtype != Dtype::kF64) {
-    *err = std::string("the dtype ") + DtypeName(config.dtype) +
-           " is not supported yet, only f64";
     return 0;
   }
   int64_t id = g_next_model++;

@@ -10,8 +10,9 @@
 // and the only variable of the layout is `P`. Each callback has one executable
 // for each `P`.
 //
-// The views carry the solver's dtype (`CallbackSet::dtype`); the trampoline
-// signatures are still f64, which is what makes this f64-only for now.
+// The views carry the solver's dtype (`CallbackSet::dtype`), and the
+// trampolines are templated on the scalar type: `Fill` has an overload for each
+// of the two diffsol descriptor structs, which have the same field names.
 #pragma once
 
 #include <array>
@@ -130,8 +131,10 @@ struct CallbackSet {
   // diffsol.
   bool Provides(int id) const { return !variants[id].list.empty(); }
   // Set the function pointers of the callbacks that have at least one
-  // executable.
+  // executable. The overload must match `dtype`: the trampolines of an f32
+  // solver take their scalars as `float`.
   void Fill(OdeCallbacksDesc_f64 *desc);
+  void Fill(OdeCallbacksDesc_f32 *desc);
   // Store scalar argument `slot` (`t` or `beta`) and return a view of it. PJRT
   // gets a view, so the value needs an address of its own.
   ArgView ScalarArg(int slot, double value);

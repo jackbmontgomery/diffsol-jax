@@ -28,7 +28,7 @@ Python, each module with one job:
 |---|---|
 | `_types.py` | the types of the public signatures, `DiffsolJaxError`. Imports nothing from the package, so everything else may import it |
 | `_layout.py` | `Layout`: one pytree flattened into one vector, and back |
-| `_equations.py` | the user functions over flat vectors, and the 15 diffsol callbacks derived from them by AD |
+| `_equations.py` | the user functions over flat vectors, the dtype they work in, and the 15 diffsol callbacks derived from them by AD |
 | `_lower.py` | one callback for all the lanes, lowered to StableHLO for a `(B, P)` |
 | `_native.py` | `libdiffsol_jax` and the PJRT plugin, and `Model`: the diffsol solver of one equation set with its cache of compiled callbacks |
 | `_problem.py` | `ODEProblem`: what the user declares, validated and wired together |
@@ -166,7 +166,8 @@ The executables depend on the number of lanes `B`. `B` is known only after
 
 ## Pytree layouts
 
-The solver core works on flat `f64[B, nstates]` and `f64[B, nparams]` buffers —
+The solver core works on flat `[B, nstates]` and `[B, nparams]` buffers, in the
+problem's dtype —
 the right representation for the callbacks, the sensitivity lanes, and the FFI.
 The pytree layouts of the state, the parameters and the output (`_layout.py`,
 one `Layout` each) are a thin boundary layer over them:
@@ -228,8 +229,8 @@ many solves), the backward solve runs the forward solve again from `params`,
 only memory.
 Forward mode (`ad="forward"`) uses diffsol forward sensitivities.
 
-Limits of the prototype: CPU only, `f64` only (see below), no `root`/`reset`,
-no derivative with respect to the times, no `vmap` over them.
+Limits of the prototype: CPU only, no `root`/`reset`, no derivative with
+respect to the times, no `vmap` over them.
 
 ## Build
 
@@ -276,39 +277,53 @@ no derivative with respect to the times, no `vmap` over them.
    Load `target/release/deps/libdiffsol_c.dylib`: it is the path that
    `libdiffsol_jax` links to, so only one copy of diffsol-c is in the process.
 
-## f32 and GPU (not done)
+## Dtypes
 
-### f32
+`ODEProblem(..., dtype=...)` takes `float64` (the default) or `float32`.
 
-diffsol-c already has the f32 side of the callback API
-(`diffsol_ode_new_callbacks_f32`), so f32 is reachable from here. Everything
-that describes the data layout carries a `Dtype` (`dtype.h`): the views, their
-PJRT buffer type, the layout checks, the staging buffers, the scalar slots, and
-the tensors diffsol returns. `ModelConfig::dtype` comes from Python through
-`diffsol_jax_model_new`, and `NewModel` rejects anything but f64 today.
+**`dtype` is a solver-precision knob, not a JAX x64 switch.**
+`jax_enable_x64` is required either way: the times are f64 (diffsol-c takes them
+as f64, and the precision of a time is not what `dtype` is for) and so is the
+`int64` adjoint checkpoint handle. What the dtype does set is the scalar type of
+the diffsol solver, of the compiled callbacks, and of `y0`, `params`, `ys` and
+the gradients. Inside a callback `t` is in the model's dtype, while `t_eval` at
+the solve boundary is f64.
 
-What is left:
+Where it reaches:
 
-- the callback trampolines take their scalars as `double` and fill an
-  `OdeCallbacksDesc_f64`. They want to be templated on the scalar type; the two
-  descriptor structs have the same field names, so one `Fill` template covers
-  both;
-- the FFI handlers are bound to `ffi::Buffer<ffi::F64>`. `ffi::AnyBuffer`
-  dispatches on `element_type()` at run time and keeps this at four registered
-  symbols instead of eight;
-- **the solve boundary stays f64 whatever the solver's dtype is**:
-  `diffsol_ode_solve_dense` and friends take `params`, `t_eval` and `dgdu` as
-  `const double *` even for an f32 ODE, and return f32 tensors. So an f32 model
-  needs a widening copy in the FFI handler (`CopyTensor`, and the reverse for
-  the operands). Dtype-generic solve entry points in diffsol-c would remove it.
+- `dtype.h` maps a `Dtype` to the size of a value, the PJRT buffer type and the
+  diffsol-c `ScalarType`. Nothing else tells f32 and f64 apart.
+- the callback views, the layout checks, the staging buffers, the scalar slots
+  and the output byte counts all take their element width from
+  `CallbackSet::dtype`. The trampolines are templated on the scalar type,
+  because diffsol passes `t` and `beta` by value; `CallbackSet::Fill` has an
+  overload for each descriptor struct, and `MakeOde` picks
+  `diffsol_ode_new_callbacks_f32` or `_f64`.
+- in Python the dtype lives on `Layout` and on `Equations`, so the lowered
+  callbacks get it from `eq.dtype` and `Layout.ravel` casts into it. The
+  primitives need no separate channel: every float operand and result of a solve
+  has the dtype of `params`, which `ODEProblem._pack` ravels into.
+- the FFI handlers bind `params`, `ys`, `sens`, `dgdu` and `grad` as
+  `ffi::AnyBuffer` and check them against the model's dtype at run time, so
+  there are still four registered symbols rather than eight.
 
-The intended contract: `dtype` is a *solver precision* knob, not a JAX x64
-switch. `jax_enable_x64` stays required, the times stay f64, and the `int64`
-checkpoint handle keeps working; `params`, `ys` and the gradients are in the
-model's dtype. `t` inside a callback is the model's dtype, while `t_eval` at the
-solve boundary is f64.
+**The solve boundary is f64 whatever the solver's dtype is.**
+`diffsol_ode_solve_dense` and friends take `params`, `t_eval` and `dgdu` as
+`const double *` even for an f32 ODE (diffsol-c converts internally), so
+`ffi_ops.cc` widens an f32 `params` and `dgdu` into a scratch buffer per call
+(`AsF64`; an f64 operand is passed through with no copy). The tensors diffsol
+returns are already in the model's dtype, so copying them out into `ys`, `sens`
+and `grad` needs no conversion. Dtype-generic solve entry points in diffsol-c
+would remove the widening; the `dgdu` one is the only sizeable copy
+(`[B, D, nt, nout]`).
 
-### GPU
+Tolerances follow the dtype, because f32 has an eps of 1.2e-7: `solve` defaults
+`rtol` and `atol` to `1e-6` for an f64 problem and `1e-4` for f32. At `1e-6` an
+f32 forward solve still works but the adjoint's Newton iteration diverges, so an
+f32 default of `1e-6` would make `jax.grad` fail out of the box. About `1e-5` is
+as tight as f32 goes.
+
+## GPU (not done)
 
 A GPU *solve* is not reachable from this repository: diffsol-c's matrix types
 are `nalgebra_dense`, `faer_dense` and `faer_sparse`, all of which are CPU, so

@@ -8,7 +8,13 @@ import numpy as np
 
 from . import _primitives
 from ._problem import ODEProblem
-from ._types import F64, Ad, ArrayLike, DiffsolJaxError, PyTree
+from ._types import F32, F64, Ad, ArrayLike, DiffsolJaxError, PyTree
+
+# The default solver tolerances, by the problem's dtype. f32 has an eps of 1.2e-7, so a
+# tolerance near 1e-6 leaves the error estimate and the Newton solve no headroom (the forward
+# solve manages, but the adjoint diverges); 1e-4 is about 800 eps. Tighten it explicitly if the
+# problem allows -- 1e-5 is about as far as f32 goes.
+DEFAULT_TOL = {F32: 1e-4, np.dtype(np.float64): 1e-6}
 
 
 def _concrete(x):
@@ -28,8 +34,8 @@ def solve(
     t1: float,
     *,
     saveat: ArrayLike | None = None,
-    rtol: float = 1e-6,
-    atol: float = 1e-6,
+    rtol: float | None = None,
+    atol: float | None = None,
     max_steps: int = 10_000,
     ad: Ad = "adjoint",
 ) -> PyTree:
@@ -47,8 +53,10 @@ def solve(
         saveat: the times to return the solution at, `[nt]`, increasing, each in `[t0, t1]`.
             The default returns it at `t1` alone. The solve ends at the last time it returns,
             so a `saveat` that stops short of `t1` does less work than one that reaches it.
-        rtol: the relative tolerance of the solver.
-        atol: the absolute tolerance of the solver.
+        rtol: the relative tolerance of the solver. The default depends on the problem's
+            dtype: `1e-6` for `float64`, `1e-4` for `float32`, which has an eps of 1.2e-7 and
+            cannot resolve much past `1e-5`.
+        atol: the absolute tolerance of the solver, with the same default as `rtol`.
         max_steps: the most time steps the solver may take to reach the last time it
             returns. A solve that needs more fails rather than running on, which is what a
             stiff problem under a non-stiff solver, or too tight a tolerance, looks like.
@@ -64,6 +72,10 @@ def solve(
     """
     if ad not in ("adjoint", "forward"):
         raise DiffsolJaxError("ad must be 'adjoint' or 'forward'")
+
+    default_tol = DEFAULT_TOL[problem.dtype]
+    rtol = default_tol if rtol is None else rtol
+    atol = default_tol if atol is None else atol
 
     max_steps = operator.index(max_steps)
     if max_steps < 1:

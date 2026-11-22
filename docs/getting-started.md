@@ -49,7 +49,9 @@ README's *Building (development)* section for the exact commands.
 
 ## Enable 64-bit floats
 
-The solver uses `f64`. JAX defaults to `f32`, so enable x64 once at startup:
+JAX defaults to `f32` arrays, so enable x64 once at startup (the solve needs it
+for the times and the adjoint checkpoint handles, whatever the solver's own
+precision -- see `dtype=` for that):
 
 ```python
 import jax
@@ -77,7 +79,7 @@ def lotka_volterra(y, p, t):
 problem = ODEProblem(lotka_volterra, state=2, params=4)
 ```
 
-`state=2` and `params=4` are the flat case: one `f64[2]` state and one `f64[4]`
+`state=2` and `params=4` are the flat case: one `[2]` state and one `[4]`
 parameter vector. Both can be pytrees instead — see
 [Pytrees](#pytrees-the-state-and-the-parameters).
 
@@ -160,7 +162,7 @@ The maths, the `ad=` option, and checkpointing are described in
 
 ## Pytrees: the state and the parameters
 
-`state=` and `params=` each take an int — one flat `f64[n]` array, as above — or
+`state=` and `params=` each take an int — one flat `[n]` array, as above — or
 a **template** pytree whose float-array leaves give the shapes and dtypes. The
 equations act on one lane of those pytrees.
 
@@ -256,6 +258,7 @@ The four options the diffsol solver is built with belong to the problem:
 | Argument          | Default            | Description                                                           |
 | ----------------- | ------------------ | --------------------------------------------------------------------- |
 | `solver`          | `"bdf"`            | `"bdf"`, `"esdirk34"`, `"tr_bdf2"` (implicit), `"tsit45"` (explicit). |
+| `dtype`           | `jnp.float64`      | `jnp.float32` runs the solver in single precision.                    |
 | `max_checkpoints` | `8`                | Adjoint checkpoints kept.                                             |
 | `linear_solver`   | `"default"`        | `"lu"` or `"klu"` (with `matrix_type="faer_sparse"`).                 |
 | `matrix_type`     | `"nalgebra_dense"` | `"faer_dense"` or `"faer_sparse"` for larger systems.                 |
@@ -264,13 +267,35 @@ The ones that are per solve belong to `solve`:
 
 | Argument       | Default        | Description                                     |
 | -------------- | -------------- | ----------------------------------------------- |
-| `rtol`, `atol` | `1e-6`, `1e-6` | Solver tolerances.                              |
+| `rtol`, `atol` | by dtype       | Solver tolerances: `1e-6` for an `f64` problem, `1e-4` for `f32`. |
 | `max_steps`    | `10000`        | The most time steps one solve may take.         |
 | `ad`           | `"adjoint"`    | Reverse mode: `"adjoint"` or `"forward"`.       |
 
 So comparing the two reverse modes, or tightening a tolerance, needs no second
 problem; changing the solver does (`problem.replace(solver=...)`), because that
 is a second diffsol solver.
+
+## Single precision
+
+`dtype=jnp.float32` runs the solver, its callbacks, and `y0`, `params`, `ys` and
+the gradients in `f32`:
+
+```python
+problem = ODEProblem(rhs, state=1, params=2, dtype=jnp.float32)
+ys = solve(problem, y0, p, t0, t1, saveat=ts)  # f32 in, f32 out
+```
+
+This is a precision choice, not a JAX x64 switch: keep
+`jax.config.update("jax_enable_x64", True)` either way, and the times stay `f64`
+(diffsol takes them as `f64`, and a `f32` time loses resolution at a large `t`).
+A value you pass in is cast to the problem's dtype, so an `f64` array is
+accepted and narrowed.
+
+`f32` has an eps of 1.2e-7, so `rtol` and `atol` default to `1e-4` for an `f32`
+problem rather than `1e-6`. Around `1e-5` is as tight as `f32` goes: below that
+the forward solve may still manage, but the adjoint's Newton iteration diverges.
+If a gradient fails with "Newton iteration diverged", loosen the tolerance or
+use `float64`.
 
 ## Where to go next
 

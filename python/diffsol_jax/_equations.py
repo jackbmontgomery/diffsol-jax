@@ -4,13 +4,14 @@ diffsol callbacks derived from them by AD."""
 import enum
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from ._layout import Layout
-from ._types import F64, DiffsolJaxError
+from ._types import DiffsolJaxError
 
 
 class CallbackId(enum.IntEnum):
@@ -61,12 +62,14 @@ class Callback:
 
 @dataclass(frozen=True)
 class Equations:
-    """The user equations as functions of the flat state and parameter vectors."""
+    """The user equations as functions of the flat state and parameter vectors, and the scalar
+    type the solver and its callbacks work in."""
 
     rhs: Callable
     init: Callable
     nstates: int
     nparams: int
+    dtype: Any
     out: Callable | None = None
     nout: int = 0
     mass: Callable | None = None
@@ -185,12 +188,12 @@ def over_flat(f, name, state: Layout, params: Layout, result: Layout):
     return wrapped
 
 
-def diagonal_mass(mask):
+def diagonal_mass(mask, dtype):
     """The diagonal mass of a boolean mask over the flat state, True denoting an algebraic
     entry: the rows of `rhs` it selects become algebraic equations."""
     if all(mask) or not any(mask):
         raise DiffsolJaxError("algebraic must mark some, not all, of the state")
-    diff = jnp.array([0.0 if a else 1.0 for a in mask], F64)
+    diff = jnp.array([0.0 if a else 1.0 for a in mask], dtype)
     return lambda v, p, t: diff * v
 
 
@@ -223,14 +226,14 @@ def check_mass_is_linear(mass, nstates, nparams):
         )
 
 
-def solution_layout(out, state: Layout, params: Layout) -> Layout:
+def solution_layout(out, state: Layout, params: Layout, dtype) -> Layout:
     """What `ys` comes back in: the state, or the structure `out` returns, found by shape
     tracing."""
     if out is None:
         return state
 
     def spec(*shape):
-        return jax.ShapeDtypeStruct(shape, F64)
+        return jax.ShapeDtypeStruct(shape, dtype)
 
     traced = jax.eval_shape(
         lambda a, p, t: out(state.unravel(a), params.unravel(p), t),
@@ -238,10 +241,10 @@ def solution_layout(out, state: Layout, params: Layout) -> Layout:
         spec(params.n),
         spec(),
     )
-    return Layout(traced, "out", constants=False)
+    return Layout(traced, "out", dtype, constants=False)
 
 
-def build(rhs, out, flat_mass, state: Layout, params: Layout, solution: Layout):
+def build(rhs, out, flat_mass, state: Layout, params: Layout, solution: Layout, dtype):
     """The equation set of a problem.
 
     diffsol's initial state is `init(p, t)`, a function of the parameters, so `y0` rides in the
@@ -264,6 +267,7 @@ def build(rhs, out, flat_mass, state: Layout, params: Layout, solution: Layout):
         init=lambda p, t: p[nparams:],
         nstates=state.n,
         nparams=nparams + state.n,
+        dtype=dtype,
         out=over_params(over_flat(out, "out", state, params, solution)),
         nout=0 if out is None else solution.n,
         mass=over_params(flat_mass),

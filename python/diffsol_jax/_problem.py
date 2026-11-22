@@ -7,11 +7,13 @@ from . import _equations
 from ._layout import Layout
 from ._native import Model
 from ._types import (
+    DTypeLike,
     DiffsolJaxError,
     LinearSolver,
     MatrixType,
     PyTree,
     Solver,
+    solver_dtype,
 )
 
 
@@ -24,7 +26,7 @@ class ODEProblem:
     callbacks and its adjoint checkpoints, is built once and lives as long as the problem.
 
     The state and the parameters are pytrees, declared by `state=` and `params=`. Each is
-    either an int `n`, meaning one flat `f64[n]` array, or a template pytree: its float-array
+    either an int `n`, meaning one flat `dtype[n]` array, or a template pytree: its float-array
     leaves carry the shapes and dtypes, and `jax.eval_shape(make_net, key)` does as well as a
     network. The equations then act on one lane of those pytrees.
 
@@ -47,6 +49,12 @@ class ODEProblem:
         linear_solver: `default`, `lu`, or `klu`.
         matrix_type: `nalgebra_dense`, `faer_dense`, or `faer_sparse`.
         max_checkpoints: how many adjoint checkpoints to keep alive at once.
+        dtype: the scalar type the solver works in, `float64` (the default) or `float32`. This
+            is the dtype of `y0`, `params`, `ys` and the gradients, and of the `y`, `p` and `t`
+            the equations see. It is a solver-precision choice, not a JAX x64 switch:
+            `jax_enable_x64` is still required, and the times stay `float64` either way. An
+            `f32` solve needs looser tolerances than the defaults -- around `1e-5` is the most
+            `f32` can resolve.
     """
 
     def __init__(
@@ -62,6 +70,7 @@ class ODEProblem:
         linear_solver: LinearSolver = "default",
         matrix_type: MatrixType = "nalgebra_dense",
         max_checkpoints: int = 8,
+        dtype: DTypeLike = jnp.float64,
     ):
         if not jax.config.read("jax_enable_x64"):
             raise DiffsolJaxError("diffsol_jax needs jax_enable_x64")
@@ -83,17 +92,21 @@ class ODEProblem:
             "linear_solver": linear_solver,
             "matrix_type": matrix_type,
             "max_checkpoints": max_checkpoints,
+            "dtype": dtype,
         }
         self.solver, self.linear_solver = solver, linear_solver
         self.matrix_type, self.max_checkpoints = matrix_type, max_checkpoints
+        self.dtype = solver_dtype(dtype)
 
-        self.state = Layout(state, "state", constants=False)
-        self.params = Layout(params, "params")
+        self.state = Layout(state, "state", self.dtype, constants=False)
+        self.params = Layout(params, "params", self.dtype)
         if self.state.n < 1:
             raise DiffsolJaxError("state must have at least one entry")
         self.nstates, self.nparams = self.state.n, self.params.n
         # what `ys` comes back in: the state, or whatever `out` returns
-        self.solution = _equations.solution_layout(out, self.state, self.params)
+        self.solution = _equations.solution_layout(
+            out, self.state, self.params, self.dtype
+        )
         self.nout = 0 if out is None else self.solution.n
         self.nsolution = self.solution.n
 
@@ -104,7 +117,7 @@ class ODEProblem:
                 "solver='bdf', 'esdirk34' or 'tr_bdf2'"
             )
         self.eq = _equations.build(
-            rhs, out, flat_mass, self.state, self.params, self.solution
+            rhs, out, flat_mass, self.state, self.params, self.solution, self.dtype
         )
         self._model = Model(
             self.eq,
@@ -117,7 +130,7 @@ class ODEProblem:
     def _flat_mass(self, mass, algebraic):
         """The mass matrix action over the flat state, from `mass` or the `algebraic` mask."""
         if algebraic is not None:
-            return _equations.diagonal_mass(self.state.mask(algebraic))
+            return _equations.diagonal_mass(self.state.mask(algebraic), self.dtype)
         flat_mass = _equations.over_flat(
             mass, "mass", self.state, self.params, self.state
         )
@@ -129,7 +142,10 @@ class ODEProblem:
         parts = [repr(self.state), repr(self.params)]
         if self.solution is not self.state:
             parts.append(repr(self.solution))
-        return f"ODEProblem({', '.join(parts)}, solver={self.solver!r})"
+        parts.append(f"solver={self.solver!r}")
+        if self.dtype != jnp.float64:
+            parts.append(f"dtype={self.dtype.name}")
+        return f"ODEProblem({', '.join(parts)})"
 
     def replace(self, **changes) -> "ODEProblem":
         """A problem with the given arguments replaced, and so with its own diffsol solver:

@@ -7,10 +7,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from . import _primitives
-from ._lib import DiffsolJaxError
-from ._params import F64
 from ._problem import ODEProblem
-from ._types import Ad, ArrayLike, PyTree
+from ._types import F64, Ad, ArrayLike, DiffsolJaxError, PyTree
 
 
 def _concrete(x):

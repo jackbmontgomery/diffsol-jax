@@ -1,69 +1,18 @@
-import weakref
 from collections.abc import Callable, Sequence
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
-from . import _lib, _lower
-from ._lib import DiffsolJaxError
-from ._lower import Equations
-from ._params import F64, Layout
-from ._types import LinearSolver, MatrixType, PyTree, Solver
-
-ODE_SOLVERS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
-LINEAR_SOLVERS = {"default": 0, "lu": 1, "klu": 2}
-MATRIX_TYPES = {"nalgebra_dense": 0, "faer_dense": 1, "faer_sparse": 2}
-
-
-def _one_of(name, value, table):
-    if value not in table:
-        raise DiffsolJaxError(
-            f"{name} must be one of {', '.join(table)}, got {value!r}"
-        )
-    return table[value]
-
-
-def _diagonal_mass(mask):
-    """The diagonal mass of a boolean mask over the flat state, True denoting an algebraic
-    entry: the rows of `rhs` it selects become algebraic equations."""
-    if all(mask) or not any(mask):
-        raise DiffsolJaxError("algebraic must mark some, not all, of the state")
-    diff = jnp.array([0.0 if a else 1.0 for a in mask], F64)
-    return lambda v, p, t: diff * v
-
-
-def _check_mass_is_linear(mass, nstates, nparams):
-    """Check at a random point that `mass(v, p, t)` is linear in `v` and independent of `p`"""
-    rng = np.random.default_rng(0)
-    v1, v2 = (
-        jnp.asarray(rng.standard_normal(nstates)),
-        jnp.asarray(rng.standard_normal(nstates)),
-    )
-    p1, p2 = (
-        jnp.asarray(rng.standard_normal(nparams)),
-        jnp.asarray(rng.standard_normal(nparams)),
-    )
-    t = 0.37
-    a, b = 2.3, -1.7
-    lhs = mass(a * v1 + b * v2, p1, t)
-    rhs = a * mass(v1, p1, t) + b * mass(v2, p1, t)
-    if not np.allclose(np.asarray(lhs), np.asarray(rhs), rtol=1e-9, atol=1e-9):
-        raise DiffsolJaxError(
-            "mass(v, p, t) must be linear in v (the action of a mass matrix)"
-        )
-    if not np.allclose(
-        np.asarray(mass(v1, p1, t)), np.asarray(mass(v1, p2, t)), rtol=1e-9
-    ):
-        raise DiffsolJaxError(
-            "mass(v, p, t) must not depend on p: the diffsol sensitivities have no dM/dp term, "
-            "so the gradient would be wrong. Fold the parameter into rhs instead (for example "
-            "divide the differential equations by it, or scale the algebraic equations)"
-        )
-
-
-def _spec(*shape):
-    return jax.ShapeDtypeStruct(shape, F64)
+from . import _equations
+from ._layout import Layout
+from ._native import Model
+from ._types import (
+    DiffsolJaxError,
+    LinearSolver,
+    MatrixType,
+    PyTree,
+    Solver,
+)
 
 
 @jax.tree_util.register_static
@@ -137,88 +86,44 @@ class ODEProblem:
         }
         self.solver, self.linear_solver = solver, linear_solver
         self.matrix_type, self.max_checkpoints = matrix_type, max_checkpoints
+
         self.state = Layout(state, "state", constants=False)
         self.params = Layout(params, "params")
         if self.state.n < 1:
             raise DiffsolJaxError("state must have at least one entry")
-        nstates, nparams = self.state.n, self.params.n
-        self.nstates, self.nparams = nstates, nparams
-
-        # the wrappers close over the layouts, not over `self`: a reference from `self.eq` back
-        # to `self` would be a cycle, and the native solver would outlive the problem until the
-        # next gc pass
-        state, params_layout = self.state, self.params
-
-        def over_flat(f, name, result):
-            """`f` over the pytrees, as a function of the flat vectors."""
-            if f is None:
-                return None
-
-            def wrapped(a, p, t):
-                y = f(state.unravel(a), params_layout.unravel(p), t)
-                return result.ravel(y, f"the result of {name}")
-
-            return wrapped
-
+        self.nstates, self.nparams = self.state.n, self.params.n
         # what `ys` comes back in: the state, or whatever `out` returns
-        self.solution = self.state
-        if out is not None:
-            self.solution = Layout(
-                jax.eval_shape(
-                    lambda a, p, t: out(state.unravel(a), params_layout.unravel(p), t),
-                    _spec(nstates),
-                    _spec(nparams),
-                    _spec(),
-                ),
-                "out",
-                constants=False,
-            )
+        self.solution = _equations.solution_layout(out, self.state, self.params)
         self.nout = 0 if out is None else self.solution.n
         self.nsolution = self.solution.n
-        if algebraic is not None:
-            mask = self.state.mask(algebraic)
-            flat_mass = _diagonal_mass(mask)
-        else:
-            flat_mass = over_flat(mass, "mass", self.state)
-            if flat_mass is not None:
-                _check_mass_is_linear(flat_mass, nstates, nparams)
+
+        flat_mass = self._flat_mass(mass, algebraic)
         if flat_mass is not None and solver == "tsit45":
             raise DiffsolJaxError(
                 "a problem with a mass matrix (a DAE) needs an implicit solver: "
                 "solver='bdf', 'esdirk34' or 'tr_bdf2'"
             )
-
-        # diffsol's initial state is `init(p, t)`, a function of the parameters, so `y0` rides
-        # in the tail of the internal parameter vector `[params, y0]`. Then `init` is a slice:
-        # `init_sens` is the constant selection matrix `[0 | I]`, and the gradient with respect
-        # to `y0` comes out of the existing sensitivity and adjoint callbacks with no special
-        # case. The user equations only see the `params` head.
-        def over_params(f):
-            return None if f is None else lambda a, p, t: f(a, p[:nparams], t)
-
-        self.eq = Equations(
-            over_params(over_flat(rhs, "rhs", self.state)),
-            lambda p, t: p[nparams:],
-            nstates,
-            nparams + nstates,
-            over_params(over_flat(out, "out", self.solution)),
-            self.nout,
-            over_params(flat_mass),
+        self.eq = _equations.build(
+            rhs, out, flat_mass, self.state, self.params, self.solution
         )
-        so = _lib.lib()
-        self._id = _lib.call(
-            so.diffsol_jax_model_new,
-            nstates,
-            self.eq.nparams,
-            self.nout,
-            _one_of("matrix_type", matrix_type, MATRIX_TYPES),
-            _one_of("linear_solver", linear_solver, LINEAR_SOLVERS),
-            _one_of("solver", solver, ODE_SOLVERS),
-            max_checkpoints,
+        self._model = Model(
+            self.eq,
+            solver=solver,
+            linear_solver=linear_solver,
+            matrix_type=matrix_type,
+            max_checkpoints=max_checkpoints,
         )
-        # the solver is freed with the problem
-        self._finalizer = weakref.finalize(self, so.diffsol_jax_model_free, self._id)
-        self._compile_options = None
+
+    def _flat_mass(self, mass, algebraic):
+        """The mass matrix action over the flat state, from `mass` or the `algebraic` mask."""
+        if algebraic is not None:
+            return _equations.diagonal_mass(self.state.mask(algebraic))
+        flat_mass = _equations.over_flat(
+            mass, "mass", self.state, self.params, self.state
+        )
+        if flat_mass is not None:
+            _equations.check_mass_is_linear(flat_mass, self.nstates, self.nparams)
+        return flat_mass
 
     def __repr__(self):
         parts = [repr(self.state), repr(self.params)]
@@ -251,81 +156,23 @@ class ODEProblem:
         """`ys [..., nt, nsolution]` as the solution pytree, each leaf `[..., nt, *shape]`."""
         return self.solution.unpack(ys)
 
-    # ---- callbacks ----------------------------------------------------------------------------
-
-    def _options(self):
-        if self._compile_options is None:
-            from jax._src.lib import xla_client
-
-            self._compile_options = xla_client.CompileOptions().SerializeAsString()
-        return self._compile_options
-
-    def _add(self, cb, nbatch, p):
-        so = _lib.lib()
-        if so.diffsol_jax_model_has_variant(self._id, nbatch, int(cb), p):
-            return
-        code = _lower.lower(self.eq, cb, nbatch, p)
-        opts = self._options()
-        _lib.call(
-            so.diffsol_jax_model_add_variant,
-            self._id,
-            nbatch,
-            int(cb),
-            p,
-            code,
-            len(code),
-            opts,
-            len(opts),
-        )
-
-    def _ensure_callbacks(self, kind, nbatch, ndirections=1):
-        """Compile the callbacks that a solve of `kind` with `nbatch` lanes needs (called by the
-        lowering rules). All the callbacks get a `P = 1` executable, so the set of callbacks of
-        the diffsol ODE does not change between solve kinds."""
-        available = self.eq.available()
-        for cb in available:
-            self._add(cb, nbatch, 1)
-        if kind == "fwd_sens" and self.eq.nparams > 1:
-            for cb in _lower.FWD_SENS_MULTI_P:
-                if cb in available:
-                    self._add(cb, nbatch, self.eq.nparams)
-        if kind == "vjp_bkwd" and ndirections > 1:
-            for cb in _lower.VJP_BKWD_MULTI_P:
-                if cb in available:
-                    self._add(cb, nbatch, ndirections)
-
     # ---- counters ----------------------------------------------------------------------------
 
     def clear_checkpoints(self):
         """Free the adjoint checkpoints kept for pending backward solves."""
-        _lib.lib().diffsol_jax_model_clear_checkpoints(self._id)
+        self._model.clear_checkpoints()
 
     def num_checkpoints(self) -> int:
         """How many adjoint checkpoints are alive."""
-        return _lib.lib().diffsol_jax_model_num_checkpoints(self._id)
+        return self._model.num_checkpoints()
 
     def num_recomputes(self) -> int:
         """The number of backward solves that ran the forward solve again, because the
         registry had freed their checkpoint."""
-        return _lib.lib().diffsol_jax_model_num_recomputes(self._id)
+        return self._model.num_recomputes()
 
     def callback_stats(self, nbatch: int, reset: bool = False):
         """`(ncalls, nstaged, nviews)` for the solver with `nbatch` lanes: the number of callback
         calls, of inputs copied because they were not 64-byte aligned, and of PJRT views made
         (the misses of the view cache)."""
-        import ctypes
-
-        ncalls, nstaged, nviews = (
-            ctypes.c_uint64(),
-            ctypes.c_uint64(),
-            ctypes.c_uint64(),
-        )
-        ok = _lib.lib().diffsol_jax_model_stats(
-            self._id,
-            nbatch,
-            ctypes.byref(ncalls),
-            ctypes.byref(nstaged),
-            ctypes.byref(nviews),
-            int(reset),
-        )
-        return (ncalls.value, nstaged.value, nviews.value) if ok else (0, 0, 0)
+        return self._model.callback_stats(nbatch, reset)

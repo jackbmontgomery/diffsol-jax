@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-from diffsol_jax import _lib
+from diffsol_jax import _native
 
 
 def test_environment_variable_wins(monkeypatch, tmp_path):
@@ -13,7 +13,7 @@ def test_environment_variable_wins(monkeypatch, tmp_path):
     module = types.ModuleType("diffsol_jax_pjrt_cpu")
     module.library_path = lambda: tmp_path / "libpjrt_cpu.so"
     monkeypatch.setitem(sys.modules, "diffsol_jax_pjrt_cpu", module)
-    assert _lib._find_plugin() == "/some/plugin.so"
+    assert _native._find_plugin() == "/some/plugin.so"
 
 
 def test_installed_package(monkeypatch, tmp_path):
@@ -21,7 +21,7 @@ def test_installed_package(monkeypatch, tmp_path):
     module = types.ModuleType("diffsol_jax_pjrt_cpu")
     module.library_path = lambda: tmp_path / "libpjrt_cpu.so"
     monkeypatch.setitem(sys.modules, "diffsol_jax_pjrt_cpu", module)
-    assert _lib._find_plugin() == str(tmp_path / "libpjrt_cpu.so")
+    assert _native._find_plugin() == str(tmp_path / "libpjrt_cpu.so")
 
 
 def test_error_names_the_extra(monkeypatch, tmp_path):
@@ -29,7 +29,9 @@ def test_error_names_the_extra(monkeypatch, tmp_path):
     # `None` in `sys.modules` makes the import raise, as if the extra were not installed.
     monkeypatch.setitem(sys.modules, "diffsol_jax_pjrt_cpu", None)
     # point the fallback directories somewhere empty
-    monkeypatch.setattr(_lib.Path, "home", classmethod(lambda cls: tmp_path))
-    monkeypatch.setattr(_lib, "__file__", str(tmp_path / "a" / "b" / "c" / "_lib.py"))
-    with pytest.raises(_lib.DiffsolJaxError, match=r"diffsol-jax\[cpu\]"):
-        _lib._find_plugin()
+    monkeypatch.setattr(_native.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(
+        _native, "__file__", str(tmp_path / "a" / "b" / "c" / "_native.py")
+    )
+    with pytest.raises(_native.DiffsolJaxError, match=r"diffsol-jax\[cpu\]"):
+        _native._find_plugin()

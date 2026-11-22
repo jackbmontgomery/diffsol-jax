@@ -1,29 +1,21 @@
-import enum
-from collections.abc import Callable
-from dataclasses import dataclass
+"""Lowering a callback to StableHLO: the function for all the lanes, compiled for `B` lanes and
+`P` lanes on the `P` axis.
+
+Lane layout (from the diffsol-c test `lane_layout_rule`): diffsol calls a callback with views of
+the shape `[n, P, B]` (column-major), which as row-major arrays with no copy are the shapes in
+`_equations.LANE_ROLES` and `FULL_ROLES`. The only variable of the layout is `P`, so each
+callback has one executable for each `P` it is called with.
+"""
+
+import functools
 
 import jax
-import jax.numpy as jnp
 
+from ._equations import FULL_ROLES, SCALAR_ROLES, CallbackId, Equations
+from ._types import F64
 
-class CallbackId(enum.IntEnum):
-    RHS = 0
-    RHS_JAC = 1
-    RHS_SENS = 2
-    RHS_ADJOINT = 3
-    RHS_SENS_ADJOINT = 4
-    INIT = 5
-    INIT_SENS = 6
-    INIT_SENS_ADJOINT = 7
-    MASS = 8
-    MASS_ADJOINT = 9
-    OUT = 10
-    OUT_JAC = 11
-    OUT_SENS = 12
-    OUT_ADJOINT = 13
-    OUT_SENS_ADJOINT = 14
-
-
+# The callbacks a solve calls with `P > 1`: the forward-sensitivity solve puts all `nparams`
+# sensitivity columns through one call, and the backward solve all the directions.
 FWD_SENS_MULTI_P = (CallbackId.RHS_JAC, CallbackId.OUT_JAC, CallbackId.MASS)
 VJP_BKWD_MULTI_P = (
     CallbackId.RHS_ADJOINT,
@@ -35,190 +27,50 @@ VJP_BKWD_MULTI_P = (
 )
 
 
-@dataclass(frozen=True)
-class Equations:
-    rhs: Callable
-    init: Callable
-    nstates: int
-    nparams: int
-    out: Callable | None = None
-    nout: int = 0
-    mass: Callable | None = None
+def batched(eq: Equations, cb_id: CallbackId):
+    """The callback for all the lanes, and the shapes of its arguments for `B` lanes and `P`
+    lanes on the `P` axis.
 
-    def available(self):
-        ids = [
-            CallbackId.RHS,
-            CallbackId.RHS_JAC,
-            CallbackId.RHS_SENS,
-            CallbackId.RHS_ADJOINT,
-            CallbackId.RHS_SENS_ADJOINT,
-            CallbackId.INIT,
-            CallbackId.INIT_SENS,
-            CallbackId.INIT_SENS_ADJOINT,
-        ]
-        if self.mass is not None:
-            ids += [CallbackId.MASS, CallbackId.MASS_ADJOINT]
-        if self.out is not None:
-            ids += [
-                CallbackId.OUT,
-                CallbackId.OUT_JAC,
-                CallbackId.OUT_SENS,
-                CallbackId.OUT_ADJOINT,
-                CallbackId.OUT_SENS_ADJOINT,
-            ]
-        return ids
-
-
-def _jvp(f, primal, tangent):
-    return jax.jvp(f, (primal,), (tangent,))[1]
-
-
-def _neg_vjp(f, primal, cotangent):
-    return -jax.vjp(f, primal)[1](cotangent)[0]
-
-
-def _lane_fn(eq: Equations, cb: CallbackId):
-    n, npar = eq.nstates, eq.nparams
-    f, g, h, m = eq.rhs, eq.init, eq.out, eq.mass
-    no = eq.nout
-    C = CallbackId
-    table = {
-        C.RHS: ("fn", lambda x, p, t: f(x, p, t), 0, n),
-        C.RHS_JAC: ("mul", lambda x, p, t, v: _jvp(lambda x: f(x, p, t), x, v), n, n),
-        C.RHS_SENS: (
-            "mul",
-            lambda x, p, t, v: _jvp(lambda p: f(x, p, t), p, v),
-            npar,
-            n,
-        ),
-        C.RHS_ADJOINT: (
-            "mul",
-            lambda x, p, t, v: _neg_vjp(lambda x: f(x, p, t), x, v),
-            n,
-            n,
-        ),
-        C.RHS_SENS_ADJOINT: (
-            "mul",
-            lambda x, p, t, v: _neg_vjp(lambda p: f(x, p, t), p, v),
-            n,
-            npar,
-        ),
-        C.INIT: ("init", lambda p, t: g(p, t), 0, n),
-        C.INIT_SENS: (
-            "initmul",
-            lambda p, t, v: _jvp(lambda p: g(p, t), p, v),
-            npar,
-            n,
-        ),
-        C.INIT_SENS_ADJOINT: (
-            "initmul",
-            lambda p, t, v: _neg_vjp(lambda p: g(p, t), p, v),
-            n,
-            npar,
-        ),
+    Every lane has its own arrays and they share the scalars, so the outer `vmap` is over every
+    argument but the scalars. The `P` axis is on `v` and `y` alone, so the inner `vmap` is over
+    those -- and a callback with no `v` has no `P` axis at all and returns `[B, ny]`, which is
+    the same bytes as the `[B, 1, ny]` output view diffsol gives it.
+    """
+    cb = eq.callbacks()[cb_id]
+    shape = {
+        "x": lambda B, P: (B, eq.nstates),
+        "p": lambda B, P: (B, eq.nparams),
+        "t": lambda B, P: (),
+        "beta": lambda B, P: (),
+        "v": lambda B, P: (B, P, cb.nv),
+        "y": lambda B, P: (B, P, cb.ny),
     }
-    if m is not None:
-        table[C.MASS] = ("mass", lambda v, p, t, beta, y: m(v, p, t) + beta * y, n, n)
-        table[C.MASS_ADJOINT] = (
-            "mass",
-            # M^T v (not negative), from the VJP of the linear map v -> M v
-            lambda v, p, t, beta, y: (
-                jax.vjp(lambda u: m(u, p, t), v)[1](v)[0] + beta * y
-            ),
-            n,
-            n,
-        )
-    if h is not None:
-        table[C.OUT] = ("fn", lambda x, p, t: h(x, p, t), 0, no)
-        table[C.OUT_JAC] = (
-            "mul",
-            lambda x, p, t, v: _jvp(lambda x: h(x, p, t), x, v),
-            n,
-            no,
-        )
-        table[C.OUT_SENS] = (
-            "mul",
-            lambda x, p, t, v: _jvp(lambda p: h(x, p, t), p, v),
-            npar,
-            no,
-        )
-        table[C.OUT_ADJOINT] = (
-            "mul",
-            lambda x, p, t, v: _neg_vjp(lambda x: h(x, p, t), x, v),
-            no,
-            n,
-        )
-        table[C.OUT_SENS_ADJOINT] = (
-            "mul",
-            lambda x, p, t, v: _neg_vjp(lambda p: h(x, p, t), p, v),
-            no,
-            npar,
-        )
-    return table[cb]
 
-
-def batched(eq: Equations, cb: CallbackId):
-    """The callback for all the lanes, with the executable layouts, and its argument shapes for
-    `B` lanes and `P` lanes on `P`."""
-    kind, fn, nv, ny = _lane_fn(eq, cb)
-    vmap = jax.vmap
-    f64 = jnp.float64
-
-    def spec(*shape):
-        return jax.ShapeDtypeStruct(shape, f64)
+    fn = cb.fn
+    if any(role in FULL_ROLES for role in cb.args):
+        fn = jax.vmap(fn, tuple(0 if r in FULL_ROLES else None for r in cb.args))
+    all_lanes = jax.vmap(fn, tuple(None if r in SCALAR_ROLES else 0 for r in cb.args))
 
     def shapes(B, P):
-        x, p, t = spec(B, eq.nstates), spec(B, eq.nparams), spec()
-        v = spec(B, P, nv)
-        y = spec(B, P, ny)
-        return {
-            "fn": (x, p, t),
-            "mul": (x, p, t, v),
-            "init": (p, t),
-            "initmul": (p, t, v),
-            "mass": (v, p, t, spec(), y),
-        }[kind]
-
-    if kind == "fn":
-        # `[B, ny]`, the same bytes as the `[B, 1, ny]` output view that diffsol gives: a
-        # `reshape` to that shape costs XLA:CPU a whole kernel that is only a copy
-        def all_lanes(x, p, t):
-            return vmap(fn, (0, 0, None))(x, p, t)
-
-    elif kind == "init":
-
-        def all_lanes(p, t):
-            return vmap(fn, (0, None))(p, t)
-
-    elif kind == "mul":
-        over_p = vmap(fn, (None, None, None, 0))
-
-        def all_lanes(x, p, t, v):
-            return vmap(over_p, (0, 0, None, 0))(x, p, t, v)
-
-    elif kind == "initmul":
-        over_p = vmap(fn, (None, None, 0))
-
-        def all_lanes(p, t, v):
-            return vmap(over_p, (0, None, 0))(p, t, v)
-
-    else:  # mass
-        over_p = vmap(fn, (0, None, None, None, 0))
-
-        def all_lanes(v, p, t, beta, y):
-            return vmap(over_p, (0, 0, None, None, 0))(v, p, t, beta, y)
+        return tuple(jax.ShapeDtypeStruct(shape[role](B, P), F64) for role in cb.args)
 
     return all_lanes, shapes
 
 
-def _serialize(module) -> bytes:
+def lower(eq: Equations, cb_id: CallbackId, B: int, P: int) -> bytes:
+    """The StableHLO of callback `cb_id` for `B` lanes and `P` lanes on the `P` axis."""
     from jax._src.lib.mlir.dialects import hlo
 
+    all_lanes, shapes = batched(eq, cb_id)
+    lowered = jax.jit(all_lanes, keep_unused=True).lower(*shapes(B, P))
+    module = lowered.compiler_ir("stablehlo")
     return hlo.serialize_portable_artifact_str(str(module), hlo.get_minimum_version())
 
 
-def lower(eq: Equations, cb: CallbackId, B: int, P: int) -> bytes:
-    """The StableHLO of callback `cb` for `B` lanes and `P` lanes on `P`."""
-    all_lanes, shapes = batched(eq, cb)
-    lowered = jax.jit(all_lanes, keep_unused=True).lower(*shapes(B, P))
-    return _serialize(lowered.compiler_ir("stablehlo"))
+@functools.cache
+def compile_options() -> bytes:
+    """The serialized `xla.CompileOptionsProto` the callbacks are compiled with. It is the same
+    for every callback of every problem in the process."""
+    from jax._src.lib import xla_client
+
+    return xla_client.CompileOptions().SerializeAsString()

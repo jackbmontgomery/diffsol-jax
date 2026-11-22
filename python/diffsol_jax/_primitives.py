@@ -12,17 +12,6 @@ from jax.experimental.hijax import (
 )
 
 
-def _ffi(target, out_avals, *args, problem, rtol, atol, max_steps):
-    out_types = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in out_avals]
-    return jax.ffi.ffi_call(target, out_types)(
-        *args,
-        model_id=np.int64(problem._id),
-        rtol=np.float64(rtol),
-        atol=np.float64(atol),
-        max_steps=np.int64(max_steps),
-    )
-
-
 def _f64(shape):
     return ShapedArray(shape, jnp.float64)
 
@@ -31,10 +20,55 @@ def _ys_aval(params_aval, t_eval_aval, problem):
     return _f64(params_aval.shape[:-1] + (t_eval_aval.shape[0], problem.nsolution))
 
 
-class _LaneOp(HiPrim):
+class _DiffsolPrim(HiPrim):
+    """A primitive that calls diffsol through the FFI. It carries the problem and the solver
+    settings, which together are what an FFI call needs beyond its operands."""
+
+    def _configure(self, problem, rtol, atol, max_steps):
+        """Record the solve configuration. Must run before `HiPrim.__init__`, which turns
+        `params` into attributes."""
+        self.params = {
+            "_problem": problem,
+            "rtol": rtol,
+            "atol": atol,
+            "max_steps": max_steps,
+        }
+
+    def _kw(self):
+        return {
+            "problem": self._problem,
+            "rtol": self.rtol,
+            "atol": self.atol,
+            "max_steps": self.max_steps,
+        }
+
+    def _call_ffi(self, target, kind, args, nbatch, ndirections=1):
+        """Compile the callbacks this solve needs, then make the FFI call. Returns a tuple when
+        the primitive has several outputs, and the one output otherwise."""
+        self._problem._model.ensure_callbacks(kind, nbatch, ndirections)
+        many = isinstance(self.out_aval, tuple)
+        avals = self.out_aval if many else (self.out_aval,)
+        out_types = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in avals]
+        outs = jax.ffi.ffi_call(target, out_types)(
+            *args,
+            model_id=np.int64(self._problem._model.id),
+            rtol=np.float64(self.rtol),
+            atol=np.float64(self.atol),
+            max_steps=np.int64(self.max_steps),
+        )
+        return tuple(outs) if many else outs[0]
+
+
+class _LaneOp(_DiffsolPrim):
     """An operation on (params [*B, np], t0 f64[], t_eval [nt]) whose vmapped `params` axis
     becomes more lanes: the axis goes to the front, and the operation runs once for all the
-    lanes. `t0` and `t_eval` are the same for every lane."""
+    lanes. `t0` and `t_eval` are the same for every lane.
+
+    Subclasses give the FFI target, the solve kind the callbacks are compiled for, and the
+    shapes of the outputs."""
+
+    target: str
+    kind: str
 
     def __init__(
         self,
@@ -49,24 +83,16 @@ class _LaneOp(HiPrim):
     ):
         self.in_avals = (params_aval, t0_aval, t_eval_aval)
         self.out_aval = self._out_aval(params_aval, t_eval_aval, problem)
-        self.params = {
-            "_problem": problem,
-            "rtol": rtol,
-            "atol": atol,
-            "max_steps": max_steps,
-        }
+        self._configure(problem, rtol, atol, max_steps)
         super().__init__()
-
-    def _kw(self):
-        return {
-            "problem": self._problem,
-            "rtol": self.rtol,
-            "atol": self.atol,
-            "max_steps": self.max_steps,
-        }
 
     def _nbatch(self):
         return math.prod(self.in_avals[0].shape[:-1])
+
+    def expand(self, params, t0, t_eval):
+        return self._call_ffi(
+            self.target, self.kind, (params, t0, t_eval), self._nbatch()
+        )
 
     def batch(self, axis_data, args, dims):
         params, t0, t_eval = args
@@ -88,22 +114,19 @@ class _VjpFwdOp(_LaneOp):
     """The forward solve of the adjoint: -> (ys, handle s64[*B]). The checkpoint stays in C++;
     `handle` names it in the registry."""
 
+    target, kind = "diffsol_solve_vjp_fwd", "vjp_fwd"
+
     def _out_aval(self, params_aval, t_eval_aval, problem):
         return (
             _ys_aval(params_aval, t_eval_aval, problem),
             ShapedArray(params_aval.shape[:-1], jnp.int64),
         )
 
-    def expand(self, params, t0, t_eval):
-        self._problem._ensure_callbacks("vjp_fwd", self._nbatch())
-        ys, handle = _ffi(
-            "diffsol_solve_vjp_fwd", self.out_aval, params, t0, t_eval, **self._kw()
-        )
-        return ys, handle
-
 
 class _FwdSensOp(_LaneOp):
     """The solve with forward sensitivities: -> (ys, sens [*B, np, nt, nout])."""
+
+    target, kind = "diffsol_solve_fwd_sens", "fwd_sens"
 
     def _out_aval(self, params_aval, t_eval_aval, problem):
         ys = _ys_aval(params_aval, t_eval_aval, problem)
@@ -112,26 +135,14 @@ class _FwdSensOp(_LaneOp):
             _f64(params_aval.shape[:-1] + (params_aval.shape[-1],) + ys.shape[-2:]),
         )
 
-    def expand(self, params, t0, t_eval):
-        self._problem._ensure_callbacks("fwd_sens", self._nbatch())
-        ys, sens = _ffi(
-            "diffsol_solve_fwd_sens", self.out_aval, params, t0, t_eval, **self._kw()
-        )
-        return ys, sens
-
 
 class _Solve(_LaneOp):
     """(params [*B, np], t_eval [nt]) -> ys [*B, nt, nout]."""
 
+    target, kind = "diffsol_solve_dense", "dense"
+
     def _out_aval(self, params_aval, t_eval_aval, problem):
         return _ys_aval(params_aval, t_eval_aval, problem)
-
-    def expand(self, params, t0, t_eval):
-        self._problem._ensure_callbacks("dense", self._nbatch())
-        (ys,) = _ffi(
-            "diffsol_solve_dense", [self.out_aval], params, t0, t_eval, **self._kw()
-        )
-        return ys
 
     def jvp(self, primals, tangents):
         params, t0, t_eval = primals
@@ -185,7 +196,7 @@ class SolveForward(_Solve):
     vjp_fwd, vjp_bwd_retval = vjp_from_jvp
 
 
-class VjpBkwd(HiPrim):
+class VjpBkwd(_DiffsolPrim):
     """The backward solve: (handle [*B], params [*B, np], t0 f64[], t_eval [nt],
     dgdu [*B, *D, nt, nout]) -> grad [*B, *D, np]. The axes of `dgdu` between the lanes and the
     last two are directions: the backward solve does all the directions together."""
@@ -205,37 +216,17 @@ class VjpBkwd(HiPrim):
     ):
         self.in_avals = (handle_aval, params_aval, t0_aval, t_eval_aval, dgdu_aval)
         self.out_aval = _f64(dgdu_aval.shape[:-2] + (params_aval.shape[-1],))
-        self.params = {
-            "_problem": problem,
-            "rtol": rtol,
-            "atol": atol,
-            "max_steps": max_steps,
-        }
+        self._configure(problem, rtol, atol, max_steps)
         super().__init__()
 
-    def _kw(self):
-        return {
-            "problem": self._problem,
-            "rtol": self.rtol,
-            "atol": self.atol,
-            "max_steps": self.max_steps,
-        }
-
     def expand(self, handle, params, t0, t_eval, dgdu):
-        nbatch = math.prod(handle.shape)
-        ndirections = math.prod(dgdu.shape[handle.ndim : -2])
-        self._problem._ensure_callbacks("vjp_bkwd", nbatch, ndirections)
-        (grad,) = _ffi(
+        return self._call_ffi(
             "diffsol_solve_vjp_bkwd",
-            [self.out_aval],
-            handle,
-            params,
-            t0,
-            t_eval,
-            dgdu,
-            **self._kw(),
+            "vjp_bkwd",
+            (handle, params, t0, t_eval, dgdu),
+            math.prod(handle.shape),
+            math.prod(dgdu.shape[handle.ndim : -2]),
         )
-        return grad
 
     def _bind(self, handle, params, t0, t_eval, dgdu):
         prim = VjpBkwd(

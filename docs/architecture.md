@@ -20,6 +20,32 @@ that this library is built on.
    `diffsol_solve_dense`, `diffsol_solve_fwd_sens`, `diffsol_solve_vjp_fwd` and
    `diffsol_solve_vjp_bkwd`.
 
+## The modules
+
+Python, each module with one job:
+
+| module | what it owns |
+|---|---|
+| `_types.py` | the types of the public signatures, `DiffsolJaxError`. Imports nothing from the package, so everything else may import it |
+| `_layout.py` | `Layout`: one pytree flattened into one vector, and back |
+| `_equations.py` | the user functions over flat vectors, and the 15 diffsol callbacks derived from them by AD |
+| `_lower.py` | one callback for all the lanes, lowered to StableHLO for a `(B, P)` |
+| `_native.py` | `libdiffsol_jax` and the PJRT plugin, and `Model`: the diffsol solver of one equation set with its cache of compiled callbacks |
+| `_problem.py` | `ODEProblem`: what the user declares, validated and wired together |
+| `_primitives.py` | the hijax primitives, with their batching and AD rules |
+| `_solve.py` | `solve` |
+
+C++:
+
+| file | what it owns |
+|---|---|
+| `dtype.h` | `Dtype` and its mappings (value size, PJRT buffer type, diffsol `ScalarType`). The only place f32 and f64 are told apart |
+| `backend.{h,cc}` | the platform: the PJRT plugin, client and device, and how it wants its memory (views, alignment, getting an output out) |
+| `callbacks.{h,cc}` | the diffsol callback trampolines, the view cache and the staging buffers |
+| `registry.{h,cc}` | `Model` (one per problem), `Instance` (one per `B`), the adjoint checkpoints, and the process-wide model table |
+| `ffi_ops.cc` | the four diffsol solves as XLA FFI custom calls |
+| `c_api.cc` | the C functions the Python package calls with ctypes |
+
 The callback inputs go to PJRT with no copy: PJRT gets views of the diffsol
 memory. The XLA CPU client accepts a view only of 64-byte aligned memory. An
 input that is not aligned is copied into a persistent aligned staging buffer (no
@@ -121,11 +147,11 @@ git). The gap of about 1.05 s per solve:
 - The XLA kernel is 2.6–3 times slower than the C function (0.78–0.85 ms against
   0.29 ms per call, measured alone). XLA:CPU makes 6 kernels, each with a full
   pass over a 2–4 MiB array: it does not fuse `pad` and `concatenate` with the
-  other operations, and one kernel is only a copy to the `[B, 1, n]` output
-  shape that `_lower.py` makes for `rhs`, `init` and `out`.
-- Fix (measured alone): return `[B, n]` for these callbacks (the same bytes).
-  This makes the kernel 0.59 ms instead of 0.78–0.85 ms, so about 200 ms less
-  per solve.
+  other operations, and one kernel was only a copy to the `[B, 1, n]` output
+  shape that `_lower.py` used to make for `rhs`, `init` and `out`.
+- Fixed: those callbacks return `[B, n]` (the same bytes). Measured alone, this
+  makes the kernel 0.59 ms instead of 0.78–0.85 ms, so about 200 ms less per
+  solve. The table above predates the fix.
 - The diffsol solver itself is slower when the callbacks run in XLA. Cache
   pollution from the XLA temporaries explains about 70 ms (native C with 16 MiB
   of writes per call: 1110 to 1185 ms). The rest (about 220 ms) is not
@@ -142,7 +168,7 @@ The executables depend on the number of lanes `B`. `B` is known only after
 
 The solver core works on flat `f64[B, nstates]` and `f64[B, nparams]` buffers —
 the right representation for the callbacks, the sensitivity lanes, and the FFI.
-The pytree layouts of the state, the parameters and the output (`_params.py`,
+The pytree layouts of the state, the parameters and the output (`_layout.py`,
 one `Layout` each) are a thin boundary layer over them:
 
 - `ODEProblem` splits the leaves of the `params` template into **parameters**
@@ -202,8 +228,8 @@ many solves), the backward solve runs the forward solve again from `params`,
 only memory.
 Forward mode (`ad="forward"`) uses diffsol forward sensitivities.
 
-Limits of the prototype: CPU only, `f64` only, no `root`/`reset`, no derivative
-with respect to the times, no `vmap` over them.
+Limits of the prototype: CPU only, `f64` only (see below), no `root`/`reset`,
+no derivative with respect to the times, no `vmap` over them.
 
 ## Build
 
@@ -250,10 +276,55 @@ with respect to the times, no `vmap` over them.
    Load `target/release/deps/libdiffsol_c.dylib`: it is the path that
    `libdiffsol_jax` links to, so only one copy of diffsol-c is in the process.
 
-## GPU (not done)
+## f32 and GPU (not done)
 
-The same C++ code can use the CUDA PJRT plugin (`jax-cuda12-pjrt`) when
-diffsol-c has a GPU backend. The views then hold device pointers. The FFI
-handlers must sync with the XLA stream (`ffi::PlatformStream<cudaStream_t>`).
-JAX and this library then have two GPU clients in one process: set
+### f32
+
+diffsol-c already has the f32 side of the callback API
+(`diffsol_ode_new_callbacks_f32`), so f32 is reachable from here. Everything
+that describes the data layout carries a `Dtype` (`dtype.h`): the views, their
+PJRT buffer type, the layout checks, the staging buffers, the scalar slots, and
+the tensors diffsol returns. `ModelConfig::dtype` comes from Python through
+`diffsol_jax_model_new`, and `NewModel` rejects anything but f64 today.
+
+What is left:
+
+- the callback trampolines take their scalars as `double` and fill an
+  `OdeCallbacksDesc_f64`. They want to be templated on the scalar type; the two
+  descriptor structs have the same field names, so one `Fill` template covers
+  both;
+- the FFI handlers are bound to `ffi::Buffer<ffi::F64>`. `ffi::AnyBuffer`
+  dispatches on `element_type()` at run time and keeps this at four registered
+  symbols instead of eight;
+- **the solve boundary stays f64 whatever the solver's dtype is**:
+  `diffsol_ode_solve_dense` and friends take `params`, `t_eval` and `dgdu` as
+  `const double *` even for an f32 ODE, and return f32 tensors. So an f32 model
+  needs a widening copy in the FFI handler (`CopyTensor`, and the reverse for
+  the operands). Dtype-generic solve entry points in diffsol-c would remove it.
+
+The intended contract: `dtype` is a *solver precision* knob, not a JAX x64
+switch. `jax_enable_x64` stays required, the times stay f64, and the `int64`
+checkpoint handle keeps working; `params`, `ys` and the gradients are in the
+model's dtype. `t` inside a callback is the model's dtype, while `t_eval` at the
+solve boundary is f64.
+
+### GPU
+
+A GPU *solve* is not reachable from this repository: diffsol-c's matrix types
+are `nalgebra_dense`, `faer_dense` and `faer_sparse`, all of which are CPU, so
+there is no GPU backend for the solver to use. That is an upstream ask.
+
+What is reachable is a GPU-resident JAX with a CPU solve: register the FFI
+handlers for `platform="cuda"` so a diffsol solve can sit inside a GPU `jit`.
+The FFI buffers are then device pointers, so the handler copies `params`,
+`t_eval` and `dgdu` down and the results back up, and syncs with the XLA stream
+(`ffi::PlatformStream<cudaStream_t>`). This removes the host round-trip a user
+otherwise needs to put a solve in a GPU training loop.
+
+The callbacks themselves stay on the CPU plugin either way: diffsol's state
+vectors are host memory, and a solve makes of the order of 1000 callback calls,
+so a device round-trip per call would dominate. If diffsol-c does gain a device
+backend, the views hold device pointers and the change is confined to
+`Backend` (`MakeView`, `CopyOut`, `view_alignment`). JAX and this library would
+then have two GPU clients in one process: set
 `XLA_PYTHON_CLIENT_PREALLOCATE=false`.

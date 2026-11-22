@@ -24,20 +24,27 @@ extern "C" {
 // Load the PJRT plugin and make the client. Only the first call has an effect.
 int diffsol_jax_init(const char *plugin_path, char *err, size_t err_len) {
   std::string message;
-  if (!diffsol_jax::InitRuntime(plugin_path, &message))
+  if (!diffsol_jax::InitBackend(plugin_path, &message))
     return Fail(message, err, err_len);
   return 1;
 }
 
-// Return the id of a new model (> 0), or 0 on failure.
+// Return the id of a new model (> 0), or 0 on failure. `dtype` is a diffsol-c
+// `ScalarType`.
 int64_t diffsol_jax_model_new(size_t nstates, size_t nparams, size_t nout,
-                              int32_t matrix_type, int32_t linear_solver,
-                              int32_t ode_solver, size_t max_checkpoints,
-                              char *err, size_t err_len) {
+                              int32_t dtype, int32_t matrix_type,
+                              int32_t linear_solver, int32_t ode_solver,
+                              size_t max_checkpoints, char *err,
+                              size_t err_len) {
+  if (!diffsol_jax::IsDtype(dtype)) {
+    Fail("unknown dtype " + std::to_string(dtype), err, err_len);
+    return 0;
+  }
   diffsol_jax::ModelConfig config;
   config.nstates = nstates;
   config.nparams = nparams;
   config.nout = nout;
+  config.dtype = static_cast<diffsol_jax::Dtype>(dtype);
   config.matrix_type = matrix_type;
   config.linear_solver = linear_solver;
   config.ode_solver = ode_solver;

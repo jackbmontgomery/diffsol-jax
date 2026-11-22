@@ -9,15 +9,19 @@
 //   beta: []
 // and the only variable of the layout is `P`. Each callback has one executable
 // for each `P`.
+//
+// The views carry the solver's dtype (`CallbackSet::dtype`); the trampoline
+// signatures are still f64, which is what makes this f64-only for now.
 #pragma once
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
+#include "backend.h"
 #include "diffsol.h"
-#include "pjrt_runtime.h"
 
 namespace diffsol_jax {
 
@@ -59,41 +63,48 @@ struct CachedView {
   PJRT_Buffer *buffer = nullptr;
 };
 
-// The executables of one callback, one for each `P`. There are at most 2 in
-// practice
-// (`P == 1`, and `P == nparams` or `P == ndirections`). Each executable has its
-// own views, because each `P` gives different shapes.
-struct Variants {
-  static constexpr int kMax = 4;
-  size_t p[kMax] = {};
-  PJRT_LoadedExecutable *exe[kMax] = {};
-  CachedView views[kMax][kMaxArgs];
-  int count = 0;
+// The executable of one callback for one `P`, with its own views: each `P`
+// gives different shapes. There are at most 3 in practice (`P == 1`, `P ==
+// nparams` and `P == ndirections`).
+struct Variant {
+  size_t p = 0;
+  PJRT_LoadedExecutable *exe = nullptr;
+  CachedView views[kMaxArgs];
 };
 
-// A 64-byte aligned buffer that grows only when it must. The XLA CPU client
-// accepts a view of caller memory only if the pointer is 64-byte aligned (spike
-// 0.2); diffsol vectors are not always aligned, so an unaligned input is copied
-// into this buffer first.
+// The executables of one callback, one for each `P`.
+struct Variants {
+  std::vector<Variant> list;
+  // The index of the executable for `p`, or -1.
+  int Find(size_t p) const;
+};
+
+// An aligned buffer that grows only when it must, for an input whose pointer
+// does not meet `Backend::view_alignment()`: it is copied in here first.
 struct Staging {
   Staging() = default;
   Staging(const Staging &) = delete;
   Staging &operator=(const Staging &) = delete;
   ~Staging();
-  // A buffer of at least `bytes` bytes.
-  void *Reserve(size_t bytes);
+  // A buffer of at least `bytes` bytes, aligned to `align`.
+  void *Reserve(size_t bytes, size_t align);
   void *data = nullptr;
   size_t capacity = 0;
 };
 
-// A scalar argument, alone in its 64-byte block, for the same reason.
+// A scalar argument, alone in its own aligned block for the same reason, held
+// in the solver's dtype so that a view of it has that dtype.
 struct alignas(64) AlignedScalar {
-  double value = 0.0;
+  union {
+    double f64;
+    float f32;
+  } value = {0.0};
 };
 
 // The `user_data` of the callbacks of one `OdeWrapper` (one model, one `B`).
 struct CallbackSet {
-  PjrtRuntime *runtime = nullptr;
+  Backend *backend = nullptr;
+  Dtype dtype = Dtype::kF64;
   size_t nstates = 0;
   size_t nparams = 0;
   size_t nout = 0;
@@ -115,9 +126,15 @@ struct CallbackSet {
   // Add the executable of callback `id` for `p` lanes. Replace an existing one.
   void Add(int id, size_t p, PJRT_LoadedExecutable *exe);
   bool Has(int id, size_t p) const;
+  // Whether callback `id` has any executable, so that `Fill` gives it to
+  // diffsol.
+  bool Provides(int id) const { return !variants[id].list.empty(); }
   // Set the function pointers of the callbacks that have at least one
   // executable.
   void Fill(OdeCallbacksDesc_f64 *desc);
+  // Store scalar argument `slot` (`t` or `beta`) and return a view of it. PJRT
+  // gets a view, so the value needs an address of its own.
+  ArgView ScalarArg(int slot, double value);
   std::string TakeError();
   void DestroyAll();
   // Destroy the cached views of executable `i` of callback `id`.

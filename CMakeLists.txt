@@ -22,7 +22,7 @@ message(STATUS "XLA FFI headers: ${XLA_FFI_INCLUDE_DIR}")
 find_library(DIFFSOL_C_LIB NAMES diffsol_c PATHS "${DIFFSOL_C_DIR}" NO_DEFAULT_PATH REQUIRED)
 
 add_library(diffsol_jax SHARED
-  src/pjrt_runtime.cc
+  src/backend.cc
   src/callbacks.cc
   src/registry.cc
   src/ffi_ops.cc

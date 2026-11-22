@@ -1,4 +1,4 @@
-#include "pjrt_runtime.h"
+#include "backend.h"
 
 #include <dlfcn.h>
 
@@ -18,7 +18,7 @@ template <typename T> T Args() {
 
 } // namespace
 
-bool PjrtRuntime::Check(PJRT_Error *error, const char *what, std::string *err) {
+bool Backend::Check(PJRT_Error *error, const char *what, std::string *err) {
   if (error == nullptr)
     return true;
   auto message = Args<PJRT_Error_Message_Args>();
@@ -34,7 +34,7 @@ bool PjrtRuntime::Check(PJRT_Error *error, const char *what, std::string *err) {
   return false;
 }
 
-void PjrtRuntime::AwaitAndDestroy(PJRT_Event *event, std::string *err,
+void Backend::AwaitAndDestroy(PJRT_Event *event, std::string *err,
                                   bool *ok) {
   if (event == nullptr)
     return;
@@ -47,7 +47,7 @@ void PjrtRuntime::AwaitAndDestroy(PJRT_Event *event, std::string *err,
   Check(api_->PJRT_Event_Destroy(&destroy), "PJRT_Event_Destroy", nullptr);
 }
 
-void PjrtRuntime::DestroyBuffer(PJRT_Buffer *buffer) {
+void Backend::DestroyBuffer(PJRT_Buffer *buffer) {
   if (buffer == nullptr)
     return;
   auto destroy = Args<PJRT_Buffer_Destroy_Args>();
@@ -55,7 +55,7 @@ void PjrtRuntime::DestroyBuffer(PJRT_Buffer *buffer) {
   Check(api_->PJRT_Buffer_Destroy(&destroy), "PJRT_Buffer_Destroy", nullptr);
 }
 
-PjrtRuntime *PjrtRuntime::Create(const std::string &plugin_path,
+Backend *Backend::Create(const std::string &plugin_path,
                                  std::string *err) {
   void *lib = dlopen(plugin_path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (lib == nullptr) {
@@ -68,7 +68,7 @@ PjrtRuntime *PjrtRuntime::Create(const std::string &plugin_path,
     *err = "the PJRT plugin " + plugin_path + " does not export GetPjrtApi";
     return nullptr;
   }
-  auto *rt = new PjrtRuntime();
+  auto *rt = new Backend();
   rt->api_ = get_api();
   if (rt->api_->pjrt_api_version.major_version != PJRT_API_MAJOR) {
     *err = "the PJRT plugin has C API major version " +
@@ -106,7 +106,7 @@ PjrtRuntime *PjrtRuntime::Create(const std::string &plugin_path,
   return rt;
 }
 
-PJRT_LoadedExecutable *PjrtRuntime::Compile(const std::string &code,
+PJRT_LoadedExecutable *Backend::Compile(const std::string &code,
                                             const std::string &options,
                                             std::string *err) {
   auto program = Args<PJRT_Program>();
@@ -124,7 +124,7 @@ PJRT_LoadedExecutable *PjrtRuntime::Compile(const std::string &code,
   return compile.executable;
 }
 
-void PjrtRuntime::Destroy(PJRT_LoadedExecutable *exe) {
+void Backend::Destroy(PJRT_LoadedExecutable *exe) {
   if (exe == nullptr)
     return;
   auto destroy = Args<PJRT_LoadedExecutable_Destroy_Args>();
@@ -133,13 +133,13 @@ void PjrtRuntime::Destroy(PJRT_LoadedExecutable *exe) {
         "PJRT_LoadedExecutable_Destroy", nullptr);
 }
 
-PJRT_Buffer *PjrtRuntime::CreateView(const ArgView &arg, std::string *err) {
+PJRT_Buffer *Backend::MakeView(const ArgView &arg, std::string *err) {
   auto view = Args<PJRT_Client_CreateViewOfDeviceBuffer_Args>();
   view.client = client_;
   view.device_buffer_ptr = const_cast<void *>(arg.ptr);
   view.dims = arg.dims;
   view.num_dims = static_cast<size_t>(arg.ndim);
-  view.element_type = PJRT_Buffer_Type_F64;
+  view.element_type = PjrtType(arg.dtype);
   view.device = device_;
   // the memory belongs to diffsol; some client paths call this callback without
   // a null check
@@ -151,7 +151,7 @@ PJRT_Buffer *PjrtRuntime::CreateView(const ArgView &arg, std::string *err) {
   return view.buffer;
 }
 
-bool PjrtRuntime::Execute(PJRT_LoadedExecutable *exe, PJRT_Buffer *const *args,
+bool Backend::Execute(PJRT_LoadedExecutable *exe, PJRT_Buffer *const *args,
                           int nargs, void *out, size_t out_bytes,
                           std::string *err) {
   // all the argument structs are on the stack: no allocation here
@@ -177,32 +177,37 @@ bool PjrtRuntime::Execute(PJRT_LoadedExecutable *exe, PJRT_Buffer *const *args,
                   "PJRT_LoadedExecutable_Execute", err);
   if (ok)
     AwaitAndDestroy(done, err, &ok);
-  if (ok) {
-    // CPU: the output buffer is host memory and the execute event has
-    // completed, so copy it directly. This is about 0.1 us;
-    // `PJRT_Buffer_ToHostBuffer` is about 9 us for a small output (it goes
-    // through the async work queue of the client).
-    // TODO(GPU): device memory; use ToHostBuffer, or better a device-to-device
-    // copy into `y`.
-    auto pointer = Args<PJRT_Buffer_UnsafePointer_Args>();
-    pointer.buffer = output;
-    if (Check(api_->PJRT_Buffer_UnsafePointer(&pointer),
-              "PJRT_Buffer_UnsafePointer", nullptr) &&
-        pointer.buffer_pointer != 0) {
-      std::memcpy(out, reinterpret_cast<const void *>(pointer.buffer_pointer),
-                  out_bytes);
-    } else {
-      auto to_host = Args<PJRT_Buffer_ToHostBuffer_Args>();
-      to_host.src = output;
-      to_host.dst = out;
-      to_host.dst_size = out_bytes;
-      ok = Check(api_->PJRT_Buffer_ToHostBuffer(&to_host),
-                 "PJRT_Buffer_ToHostBuffer", err);
-      if (ok)
-        AwaitAndDestroy(to_host.event, err, &ok);
-    }
-  }
+  if (ok)
+    ok = CopyOut(output, out, out_bytes, err);
   DestroyBuffer(output);
+  return ok;
+}
+
+bool Backend::CopyOut(PJRT_Buffer *output, void *out, size_t out_bytes,
+                      std::string *err) {
+  // Host: the output buffer is host memory and the execute event has completed,
+  // so copy it directly. This is about 0.1 us; `PJRT_Buffer_ToHostBuffer` is
+  // about 9 us for a small output (it goes through the async work queue of the
+  // client), so it is only the fallback.
+  // TODO(GPU): `out` is then device memory and the unsafe pointer is a device
+  // pointer, so this becomes a device-to-device copy on the XLA stream.
+  auto pointer = Args<PJRT_Buffer_UnsafePointer_Args>();
+  pointer.buffer = output;
+  if (Check(api_->PJRT_Buffer_UnsafePointer(&pointer),
+            "PJRT_Buffer_UnsafePointer", nullptr) &&
+      pointer.buffer_pointer != 0) {
+    std::memcpy(out, reinterpret_cast<const void *>(pointer.buffer_pointer),
+                out_bytes);
+    return true;
+  }
+  auto to_host = Args<PJRT_Buffer_ToHostBuffer_Args>();
+  to_host.src = output;
+  to_host.dst = out;
+  to_host.dst_size = out_bytes;
+  bool ok = Check(api_->PJRT_Buffer_ToHostBuffer(&to_host),
+                  "PJRT_Buffer_ToHostBuffer", err);
+  if (ok)
+    AwaitAndDestroy(to_host.event, err, &ok);
   return ok;
 }
 

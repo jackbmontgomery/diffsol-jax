@@ -12,9 +12,9 @@
 #include <string>
 #include <vector>
 
+#include "backend.h"
 #include "callbacks.h"
 #include "diffsol.h"
-#include "pjrt_runtime.h"
 
 namespace diffsol_jax {
 
@@ -23,6 +23,10 @@ struct ModelConfig {
   size_t nparams = 0;
   // 0 if the model has no `out` callback (then the solution is the state)
   size_t nout = 0;
+  // The scalar type of the solver, of the callback views, and of the tensors
+  // diffsol returns. The solve boundary itself is f64 whatever this is:
+  // diffsol-c takes `params`, `t_eval` and `dgdu` as f64 and converts.
+  Dtype dtype = Dtype::kF64;
   int32_t matrix_type = 0;
   int32_t linear_solver = 0;
   int32_t ode_solver = 0;
@@ -35,7 +39,6 @@ struct Instance {
   std::mutex mutex;
   CallbackSet callbacks;
   OdeWrapper *ode = nullptr; // made at the first solve
-  size_t ncallbacks_at_construction = 0;
 };
 
 // The inputs of the forward solve that made a checkpoint. A backward solve uses
@@ -74,8 +77,8 @@ struct Checkpoint {
 
 class Model {
 public:
-  Model(int64_t id, PjrtRuntime *runtime, ModelConfig config)
-      : id_(id), runtime_(runtime), config_(config) {}
+  Model(int64_t id, Backend *backend, ModelConfig config)
+      : id_(id), backend_(backend), config_(config) {}
   ~Model();
 
   int64_t id() const { return id_; }
@@ -116,7 +119,7 @@ public:
 
 private:
   int64_t id_;
-  PjrtRuntime *runtime_;
+  Backend *backend_;
   ModelConfig config_;
   std::mutex mutex_; // for `instances_` and `checkpoints_`
   std::map<size_t, std::unique_ptr<Instance>> instances_;
@@ -125,8 +128,8 @@ private:
 };
 
 // The process-wide registry.
-PjrtRuntime *GetRuntime();
-bool InitRuntime(const std::string &plugin_path, std::string *err);
+Backend *GetBackend();
+bool InitBackend(const std::string &plugin_path, std::string *err);
 int64_t NewModel(const ModelConfig &config, std::string *err);
 std::shared_ptr<Model> FindModel(int64_t id);
 void FreeModel(int64_t id);

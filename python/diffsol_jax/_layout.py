@@ -1,12 +1,12 @@
+"""The pytree boundary: one pytree flattened into one vector, and back."""
+
 import math
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ._lib import DiffsolJaxError
-
-F64 = jnp.float64
+from ._types import F64, DiffsolJaxError
 
 
 def is_array(x) -> bool:

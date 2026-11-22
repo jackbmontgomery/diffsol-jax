@@ -178,7 +178,7 @@ def test_replace_builds_another_solver():
     other = LOGISTIC.replace(solver="tsit45")
     assert other is not LOGISTIC
     assert other.solver == "tsit45" and LOGISTIC.solver == "bdf"
-    assert other._id != LOGISTIC._id
+    assert other._model.id != LOGISTIC._model.id
     p = jnp.array([1.0, 1.0])
     np.testing.assert_allclose(
         solve(other, Y0, p, T0, T1, saveat=T_EVAL, **TOL), logistic(Y0, p), rtol=1e-7
@@ -189,10 +189,28 @@ def test_replace_builds_another_solver():
 
 def test_the_solver_is_freed_with_the_problem():
     problem = ODEProblem(lambda x, p, t: -x, state=1, params=1)
-    finalizer = problem._finalizer
+    finalizer = problem._model._finalizer
     assert finalizer.alive
     del problem
     assert not finalizer.alive
+
+
+def test_the_dtype_reaches_the_native_side():
+    """The data layout is already dtype-parametric; the callback trampolines are not, so the
+    native side must reject anything but f64 rather than build a broken solver."""
+    from diffsol_jax._native import Model
+
+    kw = {
+        "solver": "bdf",
+        "linear_solver": "default",
+        "matrix_type": "nalgebra_dense",
+        "max_checkpoints": 1,
+    }
+    assert Model(LOGISTIC.eq, dtype="f64", **kw).dtype == "f64"
+    with pytest.raises(DiffsolJaxError, match="f32 is not supported yet, only f64"):
+        Model(LOGISTIC.eq, dtype="f32", **kw)
+    with pytest.raises(DiffsolJaxError, match="dtype must be one of f32, f64"):
+        Model(LOGISTIC.eq, dtype="f16", **kw)
 
 
 def test_evicted_checkpoint_is_recomputed():

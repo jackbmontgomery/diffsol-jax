@@ -3,8 +3,8 @@
 </p>
 
 Write JAX native equations, compile it, and solve it with
-[diffsol](https://github.com/martinjrobins/diffsol). Compatible with all major
-functional transformations `jax.jit`, `jax.vmap`, `jax.grad`.
+[diffsol](https://github.com/martinjrobins/diffsol). Compatible with all
+functional transformations (`jax.jit`, `jax.vmap`, `jax.grad`, etc.).
 
 ## Key Features
 
@@ -34,7 +34,7 @@ pip install "diffsol-jax[cpu]"
 
 ## Documentation
 
-[https://jackbmontgomery.github.io/diffsol-jax/]
+<https://jackbmontgomery.github.io/diffsol-jax/>
 
 ## Quick Example
 

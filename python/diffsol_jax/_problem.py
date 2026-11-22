@@ -7,6 +7,7 @@ from . import _equations
 from ._layout import Layout
 from ._native import Model
 from ._types import (
+    F64,
     DTypeLike,
     DiffsolJaxError,
     LinearSolver,
@@ -143,7 +144,7 @@ class ODEProblem:
         if self.solution is not self.state:
             parts.append(repr(self.solution))
         parts.append(f"solver={self.solver!r}")
-        if self.dtype != jnp.float64:
+        if self.dtype != F64:
             parts.append(f"dtype={self.dtype.name}")
         return f"ODEProblem({', '.join(parts)})"
 

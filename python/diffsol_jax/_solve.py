@@ -14,7 +14,7 @@ from ._types import F32, F64, Ad, ArrayLike, DiffsolJaxError, PyTree
 # tolerance near 1e-6 leaves the error estimate and the Newton solve no headroom (the forward
 # solve manages, but the adjoint diverges); 1e-4 is about 800 eps. Tighten it explicitly if the
 # problem allows -- 1e-5 is about as far as f32 goes.
-DEFAULT_TOL = {F32: 1e-4, np.dtype(np.float64): 1e-6}
+DEFAULT_TOL = {F32: 1e-4, F64: 1e-6}
 
 
 def _concrete(x):
@@ -81,6 +81,8 @@ def solve(
     if max_steps < 1:
         raise DiffsolJaxError(f"max_steps must be at least 1, got {max_steps}")
 
+    # the times are f64 whatever the solver's dtype is: diffsol-c takes them as f64, and
+    # the precision of a time is not what `dtype=` is for
     t0 = jnp.asarray(t0, F64)
     t1 = jnp.asarray(t1, F64)
 

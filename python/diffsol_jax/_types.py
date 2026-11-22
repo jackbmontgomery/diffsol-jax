@@ -4,7 +4,6 @@ it."""
 
 from typing import Literal
 
-import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike, DTypeLike
 from jaxtyping import PyTree
@@ -14,12 +13,12 @@ LinearSolver = Literal["default", "lu", "klu"]
 MatrixType = Literal["nalgebra_dense", "faer_dense", "faer_sparse"]
 Ad = Literal["adjoint", "forward"]
 
-# The times are f64 whatever the solver's dtype is: diffsol-c takes them as f64, and the
-# precision of a time is not what `dtype=` is for.
-F64 = jnp.float64
-
+# The two scalar types a solver can have, normalized: `solver_dtype` returns one of these, so
+# they are what a dtype-keyed table is keyed on. A scalar type like `jnp.float64` compares equal
+# to the matching `np.dtype` but does not hash to it, so it cannot be used as the key.
 F32 = np.dtype(np.float32)
-SOLVER_DTYPES = (F32, np.dtype(np.float64))
+F64 = np.dtype(np.float64)
+SOLVER_DTYPES = (F32, F64)
 
 
 class DiffsolJaxError(RuntimeError):

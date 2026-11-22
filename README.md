@@ -21,9 +21,7 @@ functional transformations (`jax.jit`, `jax.vmap`, `jax.grad`, etc.).
 - **`jax_enable_x64` is required** Set
   `jax.config.update("jax_enable_x64", True)`. This is independent of the
   solver's precision: `ODEProblem(..., dtype=jnp.float32)` runs the solver in
-  `f32`, and the times stay `f64` either way. An `f32` solve needs looser
-  tolerances -- the defaults follow the dtype (`1e-6` for `f64`, `1e-4` for
-  `f32`), and `1e-5` is about as tight as `f32` goes.
+  `f32`, and the times stay `f64` either way-
 - **CPU only, for now.**
 - **No higher-order derivatives.** `grad(grad(solve(...)))` does not work.
 - **Small non-stiff performance.** Each solver callback costs ~2.5 µs of fixed

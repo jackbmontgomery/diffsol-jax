@@ -8,11 +8,10 @@ import weakref
 from pathlib import Path
 
 import jax
-import numpy as np
 
 from . import _lower
 from ._equations import Equations
-from ._types import F32, DiffsolJaxError
+from ._types import F32, F64, DiffsolJaxError
 
 _ERR_LEN = 4096
 _lib = None
@@ -29,7 +28,7 @@ ODE_SOLVERS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
 LINEAR_SOLVERS = {"default": 0, "lu": 1, "klu": 2}
 MATRIX_TYPES = {"nalgebra_dense": 0, "faer_dense": 1, "faer_sparse": 2}
 # diffsol-c's `ScalarType`, by the solver dtype it stands for.
-DTYPE_CODES = {F32: 0, np.dtype(np.float64): 1}
+DTYPE_CODES = {F32: 0, F64: 1}
 
 # The trailing `err, err_len` of a function that can fail; `call` supplies them.
 _ERR = [c.c_char_p, c.c_size_t]

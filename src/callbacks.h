@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "diffsol.h"
 #include "pjrt_runtime.h"
@@ -59,16 +60,20 @@ struct CachedView {
   PJRT_Buffer *buffer = nullptr;
 };
 
-// The executables of one callback, one for each `P`. There are at most 2 in
-// practice
-// (`P == 1`, and `P == nparams` or `P == ndirections`). Each executable has its
-// own views, because each `P` gives different shapes.
+// The executable of one callback for one `P`, with its own views: each `P`
+// gives different shapes. There are at most 3 in practice (`P == 1`, `P ==
+// nparams` and `P == ndirections`).
+struct Variant {
+  size_t p = 0;
+  PJRT_LoadedExecutable *exe = nullptr;
+  CachedView views[kMaxArgs];
+};
+
+// The executables of one callback, one for each `P`.
 struct Variants {
-  static constexpr int kMax = 4;
-  size_t p[kMax] = {};
-  PJRT_LoadedExecutable *exe[kMax] = {};
-  CachedView views[kMax][kMaxArgs];
-  int count = 0;
+  std::vector<Variant> list;
+  // The index of the executable for `p`, or -1.
+  int Find(size_t p) const;
 };
 
 // A 64-byte aligned buffer that grows only when it must. The XLA CPU client
@@ -115,9 +120,15 @@ struct CallbackSet {
   // Add the executable of callback `id` for `p` lanes. Replace an existing one.
   void Add(int id, size_t p, PJRT_LoadedExecutable *exe);
   bool Has(int id, size_t p) const;
+  // Whether callback `id` has any executable, so that `Fill` gives it to
+  // diffsol.
+  bool Provides(int id) const { return !variants[id].list.empty(); }
   // Set the function pointers of the callbacks that have at least one
   // executable.
   void Fill(OdeCallbacksDesc_f64 *desc);
+  // Store scalar argument `slot` (`t` or `beta`) and return a view of it. PJRT
+  // gets a view, so the value needs an address of its own.
+  ArgView ScalarArg(int slot, double value);
   std::string TakeError();
   void DestroyAll();
   // Destroy the cached views of executable `i` of callback `id`.

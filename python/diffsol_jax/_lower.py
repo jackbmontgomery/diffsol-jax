@@ -180,14 +180,15 @@ def batched(eq: Equations, cb: CallbackId):
         }[kind]
 
     if kind == "fn":
-        # [B, ny] -> [B, 1, ny]
+        # `[B, ny]`, the same bytes as the `[B, 1, ny]` output view that diffsol gives: a
+        # `reshape` to that shape costs XLA:CPU a whole kernel that is only a copy
         def all_lanes(x, p, t):
-            return vmap(fn, (0, 0, None))(x, p, t)[:, None, :]
+            return vmap(fn, (0, 0, None))(x, p, t)
 
     elif kind == "init":
 
         def all_lanes(p, t):
-            return vmap(fn, (0, None))(p, t)[:, None, :]
+            return vmap(fn, (0, None))(p, t)
 
     elif kind == "mul":
         over_p = vmap(fn, (None, None, None, 0))

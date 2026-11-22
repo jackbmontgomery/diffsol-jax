@@ -35,7 +35,6 @@ struct Instance {
   std::mutex mutex;
   CallbackSet callbacks;
   OdeWrapper *ode = nullptr; // made at the first solve
-  size_t ncallbacks_at_construction = 0;
 };
 
 // The inputs of the forward solve that made a checkpoint. A backward solve uses

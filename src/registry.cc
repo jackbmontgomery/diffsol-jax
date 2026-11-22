@@ -73,6 +73,17 @@ bool Model::AddVariant(size_t nbatch, int id, size_t p, const std::string &code,
     instance = slot.get();
   }
   std::lock_guard<std::mutex> guard(instance->mutex);
+  // The set of callbacks is fixed when the `OdeWrapper` is made, so a callback
+  // that diffsol has not been told about cannot be added later. The lowering
+  // compiles every available callback at `P = 1` before the first solve
+  // (`_ensure_callbacks`), and only ever adds further `P` variants of those, so
+  // this is unreachable from the Python package.
+  if (instance->ode != nullptr && !instance->callbacks.Provides(id)) {
+    runtime_->Destroy(exe);
+    *err = std::string("cannot add the callback '") + CallbackName(id) +
+           "' after the first solve of " + std::to_string(nbatch) + " lanes";
+    return false;
+  }
   instance->callbacks.Add(id, p, exe);
   return true;
 }
@@ -118,22 +129,6 @@ Instance *Model::Acquire(size_t nbatch, std::unique_lock<std::mutex> *lock,
     instance = it->second.get();
   }
   *lock = std::unique_lock<std::mutex>(instance->mutex);
-  // The set of callbacks is fixed when the `OdeWrapper` is made. If a later
-  // lowering added a callback (for example `rhs_sens` for a first
-  // forward-sensitivity solve), make it again.
-  size_t ncallbacks = 0;
-  for (const auto &v : instance->callbacks.variants)
-    ncallbacks += v.count > 0;
-  if (instance->ode && ncallbacks != instance->ncallbacks_at_construction) {
-    // the checkpoints of the old `OdeWrapper` cannot be used with the new one
-    {
-      std::lock_guard<std::mutex> guard(mutex_);
-      std::erase_if(checkpoints_,
-                    [&](const auto &c) { return c->instance == instance; });
-    }
-    diffsol_ode_free(instance->ode);
-    instance->ode = nullptr;
-  }
   if (instance->ode == nullptr) {
     OdeCallbacksDesc_f64 desc = {};
     desc.nstates = config_.nstates;
@@ -148,7 +143,6 @@ Instance *Model::Acquire(size_t nbatch, std::unique_lock<std::mutex> *lock,
       lock->unlock();
       return nullptr;
     }
-    instance->ncallbacks_at_construction = ncallbacks;
   }
   return instance;
 }

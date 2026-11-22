@@ -22,6 +22,8 @@ constexpr int32_t kPjrtError = 3;
 
 constexpr size_t kF64 = sizeof(double);
 
+constexpr const char *kBadInput = "an input view has an unexpected layout";
+
 // Record the first error of the solve.
 int32_t Fail(CallbackSet *set, int id, int32_t code,
              const std::string &message) {
@@ -61,10 +63,6 @@ bool FullArg(const TensorView *v, ArgView *out) {
   return true;
 }
 
-ArgView Scalar(const AlignedScalar &s) {
-  return ArgView{&s.value, {0, 0, 0}, 0};
-}
-
 constexpr uintptr_t kAlign = 64;
 
 // If `arg` is not 64-byte aligned, copy it into `staging` and point `arg` at
@@ -84,20 +82,14 @@ bool AlignArg(ArgView *arg, Staging *staging, CallbackSet *set) {
   return true;
 }
 
-// Find the executable for the `P` of `y`, check the layouts, run it, and write
-// `y`.
-template <int N>
-int32_t Run(CallbackSet *set, int id, const TensorView *const (&lane)[N],
-            const bool (&full)[N], const ArgView *scalars, int scalar_pos,
-            int nscalars, TensorViewMut *y) {
+// Find the executable for the `P` of `y`, run it on `args` (already in the
+// executable's argument order), and write `y`.
+int32_t Run(CallbackSet *set, int id, ArgView *args, int nargs,
+            TensorViewMut *y) {
   set->ncalls++;
   const size_t p = y->shape[1];
   Variants &v = set->variants[id];
-  int slot = -1;
-  for (int i = 0; i < v.count; i++) {
-    if (v.p[i] == p)
-      slot = i;
-  }
+  int slot = v.Find(p);
   if (slot < 0) {
     char buf[160];
     std::snprintf(buf, sizeof(buf),
@@ -106,28 +98,12 @@ int32_t Run(CallbackSet *set, int id, const TensorView *const (&lane)[N],
                   p, static_cast<size_t>(y->shape[2]));
     return Fail(set, id, kMissingVariant, buf);
   }
-  // the executable arguments: the views in order, with the scalars at
-  // `scalar_pos`
-  ArgView args[kMaxArgs];
-  int nargs = 0;
-  for (int i = 0; i < N; i++) {
-    if (i == scalar_pos) {
-      for (int s = 0; s < nscalars; s++)
-        args[nargs++] = scalars[s];
-    }
-    bool ok = full[i] ? FullArg(lane[i], &args[nargs])
-                      : LaneArg(lane[i], &args[nargs]);
-    if (!ok)
-      return Fail(set, id, kBadLayout,
-                  "an input view has an unexpected layout");
-    if (!AlignArg(&args[nargs], &set->staging[nargs], set)) {
+  Variant &variant = v.list[static_cast<size_t>(slot)];
+  // an unaligned input is copied into its staging buffer; the scalars are
+  // aligned already, so this is a no-op for them
+  for (int i = 0; i < nargs; i++) {
+    if (!AlignArg(&args[i], &set->staging[i], set))
       return Fail(set, id, kPjrtError, "cannot allocate a staging buffer");
-    }
-    nargs++;
-  }
-  if (scalar_pos >= N) {
-    for (int s = 0; s < nscalars; s++)
-      args[nargs++] = scalars[s];
   }
   ArgView out;
   if (!FullArg(y, &out))
@@ -138,7 +114,7 @@ int32_t Run(CallbackSet *set, int id, const TensorView *const (&lane)[N],
   std::string err;
   PJRT_Buffer *buffers[kMaxArgs];
   for (int i = 0; i < nargs; i++) {
-    CachedView &cv = v.views[slot][i];
+    CachedView &cv = variant.views[i];
     const ArgView &a = args[i];
     bool hit = cv.buffer != nullptr && cv.ptr == a.ptr && cv.ndim == a.ndim &&
                std::memcmp(cv.dims, a.dims,
@@ -157,7 +133,7 @@ int32_t Run(CallbackSet *set, int id, const TensorView *const (&lane)[N],
     }
     buffers[i] = cv.buffer;
   }
-  if (!set->runtime->Execute(v.exe[slot], buffers, nargs,
+  if (!set->runtime->Execute(variant.exe, buffers, nargs,
                              const_cast<uint8_t *>(y->ptr), out_bytes, &err)) {
     return Fail(set, id, kPjrtError, err);
   }
@@ -165,41 +141,51 @@ int32_t Run(CallbackSet *set, int id, const TensorView *const (&lane)[N],
 }
 
 // The trampolines: one for each signature, with the callback id as a template
-// parameter. The executable arguments have the order of the callback arguments.
+// parameter. Each builds the argument list in the order the lowered executable
+// declares its parameters (`_lower.py`), which is the order of the callback
+// arguments.
 
 template <int Id>
 int32_t CbFn(const TensorView *x, const TensorView *p, double t,
              TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
-  set->scalars[0].value = t;
-  ArgView s[1] = {Scalar(set->scalars[0])};
-  return Run<2>(set, Id, {x, p}, {false, false}, s, 2, 1, y);
+  ArgView args[3];
+  if (!LaneArg(x, &args[0]) || !LaneArg(p, &args[1]))
+    return Fail(set, Id, kBadLayout, kBadInput);
+  args[2] = set->ScalarArg(0, t);
+  return Run(set, Id, args, 3, y);
 }
 
 template <int Id>
 int32_t CbMulFn(const TensorView *x, const TensorView *p, double t,
                 const TensorView *v, TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
-  set->scalars[0].value = t;
-  ArgView s[1] = {Scalar(set->scalars[0])};
-  return Run<3>(set, Id, {x, p, v}, {false, false, true}, s, 2, 1, y);
+  ArgView args[4];
+  if (!LaneArg(x, &args[0]) || !LaneArg(p, &args[1]) || !FullArg(v, &args[3]))
+    return Fail(set, Id, kBadLayout, kBadInput);
+  args[2] = set->ScalarArg(0, t);
+  return Run(set, Id, args, 4, y);
 }
 
 template <int Id>
 int32_t CbInitFn(const TensorView *p, double t, TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
-  set->scalars[0].value = t;
-  ArgView s[1] = {Scalar(set->scalars[0])};
-  return Run<1>(set, Id, {p}, {false}, s, 1, 1, y);
+  ArgView args[2];
+  if (!LaneArg(p, &args[0]))
+    return Fail(set, Id, kBadLayout, kBadInput);
+  args[1] = set->ScalarArg(0, t);
+  return Run(set, Id, args, 2, y);
 }
 
 template <int Id>
 int32_t CbInitMulFn(const TensorView *p, double t, const TensorView *v,
                     TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
-  set->scalars[0].value = t;
-  ArgView s[1] = {Scalar(set->scalars[0])};
-  return Run<2>(set, Id, {p, v}, {false, true}, s, 1, 1, y);
+  ArgView args[3];
+  if (!LaneArg(p, &args[0]) || !FullArg(v, &args[2]))
+    return Fail(set, Id, kBadLayout, kBadInput);
+  args[1] = set->ScalarArg(0, t);
+  return Run(set, Id, args, 3, y);
 }
 
 // `y` is an input and the output: the executable gets a view of `y`, and writes
@@ -209,11 +195,12 @@ template <int Id>
 int32_t CbMassFn(const TensorView *v, const TensorView *p, double t,
                  double beta, TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
-  set->scalars[0].value = t;
-  set->scalars[1].value = beta;
-  ArgView s[2] = {Scalar(set->scalars[0]), Scalar(set->scalars[1])};
-  const TensorView *y_in = y;
-  return Run<3>(set, Id, {v, p, y_in}, {true, false, true}, s, 2, 2, y);
+  ArgView args[5];
+  if (!FullArg(v, &args[0]) || !LaneArg(p, &args[1]) || !FullArg(y, &args[4]))
+    return Fail(set, Id, kBadLayout, kBadInput);
+  args[2] = set->ScalarArg(0, t);
+  args[3] = set->ScalarArg(1, beta);
+  return Run(set, Id, args, 5, y);
 }
 
 } // namespace
@@ -237,8 +224,16 @@ const char *CallbackName(int id) {
   return id >= 0 && id < kNumCallbacks ? kNames[id] : "unknown";
 }
 
+int Variants::Find(size_t p) const {
+  for (size_t i = 0; i < list.size(); i++) {
+    if (list[i].p == p)
+      return static_cast<int>(i);
+  }
+  return -1;
+}
+
 void CallbackSet::DestroyViews(int id, int i) {
-  for (auto &cv : variants[id].views[i]) {
+  for (auto &cv : variants[id].list[static_cast<size_t>(i)].views) {
     runtime->DestroyBuffer(cv.buffer);
     cv = CachedView{};
   }
@@ -246,36 +241,31 @@ void CallbackSet::DestroyViews(int id, int i) {
 
 void CallbackSet::Add(int id, size_t p, PJRT_LoadedExecutable *exe) {
   Variants &v = variants[id];
-  for (int i = 0; i < v.count; i++) {
-    if (v.p[i] == p) {
-      DestroyViews(id, i);
-      runtime->Destroy(v.exe[i]);
-      v.exe[i] = exe;
-      return;
-    }
+  int slot = v.Find(p);
+  if (slot >= 0) {
+    DestroyViews(id, slot);
+    Variant &existing = v.list[static_cast<size_t>(slot)];
+    runtime->Destroy(existing.exe);
+    existing.exe = exe;
+    return;
   }
-  if (v.count == Variants::kMax) {
-    // keep the first one (P == 1), replace the last one
-    DestroyViews(id, v.count - 1);
-    runtime->Destroy(v.exe[v.count - 1]);
-    v.count--;
-  }
-  v.p[v.count] = p;
-  v.exe[v.count] = exe;
-  v.count++;
+  Variant fresh;
+  fresh.p = p;
+  fresh.exe = exe;
+  v.list.push_back(fresh);
 }
 
 bool CallbackSet::Has(int id, size_t p) const {
-  const Variants &v = variants[id];
-  for (int i = 0; i < v.count; i++) {
-    if (v.p[i] == p)
-      return true;
-  }
-  return false;
+  return variants[id].Find(p) >= 0;
+}
+
+ArgView CallbackSet::ScalarArg(int slot, double value) {
+  scalars[slot].value = value;
+  return ArgView{&scalars[slot].value, {0, 0, 0}, 0};
 }
 
 void CallbackSet::Fill(OdeCallbacksDesc_f64 *d) {
-  auto has = [&](int id) { return variants[id].count > 0; };
+  auto has = [&](int id) { return Provides(id); };
   d->rhs = has(kRhs) ? CbFn<kRhs> : nullptr;
   d->rhs_jac = has(kRhsJac) ? CbMulFn<kRhsJac> : nullptr;
   d->rhs_sens = has(kRhsSens) ? CbMulFn<kRhsSens> : nullptr;
@@ -307,11 +297,11 @@ std::string CallbackSet::TakeError() {
 void CallbackSet::DestroyAll() {
   for (int id = 0; id < kNumCallbacks; id++) {
     Variants &v = variants[id];
-    for (int i = 0; i < v.count; i++) {
-      DestroyViews(id, i);
-      runtime->Destroy(v.exe[i]);
+    for (size_t i = 0; i < v.list.size(); i++) {
+      DestroyViews(id, static_cast<int>(i));
+      runtime->Destroy(v.list[i].exe);
     }
-    v.count = 0;
+    v.list.clear();
   }
 }
 

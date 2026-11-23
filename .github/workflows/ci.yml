@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 env:
-  # diffsol main with the TensorView fix (#453); the diffsol-c 0.9.0 API
-  DIFFSOL_REF: 99f0f3b23705a2c909689de52b72a83ccadf510e
+  # diffsol main with diffsol_ode_options_set_max_number_timesteps (#460); the diffsol-c 0.9.0 API
+  DIFFSOL_REF: fc0c409e8af196d474d7326348429d90145704fe
   GOPJRT_VERSION: v0.10.0
 
 jobs:

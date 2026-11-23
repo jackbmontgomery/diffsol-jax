@@ -4,7 +4,6 @@ import sys
 import types
 
 import pytest
-
 from diffsol_jax import _native
 
 

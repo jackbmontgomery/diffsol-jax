@@ -9,8 +9,8 @@ from ._native import Model
 from ._types import (
     F32,
     F64,
-    DTypeLike,
     DiffsolJaxError,
+    DTypeLike,
     LinearSolver,
     MatrixType,
     PyTree,

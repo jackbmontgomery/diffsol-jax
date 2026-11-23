@@ -1,7 +1,8 @@
 import os
-import pandas as pd
-import matplotlib.pyplot as plt
 import pathlib
+
+import matplotlib.pyplot as plt
+import pandas as pd
 
 # load data
 base_dir = pathlib.Path(__file__).parent.resolve()

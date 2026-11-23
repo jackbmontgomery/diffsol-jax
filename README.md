@@ -41,8 +41,10 @@ pip install "diffsol-jax[cpu]"
 import jax, jax.numpy as jnp
 from diffsol_jax import ODEProblem, solve
 
+
 def rhs(y, p, t):
-   return p[0] * y * (1.0 - y)
+    return p[0] * y * (1.0 - y)
+
 
 N = 50
 y0, p = jnp.array([0.1]), jnp.array([1.1])

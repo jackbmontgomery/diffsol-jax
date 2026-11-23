@@ -15,7 +15,6 @@ permissions:
 env:
   # diffsol main with diffsol_ode_options_set_max_number_timesteps (#460); the diffsol-c 0.9.0 API
   DIFFSOL_REF: fc0c409e8af196d474d7326348429d90145704fe
-  GOPJRT_VERSION: v0.10.0
 
 jobs:
   lint:
@@ -35,13 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-22.04
-            plugin_asset: gomlx_xlabuilder_linux_amd64.tar.gz
-            plugin_path: lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so
-          - os: macos-15
-            plugin_asset: gopjrt_cpu_darwin_arm64.tar.gz
-            plugin_path: pjrt_c_api_cpu_plugin.so
+        os: [ubuntu-22.04, macos-15]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -58,23 +51,8 @@ jobs:
       - name: Build diffsol-c
         working-directory: diffsol
         run: cargo build -p diffsol-c --release
-      - name: Cache PJRT CPU plugin
-        id: plugin-cache
-        uses: actions/cache@v4
-        with:
-          path: .pjrt
-          key: pjrt-${{ matrix.os }}-${{ env.GOPJRT_VERSION }}
-      - name: Download PJRT CPU plugin
-        if: steps.plugin-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p .pjrt
-          curl -sL -o plugin.tar.gz \
-            "https://github.com/gomlx/gopjrt/releases/download/${{ env.GOPJRT_VERSION }}/${{ matrix.plugin_asset }}"
-          tar -xzf plugin.tar.gz "${{ matrix.plugin_path }}"
-          cp "${{ matrix.plugin_path }}" .pjrt/pjrt_c_api_cpu_plugin.so
-          rm -rf plugin.tar.gz lib
       - name: Install Python environment
-        run: uv sync --no-default-groups --group test
+        run: uv sync --no-default-groups --group test --extra cpu
       - name: Build libdiffsol_jax
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
@@ -82,8 +60,6 @@ jobs:
             -DXLA_FFI_INCLUDE_DIR="$(.venv/bin/python -c 'import jax.ffi; print(jax.ffi.include_dir())')"
           cmake --build build -j4
       - name: Run tests
-        env:
-          DIFFSOL_JAX_PJRT_PLUGIN: ${{ github.workspace }}/.pjrt/pjrt_c_api_cpu_plugin.so
         run: .venv/bin/python -m pytest tests -q
 
   wheels:
@@ -92,13 +68,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-22.04
-            plugin_asset: gomlx_xlabuilder_linux_amd64.tar.gz
-            plugin_path: lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so
-          - os: macos-15
-            plugin_asset: gopjrt_cpu_darwin_arm64.tar.gz
-            plugin_path: pjrt_c_api_cpu_plugin.so
+        os: [ubuntu-22.04, macos-15]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -119,29 +89,13 @@ jobs:
         env:
           CMAKE_ARGS: -DDIFFSOL_C_DIR=${{ github.workspace }}/diffsol/target/release
         run: uv build --wheel --out-dir dist
-      - name: Cache PJRT CPU plugin
-        id: plugin-cache
-        uses: actions/cache@v4
-        with:
-          path: .pjrt
-          key: pjrt-${{ matrix.os }}-${{ env.GOPJRT_VERSION }}
-      - name: Download PJRT CPU plugin
-        if: steps.plugin-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p .pjrt
-          curl -sL -o plugin.tar.gz \
-            "https://github.com/gomlx/gopjrt/releases/download/${{ env.GOPJRT_VERSION }}/${{ matrix.plugin_asset }}"
-          tar -xzf plugin.tar.gz "${{ matrix.plugin_path }}"
-          cp "${{ matrix.plugin_path }}" .pjrt/pjrt_c_api_cpu_plugin.so
-          rm -rf plugin.tar.gz lib
       - name: Test wheel
         # the tests run from outside the repository, so that `import diffsol_jax` resolves to
         # the installed wheel (with its bundled libdiffsol_jax and libdiffsol_c), not to python/
-        env:
-          DIFFSOL_JAX_PJRT_PLUGIN: ${{ github.workspace }}/.pjrt/pjrt_c_api_cpu_plugin.so
         run: |
           uv venv wheel-venv --python 3.13
-          uv pip install --python wheel-venv/bin/python dist/*.whl pytest
+          whl=(dist/*.whl)
+          uv pip install --python wheel-venv/bin/python "${whl}[cpu]" pytest
           cp -r tests "$RUNNER_TEMP/tests"
           "$GITHUB_WORKSPACE/wheel-venv/bin/python" -m pytest "$RUNNER_TEMP/tests" -q
       - name: Upload wheel

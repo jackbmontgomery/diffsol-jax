@@ -16,6 +16,8 @@ env:
   # diffsol main with diffsol_ode_options_set_max_number_timesteps (#460); the diffsol-c 0.9.0 API
   DIFFSOL_REF: fc0c409e8af196d474d7326348429d90145704fe
   GOPJRT_VERSION: v0.10.0
+  # newer Pythons can lack scipy/numpy wheels, which then fail to build from source (no Fortran toolchain)
+  UV_PYTHON: "3.13"
 
 jobs:
   lint:
@@ -39,7 +41,7 @@ jobs:
           - os: ubuntu-22.04
             plugin_asset: gomlx_xlabuilder_linux_amd64.tar.gz
             plugin_path: lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so
-          - os: macos-14
+          - os: macos-15
             plugin_asset: gopjrt_cpu_darwin_arm64.tar.gz
             plugin_path: pjrt_c_api_cpu_plugin.so
     steps:
@@ -74,7 +76,7 @@ jobs:
           cp "${{ matrix.plugin_path }}" .pjrt/pjrt_c_api_cpu_plugin.so
           rm -rf plugin.tar.gz lib
       - name: Install Python environment
-        run: uv sync --group dev
+        run: uv sync --no-default-groups --group test
       - name: Build libdiffsol_jax
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
@@ -96,7 +98,7 @@ jobs:
           - os: ubuntu-22.04
             plugin_asset: gomlx_xlabuilder_linux_amd64.tar.gz
             plugin_path: lib/gomlx/pjrt/pjrt_c_api_cpu_plugin.so
-          - os: macos-14
+          - os: macos-15
             plugin_asset: gopjrt_cpu_darwin_arm64.tar.gz
             plugin_path: pjrt_c_api_cpu_plugin.so
     steps:

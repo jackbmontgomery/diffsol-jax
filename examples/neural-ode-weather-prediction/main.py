@@ -14,9 +14,8 @@ import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
 import optax
-from tqdm import trange
-
 from diffsol_jax import ODEProblem, solve
+from tqdm import trange
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 DATA_PATH = BASE_DIR / "data" / "MonthlyDelhiClimate.csv"

@@ -9,11 +9,10 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
-from jaxtyping import Array
 import optax
-from tqdm import trange
-
 from diffsol_jax import ODEProblem, solve
+from jaxtyping import Array
+from tqdm import trange
 
 jax.config.update("jax_enable_x64", True)
 

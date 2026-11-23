@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from diffsol_jax import DiffsolJaxError, ODEProblem, solve
 
 jax.config.update("jax_enable_x64", True)
@@ -356,7 +355,7 @@ def test_solve_argument_errors():
 
 
 def test_problem_argument_errors():
-    rhs = lambda x, p, t: -x  # noqa: E731
+    rhs = lambda x, p, t: -x
     with pytest.raises(DiffsolJaxError, match="rhs must be a function"):
         ODEProblem(None, state=1)
     with pytest.raises(DiffsolJaxError, match="state must have at least one entry"):

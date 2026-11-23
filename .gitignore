@@ -7,7 +7,6 @@ build/
 wheels/
 *.whl
 .venv/
-.python-version
 .cache/
 .pytest_cache/
 .ruff_cache/

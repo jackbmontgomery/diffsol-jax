@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from diffsol_jax import DiffsolJaxError, ODEProblem, solve
 
 jax.config.update("jax_enable_x64", True)
@@ -216,7 +215,7 @@ def test_f32_leaf_gets_f32_grad():
 
 def test_integer_leaf_is_captured_as_a_constant():
     """A non-float leaf is compiled into the callbacks, so its value comes from the template."""
-    rhs = lambda x, p, t: p["r"] * x * (1.0 - x ** p["n"])  # noqa: E731
+    rhs = lambda x, p, t: p["r"] * x * (1.0 - x ** p["n"])
     linear = ODEProblem(rhs, state=1, params={"r": jnp.array(1.0), "n": 1}, dtype=F64)
     cubic = ODEProblem(
         rhs, state=1, params={"r": jnp.array(1.0), "n": jnp.array(3)}, dtype=F64
@@ -256,7 +255,7 @@ def test_newly_inexact_constant_leaf_raises():
 
 
 def test_a_shape_only_constant_leaf_raises():
-    with pytest.raises(DiffsolJaxError, match="has no value"):
+    with pytest.raises(DiffsolJaxError, match="not differentiable"):
         ODEProblem(
             lambda x, p, t: p["r"] * x,
             state=1,

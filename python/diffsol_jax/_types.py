@@ -29,12 +29,12 @@ def solver_dtype(spec: DTypeLike) -> np.dtype:
 
 
 __all__ = [
+    "F32",
+    "F64",
     "Ad",
     "ArrayLike",
     "DTypeLike",
     "DiffsolJaxError",
-    "F32",
-    "F64",
     "LinearSolver",
     "MatrixType",
     "PyTree",

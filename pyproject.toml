@@ -23,12 +23,10 @@ classifiers = [
 ]
 dependencies = [
     "jax>=0.12",
+    "jaxtyping>=0.3.9",
 ]
 
 [project.optional-dependencies]
-# The CPU PJRT plugin that runs the equation callbacks. jaxlib links its CPU client
-# statically and ships no plugin library, so the plugin comes from its own wheel, whose
-# version follows the JAX release it is built from.
 cpu = ["diffsol-jax-pjrt-cpu==0.12.*"]
 
 [project.urls]
@@ -57,14 +55,16 @@ ignore = ["F722"]
 bench = [
     "diffrax>=0.7.2",
 ]
+test = [
+    "pytest>=9.0.3",
+]
 dev = [
+    { include-group = "test" },
     "equinox>=0.13.7",
     "ipython>=9.18.1",
     "matplotlib>=3.11.2",
     "optax>=0.2.9",
     "pandas>=3.1.1",
-    "pytest>=9.0.3",
-    "scipy>=1.17.1",
     "tqdm>=4.70.1",
 ]
 docs = [

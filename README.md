@@ -10,16 +10,15 @@ functional transformations (`jax.jit`, `jax.vmap`, `jax.grad`, etc.).
 
 - FFI calls are wrapped as primitive operations supporting `jacfwd` and
   `jacrev`;
-- Support for forward and adjoint computations;
+- Double and single precision;
+- Forward and adjoint gradient computations;
 - Semi-explicit DAE support;
 - Vectorized solves are solved as lanes on a single solve;
 - Using PyTrees as the state;
 - Support for neural differential equations;
 
-## Sharp Bits :knife
+## Sharp Bits
 
-- **`f64` is required** We currently only support `f64` (for now) so set
-  `jax.config.update("jax_enable_x64", True)`
 - **CPU only, for now.**
 - **No higher-order derivatives.** `grad(grad(solve(...)))` does not work.
 - **Small non-stiff performance.** Each solver callback costs ~2.5 µs of fixed
@@ -41,8 +40,6 @@ pip install "diffsol-jax[cpu]"
 ```python
 import jax, jax.numpy as jnp
 from diffsol_jax import ODEProblem, solve
-
-jax.config.update("jax_enable_x64", True)
 
 def rhs(y, p, t):
    return p[0] * y * (1.0 - y)

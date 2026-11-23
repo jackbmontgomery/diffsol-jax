@@ -18,8 +18,6 @@ from tqdm import trange
 
 from diffsol_jax import ODEProblem, solve
 
-jax.config.update("jax_enable_x64", True)
-
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 DATA_PATH = BASE_DIR / "data" / "MonthlyDelhiClimate.csv"
 PLOT_DIR = BASE_DIR / "plots"
@@ -28,8 +26,8 @@ DATA_DIM = 4
 COLUMNS = ["meantemp", "humidity", "wind_speed", "meanpressure"]
 
 BATCH_STEP = 4
-STEPS_PER_ROUND = 150
-LR = 1e-2
+STEPS_PER_ROUND = 250
+LR = 1e-3
 WEIGHT_DECAY = 1e-2
 
 

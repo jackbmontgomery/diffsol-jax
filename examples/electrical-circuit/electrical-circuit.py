@@ -26,7 +26,14 @@ def rhs(x, p, t):
     )
 
 
-problem = ODEProblem(rhs, state=NSTATES, params=5, algebraic=ALGEBRAIC, solver="bdf")
+problem = ODEProblem(
+    rhs,
+    state=NSTATES,
+    params=5,
+    algebraic=ALGEBRAIC,
+    solver="bdf",
+    dtype=jnp.float64,
+)
 
 R, L, C, V0, OMEGA = 100.0, 1.0, 1e-3, 10.0, 100.0
 params = jnp.array([R, L, C, V0, OMEGA])

@@ -1,47 +1,35 @@
-"""The pytree boundary: one pytree flattened into one vector, and back."""
-
 import math
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ._types import F64, DiffsolJaxError
+from ._types import DiffsolJaxError
 
 
 def is_array(x) -> bool:
-    """An array, or a shape and dtype standing in for one (`jax.eval_shape` of a network)."""
     return isinstance(x, (jax.Array, np.ndarray, jax.ShapeDtypeStruct))
 
 
 def _is_param(leaf) -> bool:
-    """A leaf is a value if it is an array with a float (or complex) dtype; every other leaf is
-    captured by the equations as a constant."""
     return is_array(leaf) and jnp.issubdtype(jnp.result_type(leaf), jnp.inexact)
 
 
-def _template(spec, what):
-    """The template a layout is built from: an int `n` is shorthand for one `f64[n]` leaf."""
+def _template(spec, what, dtype):
     if isinstance(spec, bool):
         raise DiffsolJaxError(f"{what} must be an int or a pytree, not a bool")
     if isinstance(spec, (int, np.integer)):
         if spec < 0:
             raise DiffsolJaxError(f"{what} must not be negative, got {spec}")
-        return jax.ShapeDtypeStruct((int(spec),), F64)
+        return jax.ShapeDtypeStruct((int(spec),), dtype)
     return spec
 
 
 class Layout:
-    """One pytree flattened into one `f64[n]` vector.
-
-    The float-array leaves of the template are the values, in flatten order, and carry only
-    their shape and dtype. Any other leaf is a constant: `constants=False` (the state and the
-    output, which are integrated) rejects it, and otherwise (the parameters) its value is taken
-    from the template and compiled into the equations."""
-
-    def __init__(self, spec, what: str, *, constants: bool = True):
+    def __init__(self, spec, what: str, dtype, *, constants: bool = True):
         self.what = what
-        template = _template(spec, what)
+        self.dtype = dtype
+        template = _template(spec, what, dtype)
         leaves, self.treedef = jax.tree_util.tree_flatten_with_path(template)
         self.paths = [jax.tree_util.keystr(path) for path, _ in leaves]
         self.is_param = [_is_param(leaf) for _, leaf in leaves]
@@ -60,8 +48,7 @@ class Layout:
                 )
             elif isinstance(leaf, jax.ShapeDtypeStruct):
                 raise DiffsolJaxError(
-                    f"{what}{path} has the dtype {leaf.dtype}, which is not differentiable, so "
-                    "the equations capture its value -- but a ShapeDtypeStruct has no value. "
+                    f"{what}{path} has the dtype {leaf.dtype}, which is not differentiable."
                     "Give the value itself, or a float dtype to make it a parameter"
                 )
             else:
@@ -73,7 +60,6 @@ class Layout:
         return f"{self.what}={self.n}" if one else f"{self.what}=<{self.n} in a pytree>"
 
     def unravel(self, flat):
-        """The pytree rebuilt from the flat `f64[n]` vector, with the constants put back."""
         leaves, i = [], 0
         for param, shape, constant in zip(self.is_param, self.shapes, self.constants):
             if not param:
@@ -86,7 +72,6 @@ class Layout:
         return jax.tree_util.tree_unflatten(self.treedef, leaves)
 
     def ravel(self, tree, what=None, hint=None) -> jax.Array:
-        """The value leaves of `tree` as one `f64[n]` vector, checked against the template."""
         what = what or self.what
         tail = f": {hint}" if hint else ""
         leaves, treedef = jax.tree_util.tree_flatten_with_path(tree)
@@ -113,11 +98,10 @@ class Layout:
                 raise DiffsolJaxError(
                     f"{what}{path} has the shape {leaf.shape}, expected {shape}{tail}"
                 )
-            flat.append(leaf.ravel().astype(F64))
-        return jnp.concatenate(flat) if flat else jnp.zeros((0,), F64)
+            flat.append(leaf.ravel().astype(self.dtype))
+        return jnp.concatenate(flat) if flat else jnp.zeros((0,), self.dtype)
 
     def unpack(self, buffer: jax.Array):
-        """The pytree of a trailing `[..., n]` axis of `buffer`, each leaf `[..., *shape]`."""
         leaves, i = [], 0
         for shape in self.shapes:
             assert shape is not None
@@ -127,8 +111,6 @@ class Layout:
         return jax.tree_util.tree_unflatten(self.treedef, leaves)
 
     def mask(self, spec) -> list[bool]:
-        """A boolean mask over the flat vector: an int `k` for its last `k` entries, a flat
-        sequence of `n` bools, or a pytree matching the template."""
         if isinstance(spec, bool):
             raise DiffsolJaxError("a mask must be an int or a boolean mask, not a bool")
         if isinstance(spec, (int, np.integer)):

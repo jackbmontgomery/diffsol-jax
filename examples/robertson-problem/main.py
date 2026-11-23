@@ -73,7 +73,6 @@ def directional_difference(
     v: jax.Array,
     h=1e-3,
 ) -> jax.Array:
-    """The derivative along `v` by central differences, to check the gradients."""
     return (z_end(prob, y0 + h * v, k, t_eval) - z_end(prob, y0 - h * v, k, t_eval)) / (
         2 * h
     )
@@ -109,8 +108,12 @@ def main():
     y0 = jnp.array([1.0, 0.0, 0.0])
     t_eval = jnp.linspace(0.0, 1000.0, num=100)
 
-    prob_ode = ODEProblem(rober_ode, state=y0, params=k, solver="bdf")
-    prob_dae = ODEProblem(rober_dae, state=y0, params=k, solver="bdf", algebraic=1)
+    prob_ode = ODEProblem(
+        rober_ode, state=y0, params=k, solver="bdf", dtype=jnp.float64
+    )
+    prob_dae = ODEProblem(
+        rober_dae, state=y0, params=k, solver="bdf", algebraic=1, dtype=jnp.float64
+    )
     forms = (("ode", prob_ode), ("dae", prob_dae))
 
     ys = {

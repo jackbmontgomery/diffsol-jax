@@ -26,9 +26,14 @@ class Logistic:
     k: jax.Array
 
 
+F64 = jnp.float64
 LOGISTIC = Logistic(r=jnp.array(1.0), k=jnp.array(1.0))
-TREE = ODEProblem(lambda x, p, t: p.r * x * (1.0 - x / p.k), state=1, params=LOGISTIC)
-FLAT = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]), state=1, params=2)
+TREE = ODEProblem(
+    lambda x, p, t: p.r * x * (1.0 - x / p.k), state=1, params=LOGISTIC, dtype=F64
+)
+FLAT = ODEProblem(
+    lambda x, p, t: p[0] * x * (1.0 - x / p[1]), state=1, params=2, dtype=F64
+)
 
 
 def flat_of(v):
@@ -80,7 +85,10 @@ def test_y0_as_a_parameter_leaf():
 
     v = WithY0(y0=Y0, rates=LOGISTIC)
     problem = ODEProblem(
-        lambda x, p, t: p.rates.r * x * (1.0 - x / p.rates.k), state=1, params=v
+        lambda x, p, t: p.rates.r * x * (1.0 - x / p.rates.k),
+        state=1,
+        params=v,
+        dtype=F64,
     )
     assert problem.nparams == 3
     g = jax.grad(lambda v: solve(problem, v.y0, v, T0, T1, saveat=T_EVAL, **TOL).sum())(
@@ -128,6 +136,7 @@ def test_a_template_of_shapes_needs_no_values():
         lambda x, p, t: p.r * x * (1.0 - x / p.k),
         state=1,
         params=jax.eval_shape(lambda: LOGISTIC),
+        dtype=F64,
     )
     assert problem.nparams == 2
     np.testing.assert_allclose(
@@ -138,7 +147,7 @@ def test_a_template_of_shapes_needs_no_values():
 
 
 def test_no_params():
-    problem = ODEProblem(lambda x, p, t: x * (1.0 - x), state=1)
+    problem = ODEProblem(lambda x, p, t: x * (1.0 - x), state=1, dtype=F64)
     assert problem.nparams == 0
     np.testing.assert_allclose(
         solve(problem, Y0, None, T0, T1, saveat=T_EVAL, **TOL),
@@ -158,6 +167,7 @@ def test_out_with_tree_params():
         state=1,
         params=LOGISTIC,
         out=lambda x, p, t: jnp.array([2.0 * x[0], p.r * x[0] ** 2]),
+        dtype=F64,
     )
     assert problem.nout == 2
     ys = tree(Y0, LOGISTIC)
@@ -174,7 +184,7 @@ def test_dict_params_and_a_callable_leaf():
     """A leaf that is not a float array is a constant of the equations."""
     template = {"r": jnp.array(1.0), "shape": lambda x: x * (1.0 - x)}
     problem = ODEProblem(
-        lambda x, p, t: p["r"] * p["shape"](x), state=1, params=template
+        lambda x, p, t: p["r"] * p["shape"](x), state=1, params=template, dtype=F64
     )
     assert problem.nparams == 1
     np.testing.assert_allclose(
@@ -193,7 +203,7 @@ def test_dict_params_and_a_callable_leaf():
 def test_f32_leaf_gets_f32_grad():
     template = dataclasses.replace(LOGISTIC, r=jnp.array(1.0, jnp.float32))
     problem = ODEProblem(
-        lambda x, p, t: p.r * x * (1.0 - x / p.k), state=1, params=template
+        lambda x, p, t: p.r * x * (1.0 - x / p.k), state=1, params=template, dtype=F64
     )
     g = jax.grad(lambda v: solve(problem, Y0, v, T0, T1, saveat=T_EVAL, **TOL).sum())(
         template
@@ -207,8 +217,10 @@ def test_f32_leaf_gets_f32_grad():
 def test_integer_leaf_is_captured_as_a_constant():
     """A non-float leaf is compiled into the callbacks, so its value comes from the template."""
     rhs = lambda x, p, t: p["r"] * x * (1.0 - x ** p["n"])  # noqa: E731
-    linear = ODEProblem(rhs, state=1, params={"r": jnp.array(1.0), "n": 1})
-    cubic = ODEProblem(rhs, state=1, params={"r": jnp.array(1.0), "n": jnp.array(3)})
+    linear = ODEProblem(rhs, state=1, params={"r": jnp.array(1.0), "n": 1}, dtype=F64)
+    cubic = ODEProblem(
+        rhs, state=1, params={"r": jnp.array(1.0), "n": jnp.array(3)}, dtype=F64
+    )
     assert (linear.nparams, cubic.nparams) == (1, 1)
     args = {"r": jnp.array(1.0), "n": 99}  # the value passed to solve is ignored
     ys_linear = solve(linear, Y0, args, T0, T1, saveat=T_EVAL, **TOL)
@@ -269,6 +281,7 @@ def test_dae_with_tree_params():
         state=2,
         params=v,
         algebraic=1,
+        dtype=F64,
     )
     ys = solve(problem, y0, v, T0, T1, saveat=T_EVAL, **TOL)
     np.testing.assert_allclose(ys[:, 0], jnp.exp(-v.r * T_EVAL), rtol=1e-6)

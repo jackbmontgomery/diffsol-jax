@@ -109,7 +109,7 @@ def main():
         gamma=jnp.asarray(0.8),
         delta=jnp.asarray(1.8),
     )
-    prob = ODEProblem(rhs, state=len(y0), params=p_true)
+    prob = ODEProblem(rhs, state=len(y0), params=p_true, dtype=jnp.float64)
     ys_true = trajectory(prob, y0, p_true, t_eval)
     ys_data = generate_data(prob, y0, p_true, t_eval, key=key)
 

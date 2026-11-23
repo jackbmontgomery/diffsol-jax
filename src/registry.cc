@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstring>
 #include <random>
+#include <type_traits>
 #include <unordered_map>
 
 namespace diffsol_jax {
@@ -15,8 +16,7 @@ std::unordered_map<int64_t, std::shared_ptr<Model>> g_models;
 std::atomic<int64_t> g_next_model{1};
 std::atomic<uint64_t> g_next_checkpoint{1};
 
-// A random value for each process, so that two processes do not make the same
-// handles.
+// A random value for each process
 uint64_t ProcessSalt() {
   static const uint64_t salt = [] {
     std::random_device rd;
@@ -25,8 +25,25 @@ uint64_t ProcessSalt() {
   return salt;
 }
 
-// splitmix64: a bijection, so different counters in one process give different
-// handles.
+template <typename Desc>
+OdeWrapper *MakeOde(Instance *instance, const ModelConfig &config,
+                    size_t nbatch) {
+  Desc desc = {};
+  desc.nstates = config.nstates;
+  desc.nparams = config.nparams;
+  desc.nout = config.nout;
+  instance->callbacks.Fill(&desc);
+  if constexpr (std::is_same_v<Desc, OdeCallbacksDesc_f32>) {
+    return diffsol_ode_new_callbacks_f32(&desc, config.matrix_type,
+                                         config.linear_solver,
+                                         config.ode_solver, nbatch);
+  } else {
+    return diffsol_ode_new_callbacks_f64(&desc, config.matrix_type,
+                                         config.linear_solver,
+                                         config.ode_solver, nbatch);
+  }
+}
+
 uint64_t Mix(uint64_t x) {
   x += 0x9e3779b97f4a7c15ULL;
   x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -74,11 +91,6 @@ bool Model::AddVariant(size_t nbatch, int id, size_t p, const std::string &code,
     instance = slot.get();
   }
   std::lock_guard<std::mutex> guard(instance->mutex);
-  // The set of callbacks is fixed when the `OdeWrapper` is made, so a callback
-  // that diffsol has not been told about cannot be added later. The lowering
-  // compiles every available callback at `P = 1` before the first solve
-  // (`_ensure_callbacks`), and only ever adds further `P` variants of those, so
-  // this is unreachable from the Python package.
   if (instance->ode != nullptr && !instance->callbacks.Provides(id)) {
     backend_->Destroy(exe);
     *err = std::string("cannot add the callback '") + CallbackName(id) +
@@ -131,14 +143,10 @@ Instance *Model::Acquire(size_t nbatch, std::unique_lock<std::mutex> *lock,
   }
   *lock = std::unique_lock<std::mutex>(instance->mutex);
   if (instance->ode == nullptr) {
-    OdeCallbacksDesc_f64 desc = {};
-    desc.nstates = config_.nstates;
-    desc.nparams = config_.nparams;
-    desc.nout = config_.nout;
-    instance->callbacks.Fill(&desc);
-    instance->ode = diffsol_ode_new_callbacks_f64(&desc, config_.matrix_type,
-                                                  config_.linear_solver,
-                                                  config_.ode_solver, nbatch);
+    instance->ode =
+        config_.dtype == Dtype::kF32
+            ? MakeOde<OdeCallbacksDesc_f32>(instance, config_, nbatch)
+            : MakeOde<OdeCallbacksDesc_f64>(instance, config_, nbatch);
     if (instance->ode == nullptr) {
       *err = "cannot make the diffsol ODE: " + DiffsolError(instance);
       lock->unlock();
@@ -151,7 +159,6 @@ Instance *Model::Acquire(size_t nbatch, std::unique_lock<std::mutex> *lock,
 bool CheckpointKey::Matches(const double *p, size_t np, const double *t,
                             size_t nt, double rt, double at, double start,
                             int64_t steps) const {
-  // compare bits, not values: NaN params must not match, and -0.0 is not 0.0
   return np == params.size() && nt == t_eval.size() && steps == max_steps &&
          std::memcmp(&rt, &rtol, sizeof(double)) == 0 &&
          std::memcmp(&at, &atol, sizeof(double)) == 0 &&
@@ -214,14 +221,6 @@ int64_t NewModel(const ModelConfig &config, std::string *err) {
     *err = "nstates must be greater than 0";
     return 0;
   }
-  // The callback trampolines take their scalars as `double` and fill an
-  // `OdeCallbacksDesc_f64`, so only f64 can be built yet; everything that
-  // describes the data layout already carries the dtype.
-  if (config.dtype != Dtype::kF64) {
-    *err = std::string("the dtype ") + DtypeName(config.dtype) +
-           " is not supported yet, only f64";
-    return 0;
-  }
   int64_t id = g_next_model++;
   std::lock_guard<std::mutex> guard(g_mutex);
   g_models[id] = std::make_shared<Model>(id, backend, config);
@@ -244,7 +243,6 @@ void FreeModel(int64_t id) {
     model = std::move(it->second);
     g_models.erase(it);
   }
-  // the model is freed here, or when the last running solve releases it
 }
 
 std::string DiffsolError(Instance *instance) {

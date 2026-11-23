@@ -1,6 +1,3 @@
-// The C functions that the Python package calls with ctypes. Each function that
-// can fail writes a message into `err` (`err_len` bytes, NUL-terminated) and
-// returns 0 on failure.
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -21,7 +18,6 @@ int Fail(const std::string &message, char *err, size_t err_len) {
 
 extern "C" {
 
-// Load the PJRT plugin and make the client. Only the first call has an effect.
 int diffsol_jax_init(const char *plugin_path, char *err, size_t err_len) {
   std::string message;
   if (!diffsol_jax::InitBackend(plugin_path, &message))
@@ -29,8 +25,6 @@ int diffsol_jax_init(const char *plugin_path, char *err, size_t err_len) {
   return 1;
 }
 
-// Return the id of a new model (> 0), or 0 on failure. `dtype` is a diffsol-c
-// `ScalarType`.
 int64_t diffsol_jax_model_new(size_t nstates, size_t nparams, size_t nout,
                               int32_t dtype, int32_t matrix_type,
                               int32_t linear_solver, int32_t ode_solver,
@@ -60,8 +54,6 @@ void diffsol_jax_model_free(int64_t model_id) {
   diffsol_jax::FreeModel(model_id);
 }
 
-// Compile StableHLO `code` as callback `callback_id` of the model, for `nbatch`
-// lanes and `p` lanes on the `P` axis.
 int diffsol_jax_model_add_variant(int64_t model_id, size_t nbatch,
                                   int32_t callback_id, size_t p,
                                   const char *code, size_t code_len,
@@ -99,10 +91,6 @@ uint64_t diffsol_jax_model_num_recomputes(int64_t model_id) {
   return model ? model->NumRecomputes() : 0;
 }
 
-// The number of callback calls, of inputs copied because they were not 64-byte
-// aligned, and of PJRT views made (view cache misses), for the solver with
-// `nbatch` lanes. With `reset != 0`, set them to 0. Return 0 if there is no
-// such solver.
 int diffsol_jax_model_stats(int64_t model_id, size_t nbatch, uint64_t *ncalls,
                             uint64_t *nstaged, uint64_t *nviews, int reset) {
   auto model = diffsol_jax::FindModel(model_id);

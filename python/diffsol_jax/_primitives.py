@@ -12,21 +12,15 @@ from jax.experimental.hijax import (
 )
 
 
-def _f64(shape):
-    return ShapedArray(shape, jnp.float64)
-
-
 def _ys_aval(params_aval, t_eval_aval, problem):
-    return _f64(params_aval.shape[:-1] + (t_eval_aval.shape[0], problem.nsolution))
+    return ShapedArray(
+        params_aval.shape[:-1] + (t_eval_aval.shape[0], problem.nsolution),
+        params_aval.dtype,
+    )
 
 
 class _DiffsolPrim(HiPrim):
-    """A primitive that calls diffsol through the FFI. It carries the problem and the solver
-    settings, which together are what an FFI call needs beyond its operands."""
-
     def _configure(self, problem, rtol, atol, max_steps):
-        """Record the solve configuration. Must run before `HiPrim.__init__`, which turns
-        `params` into attributes."""
         self.params = {
             "_problem": problem,
             "rtol": rtol,
@@ -43,8 +37,6 @@ class _DiffsolPrim(HiPrim):
         }
 
     def _call_ffi(self, target, kind, args, nbatch, ndirections=1):
-        """Compile the callbacks this solve needs, then make the FFI call. Returns a tuple when
-        the primitive has several outputs, and the one output otherwise."""
         self._problem._model.ensure_callbacks(kind, nbatch, ndirections)
         many = isinstance(self.out_aval, tuple)
         avals = self.out_aval if many else (self.out_aval,)
@@ -61,11 +53,7 @@ class _DiffsolPrim(HiPrim):
 
 class _LaneOp(_DiffsolPrim):
     """An operation on (params [*B, np], t0 f64[], t_eval [nt]) whose vmapped `params` axis
-    becomes more lanes: the axis goes to the front, and the operation runs once for all the
-    lanes. `t0` and `t_eval` are the same for every lane.
-
-    Subclasses give the FFI target, the solve kind the callbacks are compiled for, and the
-    shapes of the outputs."""
+    becomes more lanes."""
 
     target: str
     kind: str
@@ -111,9 +99,6 @@ class _LaneOp(_DiffsolPrim):
 
 
 class _VjpFwdOp(_LaneOp):
-    """The forward solve of the adjoint: -> (ys, handle s64[*B]). The checkpoint stays in C++;
-    `handle` names it in the registry."""
-
     target, kind = "diffsol_solve_vjp_fwd", "vjp_fwd"
 
     def _out_aval(self, params_aval, t_eval_aval, problem):
@@ -124,21 +109,20 @@ class _VjpFwdOp(_LaneOp):
 
 
 class _FwdSensOp(_LaneOp):
-    """The solve with forward sensitivities: -> (ys, sens [*B, np, nt, nout])."""
-
     target, kind = "diffsol_solve_fwd_sens", "fwd_sens"
 
     def _out_aval(self, params_aval, t_eval_aval, problem):
         ys = _ys_aval(params_aval, t_eval_aval, problem)
         return (
             ys,
-            _f64(params_aval.shape[:-1] + (params_aval.shape[-1],) + ys.shape[-2:]),
+            ShapedArray(
+                params_aval.shape[:-1] + (params_aval.shape[-1],) + ys.shape[-2:],
+                params_aval.dtype,
+            ),
         )
 
 
 class _Solve(_LaneOp):
-    """(params [*B, np], t_eval [nt]) -> ys [*B, nt, nout]."""
-
     target, kind = "diffsol_solve_dense", "dense"
 
     def _out_aval(self, params_aval, t_eval_aval, problem):
@@ -159,12 +143,8 @@ class _Solve(_LaneOp):
 
 
 class SolveAdjoint(_Solve):
-    """Reverse mode with the diffsol adjoint. The backward solve also gets `params` and
-    `t_eval`, so that it can run the forward solve again if the registry has freed the
-    checkpoint of `handle`."""
-
     def vjp_fwd(self, nzs_in, params, t0, t_eval):
-        # a cotangent of `None` for `t0` and `t_eval` would be a silent zero gradient
+        # a cotangent of `None` for `t0` and `t_eval` would be a zero gradient
         if nzs_in[1] or nzs_in[2]:
             raise NotImplementedError(
                 "diffsol_jax: no derivative with respect to t0, t1 or saveat"
@@ -191,16 +171,10 @@ class SolveAdjoint(_Solve):
 
 
 class SolveForward(_Solve):
-    """Reverse mode as the transpose of the forward sensitivities."""
-
     vjp_fwd, vjp_bwd_retval = vjp_from_jvp
 
 
 class VjpBkwd(_DiffsolPrim):
-    """The backward solve: (handle [*B], params [*B, np], t0 f64[], t_eval [nt],
-    dgdu [*B, *D, nt, nout]) -> grad [*B, *D, np]. The axes of `dgdu` between the lanes and the
-    last two are directions: the backward solve does all the directions together."""
-
     def __init__(
         self,
         handle_aval,
@@ -215,7 +189,9 @@ class VjpBkwd(_DiffsolPrim):
         max_steps,
     ):
         self.in_avals = (handle_aval, params_aval, t0_aval, t_eval_aval, dgdu_aval)
-        self.out_aval = _f64(dgdu_aval.shape[:-2] + (params_aval.shape[-1],))
+        self.out_aval = ShapedArray(
+            dgdu_aval.shape[:-2] + (params_aval.shape[-1],), params_aval.dtype
+        )
         self._configure(problem, rtol, atol, max_steps)
         super().__init__()
 
@@ -240,9 +216,7 @@ class VjpBkwd(_DiffsolPrim):
         return prim(handle, params, t0, t_eval, dgdu)
 
     def batch(self, axis_data, args, dims):
-        """A vmapped axis of `handle` or `params` is a lane axis: it goes to the front, on all
-        the arguments. A vmapped axis of only `dgdu` is a direction axis: it goes after the lane
-        axes."""
+        """A vmapped axis of `handle` or `params` is a lane axis"""
         handle, params, t0, t_eval, dgdu = args
         hdim, pdim, t0dim, tdim, gdim = dims
         if t0dim is not None or tdim is not None:

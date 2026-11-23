@@ -16,7 +16,10 @@ TOL = {"rtol": 1e-10, "atol": 1e-10}
 # ones, or the backward solve would miss the checkpoint of the forward solve
 PRIM_KW = {**TOL, "max_steps": 10_000}
 
-LOGISTIC = ODEProblem(lambda x, p, t: p[0] * x * (1.0 - x / p[1]), state=1, params=2)
+F64 = jnp.float64
+LOGISTIC = ODEProblem(
+    lambda x, p, t: p[0] * x * (1.0 - x / p[1]), state=1, params=2, dtype=F64
+)
 
 
 def logistic(y0, p, saveat=T_EVAL, **kw):
@@ -38,7 +41,7 @@ def robertson_rhs(x, p, t):
     )
 
 
-ROBERTSON = ODEProblem(robertson_rhs, state=3, params=3)
+ROBERTSON = ODEProblem(robertson_rhs, state=3, params=3, dtype=F64)
 ROBERTSON_TOL = {"rtol": 1e-8, "atol": 1e-10}
 ROBERTSON_P = jnp.array([0.04, 3e7, 1e4])
 Y0_ROB = jnp.array([1.0, 0.0, 0.0])
@@ -64,6 +67,7 @@ def test_logistic_out():
         state=1,
         params=1,
         out=lambda x, p, t: jnp.array([2.0 * x[0], x[0] ** 2]),
+        dtype=F64,
     )
     ys = solve(problem, Y0, jnp.array([1.0]), T0, T1, saveat=T_EVAL, **TOL)
     x = logistic_exact(1.0, T_EVAL)
@@ -193,24 +197,6 @@ def test_the_solver_is_freed_with_the_problem():
     assert finalizer.alive
     del problem
     assert not finalizer.alive
-
-
-def test_the_dtype_reaches_the_native_side():
-    """The data layout is already dtype-parametric; the callback trampolines are not, so the
-    native side must reject anything but f64 rather than build a broken solver."""
-    from diffsol_jax._native import Model
-
-    kw = {
-        "solver": "bdf",
-        "linear_solver": "default",
-        "matrix_type": "nalgebra_dense",
-        "max_checkpoints": 1,
-    }
-    assert Model(LOGISTIC.eq, dtype="f64", **kw).dtype == "f64"
-    with pytest.raises(DiffsolJaxError, match="f32 is not supported yet, only f64"):
-        Model(LOGISTIC.eq, dtype="f32", **kw)
-    with pytest.raises(DiffsolJaxError, match="dtype must be one of f32, f64"):
-        Model(LOGISTIC.eq, dtype="f16", **kw)
 
 
 def test_evicted_checkpoint_is_recomputed():

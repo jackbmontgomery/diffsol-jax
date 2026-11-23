@@ -36,7 +36,7 @@ values share:
 
 | Declared as       | The equations get      | A solve passes                                  |
 | ----------------- | ---------------------- | ----------------------------------------------- |
-| an int `n`        | one flat `f64[n]`      | one array of shape `(n,)`                       |
+| an int `n`        | one flat `dtype[n]`    | one array of shape `(n,)`                       |
 | a template pytree | the pytree, rebuilt    | a pytree of the same structure and leaf shapes   |
 | `None` (`params`) | `None`                 | nothing                                         |
 

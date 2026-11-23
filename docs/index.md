@@ -42,8 +42,6 @@ import jax
 import jax.numpy as jnp
 from diffsol_jax import ODEProblem, solve
 
-jax.config.update("jax_enable_x64", True)  # the solver uses f64
-
 
 def lotka_volterra(x, p, t):
     alpha, beta, delta, gamma = p
@@ -73,9 +71,9 @@ many = jax.vmap(solve, (None, None, 0, None, None))(
 
 A problem holds the equations, the layouts and the solver; a solve takes the
 state, the times and the parameter values. Both layouts are pytrees: `state=2`
-and `params=4` above are shorthand for one flat `f64[2]` and one flat `f64[4]`,
-and a template declares anything else. For ML — a neural network inside the ODE,
-trained by gradient descent — the parameters are the network:
+and `params=4` above are shorthand for one flat `[2]` and one flat `[4]` array,
+and a template declares anything else. For ML - a neural network inside the ODE,
+trained by gradient descent - the parameters are the network:
 
 ```python
 problem = ODEProblem(lambda y, net, t: net(y), state=4, params=net, solver="tsit45")
@@ -89,25 +87,6 @@ grads = jax.grad(lambda net: loss(solve(problem, y0, net, t0, t1, saveat=saveat)
 rules, and the `examples/neural-ode-weather-prediction` example for a full
 training loop.
 
-## Sharp bits :knife
-
-- **`f64` is required.** diffsol is built for `f64` like most scientific
-  solvers; enable x64 (`jax.config.update("jax_enable_x64", True)`) before
-  building a problem.
-- **A CPU PJRT plugin is required.** jaxlib does not ship one; install it with
-  the `cpu` extra (`pip install "diffsol-jax[cpu]"`) or set
-  `DIFFSOL_JAX_PJRT_PLUGIN` to the path of one (see
-  [Getting started](getting-started.md)).
-- **No higher-order derivatives.** `grad(grad(solve(...)))` does not work.
-- **No derivative with respect to `t0`, `t1` or `saveat`.** The times are constants.
-- **CPU only, for now.** The PJRT C API is backend-agnostic, so GPU arrives with
-  diffsol's GPU backend by loading the CUDA PJRT plugin instead.
-- **Small non-stiff systems are not fast.** Each solver callback costs ~2.5 µs
-  of fixed PJRT overhead; an explicit method on a tiny system is often faster in
-  pure JAX ([diffrax](https://github.com/patrick-kidger/diffrax)). Stiff or
-  batched problems are where diffsol-jax is better suited - see
-  [Benchmarks](benchmarks.md).
-
 ## Next steps
 
 - [Getting started](getting-started.md): install, first forward solve, first
@@ -117,14 +96,3 @@ training loop.
 - [DAEs](dae.md): singular mass matrices and algebraic constraints.
 - [Architecture](architecture.md): how the pieces fit together, with benchmarks.
 - [API reference](api/index.md): `ODEProblem`, `solve` and their options.
-
-## See also
-
-Other libraries in the JAX scientific ecosystem:
-
-- [diffrax](https://github.com/patrick-kidger/diffrax): differential equation
-  solvers in pure JAX.
-- [equinox](https://github.com/patrick-kidger/equinox): neural networks and
-  PyTree tooling.
-- [optimistix](https://github.com/patrick-kidger/optimistix): root finding,
-  minimisation, least squares.

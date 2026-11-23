@@ -14,15 +14,12 @@ constexpr const char *kNames[kNumCallbacks] = {
     "out",  "out_jac",   "out_sens",          "out_adjoint", "out_sens_adjoint",
 };
 
-// The callback return codes. diffsol fills the output with NaN and reports the
-// callback name; the message is in `CallbackSet::error`.
 constexpr int32_t kMissingVariant = 1;
 constexpr int32_t kBadLayout = 2;
 constexpr int32_t kPjrtError = 3;
 
 constexpr const char *kBadInput = "an input view has an unexpected layout";
 
-// Record the first error of the solve.
 int32_t Fail(CallbackSet *set, int id, int32_t code,
              const std::string &message) {
   if (set->error.empty())
@@ -64,8 +61,6 @@ bool FullArg(const TensorView *v, Dtype dtype, ArgView *out) {
   return true;
 }
 
-// If `arg` does not meet the backend's alignment, copy it into `staging` and
-// point `arg` at the copy.
 bool AlignArg(ArgView *arg, Staging *staging, CallbackSet *set) {
   const size_t align = set->backend->view_alignment();
   if ((reinterpret_cast<uintptr_t>(arg->ptr) & (align - 1)) == 0)
@@ -82,8 +77,6 @@ bool AlignArg(ArgView *arg, Staging *staging, CallbackSet *set) {
   return true;
 }
 
-// Find the executable for the `P` of `y`, run it on `args` (already in the
-// executable's argument order), and write `y`.
 int32_t Run(CallbackSet *set, int id, ArgView *args, int nargs,
             TensorViewMut *y) {
   set->ncalls++;
@@ -99,8 +92,6 @@ int32_t Run(CallbackSet *set, int id, ArgView *args, int nargs,
     return Fail(set, id, kMissingVariant, buf);
   }
   Variant &variant = v.list[static_cast<size_t>(slot)];
-  // an unaligned input is copied into its staging buffer; the scalars are
-  // aligned already, so this is a no-op for them
   for (int i = 0; i < nargs; i++) {
     if (!AlignArg(&args[i], &set->staging[i], set))
       return Fail(set, id, kPjrtError, "cannot allocate a staging buffer");
@@ -110,8 +101,6 @@ int32_t Run(CallbackSet *set, int id, ArgView *args, int nargs,
     return Fail(set, id, kBadLayout, "the output view is not dense");
   size_t out_bytes =
       y->shape[0] * y->shape[1] * y->shape[2] * ElementSize(set->dtype);
-  // the PJRT views: reuse a cached view if the pointer and the shape are the
-  // same
   std::string err;
   PJRT_Buffer *buffers[kMaxArgs];
   for (int i = 0; i < nargs; i++) {
@@ -141,14 +130,9 @@ int32_t Run(CallbackSet *set, int id, ArgView *args, int nargs,
   return 0;
 }
 
-// The trampolines: one for each signature, with the callback id as a template
-// parameter. Each builds the argument list in the order the lowered executable
-// declares its parameters (`_lower.py`), which is the order of the callback
-// arguments.
-
-template <int Id>
-int32_t CbFn(const TensorView *x, const TensorView *p, double t,
-             TensorViewMut *y, void *ud) {
+template <typename T, int Id>
+int32_t CbFn(const TensorView *x, const TensorView *p, T t, TensorViewMut *y,
+             void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
   const Dtype d = set->dtype;
   ArgView args[3];
@@ -158,8 +142,8 @@ int32_t CbFn(const TensorView *x, const TensorView *p, double t,
   return Run(set, Id, args, 3, y);
 }
 
-template <int Id>
-int32_t CbMulFn(const TensorView *x, const TensorView *p, double t,
+template <typename T, int Id>
+int32_t CbMulFn(const TensorView *x, const TensorView *p, T t,
                 const TensorView *v, TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
   const Dtype d = set->dtype;
@@ -171,8 +155,8 @@ int32_t CbMulFn(const TensorView *x, const TensorView *p, double t,
   return Run(set, Id, args, 4, y);
 }
 
-template <int Id>
-int32_t CbInitFn(const TensorView *p, double t, TensorViewMut *y, void *ud) {
+template <typename T, int Id>
+int32_t CbInitFn(const TensorView *p, T t, TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
   const Dtype d = set->dtype;
   ArgView args[2];
@@ -182,8 +166,8 @@ int32_t CbInitFn(const TensorView *p, double t, TensorViewMut *y, void *ud) {
   return Run(set, Id, args, 2, y);
 }
 
-template <int Id>
-int32_t CbInitMulFn(const TensorView *p, double t, const TensorView *v,
+template <typename T, int Id>
+int32_t CbInitMulFn(const TensorView *p, T t, const TensorView *v,
                     TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
   const Dtype d = set->dtype;
@@ -194,12 +178,9 @@ int32_t CbInitMulFn(const TensorView *p, double t, const TensorView *v,
   return Run(set, Id, args, 3, y);
 }
 
-// `y` is an input and the output: the executable gets a view of `y`, and writes
-// the result into the memory of `y` when it has finished. Thus the input and
-// the output can be the same memory.
-template <int Id>
-int32_t CbMassFn(const TensorView *v, const TensorView *p, double t,
-                 double beta, TensorViewMut *y, void *ud) {
+template <typename T, int Id>
+int32_t CbMassFn(const TensorView *v, const TensorView *p, T t, T beta,
+                 TensorViewMut *y, void *ud) {
   auto *set = static_cast<CallbackSet *>(ud);
   const Dtype d = set->dtype;
   ArgView args[5];
@@ -276,29 +257,37 @@ ArgView CallbackSet::ScalarArg(int slot, double value) {
   return ArgView{&s.value, {0, 0, 0}, 0, dtype};
 }
 
-void CallbackSet::Fill(OdeCallbacksDesc_f64 *d) {
-  auto has = [&](int id) { return Provides(id); };
-  d->rhs = has(kRhs) ? CbFn<kRhs> : nullptr;
-  d->rhs_jac = has(kRhsJac) ? CbMulFn<kRhsJac> : nullptr;
-  d->rhs_sens = has(kRhsSens) ? CbMulFn<kRhsSens> : nullptr;
-  d->rhs_adjoint = has(kRhsAdjoint) ? CbMulFn<kRhsAdjoint> : nullptr;
+namespace {
+
+template <typename T, typename Desc> void FillDesc(CallbackSet *set, Desc *d) {
+  auto has = [&](int id) { return set->Provides(id); };
+  d->rhs = has(kRhs) ? CbFn<T, kRhs> : nullptr;
+  d->rhs_jac = has(kRhsJac) ? CbMulFn<T, kRhsJac> : nullptr;
+  d->rhs_sens = has(kRhsSens) ? CbMulFn<T, kRhsSens> : nullptr;
+  d->rhs_adjoint = has(kRhsAdjoint) ? CbMulFn<T, kRhsAdjoint> : nullptr;
   d->rhs_sens_adjoint =
-      has(kRhsSensAdjoint) ? CbMulFn<kRhsSensAdjoint> : nullptr;
-  d->init = has(kInit) ? CbInitFn<kInit> : nullptr;
-  d->init_sens = has(kInitSens) ? CbInitMulFn<kInitSens> : nullptr;
+      has(kRhsSensAdjoint) ? CbMulFn<T, kRhsSensAdjoint> : nullptr;
+  d->init = has(kInit) ? CbInitFn<T, kInit> : nullptr;
+  d->init_sens = has(kInitSens) ? CbInitMulFn<T, kInitSens> : nullptr;
   d->init_sens_adjoint =
-      has(kInitSensAdjoint) ? CbInitMulFn<kInitSensAdjoint> : nullptr;
-  d->mass = has(kMass) ? CbMassFn<kMass> : nullptr;
-  d->mass_adjoint = has(kMassAdjoint) ? CbMassFn<kMassAdjoint> : nullptr;
-  d->out = has(kOut) ? CbFn<kOut> : nullptr;
-  d->out_jac = has(kOutJac) ? CbMulFn<kOutJac> : nullptr;
-  d->out_sens = has(kOutSens) ? CbMulFn<kOutSens> : nullptr;
-  d->out_adjoint = has(kOutAdjoint) ? CbMulFn<kOutAdjoint> : nullptr;
+      has(kInitSensAdjoint) ? CbInitMulFn<T, kInitSensAdjoint> : nullptr;
+  d->mass = has(kMass) ? CbMassFn<T, kMass> : nullptr;
+  d->mass_adjoint = has(kMassAdjoint) ? CbMassFn<T, kMassAdjoint> : nullptr;
+  d->out = has(kOut) ? CbFn<T, kOut> : nullptr;
+  d->out_jac = has(kOutJac) ? CbMulFn<T, kOutJac> : nullptr;
+  d->out_sens = has(kOutSens) ? CbMulFn<T, kOutSens> : nullptr;
+  d->out_adjoint = has(kOutAdjoint) ? CbMulFn<T, kOutAdjoint> : nullptr;
   d->out_sens_adjoint =
-      has(kOutSensAdjoint) ? CbMulFn<kOutSensAdjoint> : nullptr;
-  d->user_data = this;
+      has(kOutSensAdjoint) ? CbMulFn<T, kOutSensAdjoint> : nullptr;
+  d->user_data = set;
   d->free_user_data = nullptr;
 }
+
+} // namespace
+
+void CallbackSet::Fill(OdeCallbacksDesc_f64 *d) { FillDesc<double>(this, d); }
+
+void CallbackSet::Fill(OdeCallbacksDesc_f32 *d) { FillDesc<float>(this, d); }
 
 std::string CallbackSet::TakeError() {
   std::string e;

@@ -1,6 +1,3 @@
-"""The native side: loading `libdiffsol_jax` and the PJRT plugin, and the diffsol solver of one
-equation set with its cache of compiled callbacks."""
-
 import ctypes as c
 import os
 import sys
@@ -11,7 +8,7 @@ import jax
 
 from . import _lower
 from ._equations import Equations
-from ._types import DiffsolJaxError
+from ._types import F32, F64, DiffsolJaxError
 
 _ERR_LEN = 4096
 _lib = None
@@ -27,19 +24,13 @@ FFI_TARGETS = {
 ODE_SOLVERS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
 LINEAR_SOLVERS = {"default": 0, "lu": 1, "klu": 2}
 MATRIX_TYPES = {"nalgebra_dense": 0, "faer_dense": 1, "faer_sparse": 2}
-# diffsol-c's `ScalarType`. Only `f64` can be built yet: the callback
-# trampolines take their scalars as `double` and fill an `OdeCallbacksDesc_f64`.
-DTYPES = {"f32": 0, "f64": 1}
+DTYPE_CODES = {F32: 0, F64: 1}
 
-# The trailing `err, err_len` of a function that can fail; `call` supplies them.
 _ERR = [c.c_char_p, c.c_size_t]
 _U64 = c.POINTER(c.c_uint64)
 
-# name: (argtypes, restype)
 _SIGNATURES = {
     "diffsol_jax_init": ([c.c_char_p] + _ERR, c.c_int),
-    # nstates, nparams, nout, dtype, matrix_type, linear_solver, ode_solver,
-    # max_checkpoints
     "diffsol_jax_model_new": (
         [c.c_size_t] * 3 + [c.c_int32] * 4 + [c.c_size_t] + _ERR,
         c.c_int64,
@@ -100,16 +91,6 @@ def _find_plugin() -> str:
 
 
 def lib() -> c.CDLL:
-    """The library, loaded and set up on the first call.
-
-    Environment variables:
-    - `DIFFSOL_JAX_LIB`: the path of `libdiffsol_jax` (default: bundled, else `build/` at the
-      repository root).
-    - `DIFFSOL_JAX_PJRT_PLUGIN`: the path of the CPU PJRT plugin (default: the
-      `diffsol-jax-pjrt-cpu` package of the `cpu` extra, else a bundled
-      `pjrt_c_api_cpu_plugin.so`, else `~/.local/share/pjrt`, else `.pjrt` at the
-      repository root).
-    """
     global _lib
     if _lib is not None:
         return _lib
@@ -154,32 +135,17 @@ def one_of(name, value, table):
 
 
 class Model:
-    """The diffsol solver of one equation set, and the callbacks compiled for it.
-
-    The executables depend on the number of lanes `B`, which is known only after `jax.vmap`, so
-    the lowering rule of each solve compiles the callbacks for its own `B` (`ensure_callbacks`).
-    The native model is freed when the last reference to this object goes.
-    """
-
     def __init__(
-        self,
-        eq: Equations,
-        *,
-        solver,
-        linear_solver,
-        matrix_type,
-        max_checkpoints,
-        dtype="f64",
+        self, eq: Equations, *, solver, linear_solver, matrix_type, max_checkpoints
     ):
         self.eq = eq
-        self.dtype = dtype
         so = lib()
         self.id = call(
             so.diffsol_jax_model_new,
             eq.nstates,
             eq.nparams,
             eq.nout,
-            one_of("dtype", dtype, DTYPES),
+            DTYPE_CODES[eq.dtype],
             one_of("matrix_type", matrix_type, MATRIX_TYPES),
             one_of("linear_solver", linear_solver, LINEAR_SOLVERS),
             one_of("solver", solver, ODE_SOLVERS),
@@ -206,10 +172,6 @@ class Model:
         )
 
     def ensure_callbacks(self, kind, nbatch, ndirections=1):
-        """Compile the callbacks that a solve of `kind` with `nbatch` lanes needs. Every
-        callback gets a `P = 1` executable, so the set of callbacks diffsol is given does not
-        change between solve kinds -- which it may not, once the first solve has built the
-        diffsol model."""
         available = self.eq.available()
         for cb in available:
             self._add(cb, nbatch, 1)
@@ -221,8 +183,6 @@ class Model:
         for cb, p in multi_p:
             if cb in available:
                 self._add(cb, nbatch, p)
-
-    # ---- counters ----------------------------------------------------------------------------
 
     def clear_checkpoints(self):
         lib().diffsol_jax_model_clear_checkpoints(self.id)

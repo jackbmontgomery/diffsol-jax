@@ -14,12 +14,14 @@ T_EVAL = jnp.linspace(0.0, 2.0, 5)
 T0, T1 = T_EVAL[0], T_EVAL[-1]
 TOL = {"rtol": 1e-10, "atol": 1e-10}
 N = 3
+F64 = jnp.float64
 # y'' = -k y as {"pos", "vel"}: y = pos0 cos(sqrt(k) t)
 STATE = {"pos": jnp.zeros(N), "vel": jnp.zeros(N)}
 SPRING = ODEProblem(
     lambda y, p, t: {"pos": y["vel"], "vel": -p[0] * y["pos"]},
     state=STATE,
     params=1,
+    dtype=F64,
 )
 POS0 = jnp.array([1.0, 0.0, 0.5])
 Y0 = {"pos": POS0, "vel": jnp.zeros(N)}
@@ -36,7 +38,7 @@ def exact(k, t):
 
 def test_flat_state_stays_one_array():
     """`state=<int>` is one `f64[n]` leaf, so `y0` and `ys` are plain arrays."""
-    problem = ODEProblem(lambda y, p, t: -p[0] * y, state=2, params=1)
+    problem = ODEProblem(lambda y, p, t: -p[0] * y, state=2, params=1, dtype=F64)
     ys = solve(
         problem, jnp.array([1.0, 2.0]), jnp.array([0.5]), T0, T1, saveat=T_EVAL, **TOL
     )
@@ -60,7 +62,10 @@ def test_pytree_state_solve():
 def test_pytree_state_matches_the_flat_form():
     """The same system with the state raveled by hand gives the same solution."""
     flat = ODEProblem(
-        lambda y, p, t: jnp.concatenate([y[N:], -p[0] * y[:N]]), state=2 * N, params=1
+        lambda y, p, t: jnp.concatenate([y[N:], -p[0] * y[:N]]),
+        state=2 * N,
+        params=1,
+        dtype=F64,
     )
     ys_flat = solve(
         flat, jnp.concatenate([POS0, jnp.zeros(N)]), K, T0, T1, saveat=T_EVAL, **TOL
@@ -118,6 +123,7 @@ def test_out_returns_its_own_pytree():
             "energy": 0.5 * (y["vel"] @ y["vel"] + p[0] * (y["pos"] @ y["pos"])),
             "first": y["pos"][:1],
         },
+        dtype=F64,
     )
     assert problem.nout == 2
     ys = solve(problem, Y0, K, T0, T1, saveat=T_EVAL, **TOL)
@@ -139,6 +145,7 @@ def test_algebraic_as_a_mask_over_the_state():
         state={"y": jnp.zeros(()), "z": jnp.zeros(())},
         params=2,
         algebraic={"y": False, "z": True},
+        dtype=F64,
     )
     p = jnp.array([0.7, 2.0])
     # the algebraic entry of y0 is only a guess: diffsol projects it onto the constraint
@@ -171,6 +178,7 @@ def test_mass_over_a_pytree_state():
         state={"y": jnp.zeros(()), "z": jnp.zeros(())},
         params=2,
         mass=lambda v, p, t: {"y": v["y"], "z": jnp.zeros(())},
+        dtype=F64,
     )
     p = jnp.array([0.7, 2.0])
     ys = solve(

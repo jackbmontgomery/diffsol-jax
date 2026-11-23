@@ -27,6 +27,7 @@ def linear_dae_rhs(x, p, t):
 
 def dae_problem(**kw):
     kw.setdefault("mass", lambda v, p, t: jnp.array([v[0], 0.0]))
+    kw.setdefault("dtype", jnp.float64)
     return ODEProblem(linear_dae_rhs, state=2, params=2, **kw)
 
 
@@ -105,7 +106,9 @@ def robertson(dae):
         last = x[0] + x[1] + x[2] - 1.0 if dae else r2
         return jnp.array([-r1, r1 - r2, last])
 
-    return ODEProblem(rhs, state=3, params=3, algebraic=1 if dae else None)
+    return ODEProblem(
+        rhs, state=3, params=3, algebraic=1 if dae else None, dtype=jnp.float64
+    )
 
 
 ROBERTSON_TOL = {"rtol": 1e-10, "atol": 1e-12}
@@ -144,6 +147,7 @@ def test_time_dependent_mass():
         state=1,
         params=2,
         mass=lambda v, p, t: (1.0 + t) * v,
+        dtype=jnp.float64,
     )
     y0 = jnp.array([1.0])
     ys = solve(problem, y0, P, T0, T1, saveat=T_EVAL, **TOL)

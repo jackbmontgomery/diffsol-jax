@@ -16,8 +16,6 @@ env:
   # diffsol main with diffsol_ode_options_set_max_number_timesteps (#460); the diffsol-c 0.9.0 API
   DIFFSOL_REF: fc0c409e8af196d474d7326348429d90145704fe
   GOPJRT_VERSION: v0.10.0
-  # newer Pythons can lack scipy/numpy wheels, which then fail to build from source (no Fortran toolchain)
-  UV_PYTHON: "3.13"
 
 jobs:
   lint:

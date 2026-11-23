@@ -14,15 +14,12 @@ constexpr const char *kNames[kNumCallbacks] = {
     "out",  "out_jac",   "out_sens",          "out_adjoint", "out_sens_adjoint",
 };
 
-// The callback return codes. diffsol fills the output with NaN and reports the
-// callback name; the message is in `CallbackSet::error`.
 constexpr int32_t kMissingVariant = 1;
 constexpr int32_t kBadLayout = 2;
 constexpr int32_t kPjrtError = 3;
 
 constexpr const char *kBadInput = "an input view has an unexpected layout";
 
-// Record the first error of the solve.
 int32_t Fail(CallbackSet *set, int id, int32_t code,
              const std::string &message) {
   if (set->error.empty())
@@ -64,8 +61,6 @@ bool FullArg(const TensorView *v, Dtype dtype, ArgView *out) {
   return true;
 }
 
-// If `arg` does not meet the backend's alignment, copy it into `staging` and
-// point `arg` at the copy.
 bool AlignArg(ArgView *arg, Staging *staging, CallbackSet *set) {
   const size_t align = set->backend->view_alignment();
   if ((reinterpret_cast<uintptr_t>(arg->ptr) & (align - 1)) == 0)
@@ -82,8 +77,6 @@ bool AlignArg(ArgView *arg, Staging *staging, CallbackSet *set) {
   return true;
 }
 
-// Find the executable for the `P` of `y`, run it on `args` (already in the
-// executable's argument order), and write `y`.
 int32_t Run(CallbackSet *set, int id, ArgView *args, int nargs,
             TensorViewMut *y) {
   set->ncalls++;
@@ -99,8 +92,6 @@ int32_t Run(CallbackSet *set, int id, ArgView *args, int nargs,
     return Fail(set, id, kMissingVariant, buf);
   }
   Variant &variant = v.list[static_cast<size_t>(slot)];
-  // an unaligned input is copied into its staging buffer; the scalars are
-  // aligned already, so this is a no-op for them
   for (int i = 0; i < nargs; i++) {
     if (!AlignArg(&args[i], &set->staging[i], set))
       return Fail(set, id, kPjrtError, "cannot allocate a staging buffer");
@@ -110,8 +101,6 @@ int32_t Run(CallbackSet *set, int id, ArgView *args, int nargs,
     return Fail(set, id, kBadLayout, "the output view is not dense");
   size_t out_bytes =
       y->shape[0] * y->shape[1] * y->shape[2] * ElementSize(set->dtype);
-  // the PJRT views: reuse a cached view if the pointer and the shape are the
-  // same
   std::string err;
   PJRT_Buffer *buffers[kMaxArgs];
   for (int i = 0; i < nargs; i++) {
@@ -140,13 +129,6 @@ int32_t Run(CallbackSet *set, int id, ArgView *args, int nargs,
   }
   return 0;
 }
-
-// The trampolines: one for each signature, with the scalar type and the
-// callback id as template parameters. `T` is only the type of the scalar
-// arguments diffsol passes by value; the array views take their dtype from the
-// set, and `ScalarArg` stores the value in that dtype. Each builds the argument
-// list in the order the lowered executable declares its parameters
-// (`_lower.py`), which is the order of the callback arguments.
 
 template <typename T, int Id>
 int32_t CbFn(const TensorView *x, const TensorView *p, T t, TensorViewMut *y,
@@ -196,9 +178,6 @@ int32_t CbInitMulFn(const TensorView *p, T t, const TensorView *v,
   return Run(set, Id, args, 3, y);
 }
 
-// `y` is an input and the output: the executable gets a view of `y`, and writes
-// the result into the memory of `y` when it has finished. Thus the input and
-// the output can be the same memory.
 template <typename T, int Id>
 int32_t CbMassFn(const TensorView *v, const TensorView *p, T t, T beta,
                  TensorViewMut *y, void *ud) {
@@ -280,9 +259,6 @@ ArgView CallbackSet::ScalarArg(int slot, double value) {
 
 namespace {
 
-// Point `d` at the trampolines of the callbacks that have an executable. The
-// two diffsol descriptor structs have the same field names, so one template
-// fills either; `T` is the scalar type of the matching one.
 template <typename T, typename Desc> void FillDesc(CallbackSet *set, Desc *d) {
   auto has = [&](int id) { return set->Provides(id); };
   d->rhs = has(kRhs) ? CbFn<T, kRhs> : nullptr;

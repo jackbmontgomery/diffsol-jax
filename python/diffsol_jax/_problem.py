@@ -7,6 +7,7 @@ from . import _equations
 from ._layout import Layout
 from ._native import Model
 from ._types import (
+    F32,
     F64,
     DTypeLike,
     DiffsolJaxError,
@@ -22,14 +23,9 @@ from ._types import (
 class ODEProblem:
     """An ODE (or semi-explicit index-1 DAE) and the diffsol solver for it.
 
-    Everything the solver is built from is declared here; [`solve`][diffsol_jax.solve] then
-    takes the initial state, the times and the parameter values. The solver, with its compiled
-    callbacks and its adjoint checkpoints, is built once and lives as long as the problem.
-
     The state and the parameters are pytrees, declared by `state=` and `params=`. Each is
     either an int `n`, meaning one flat `dtype[n]` array, or a template pytree: its float-array
-    leaves carry the shapes and dtypes, and `jax.eval_shape(make_net, key)` does as well as a
-    network. The equations then act on one lane of those pytrees.
+    leaves carry the shapes and dtypes.
 
     Args:
         rhs: `rhs(y, p, t) -> y-like`, the right-hand side: `y` and the result are in the
@@ -50,13 +46,8 @@ class ODEProblem:
         linear_solver: `default`, `lu`, or `klu`.
         matrix_type: `nalgebra_dense`, `faer_dense`, or `faer_sparse`.
         max_checkpoints: how many adjoint checkpoints to keep alive at once.
-        dtype: the scalar type the solver works in, `float64` (the default) or `float32`. This
-            is the dtype of `y0`, `params`, `ys` and the gradients, and of the `y`, `p` and `t`
-            the equations see. It is a solver-precision choice, not a JAX x64 switch:
-            `jax_enable_x64` is still required, and the times stay `float64` either way. An
-            `f32` solve needs looser tolerances than the defaults -- around `1e-5` is the most
-            `f32` can resolve.
-    """
+        dtype: the scalar type the solver works in, `float32`or `float64`. `float64` needs
+            both `jax_enable_x64` and `dtype=jnp.float64` given explicitly."""
 
     def __init__(
         self,
@@ -71,10 +62,8 @@ class ODEProblem:
         linear_solver: LinearSolver = "default",
         matrix_type: MatrixType = "nalgebra_dense",
         max_checkpoints: int = 8,
-        dtype: DTypeLike = jnp.float64,
+        dtype: DTypeLike = jnp.float32,
     ):
-        if not jax.config.read("jax_enable_x64"):
-            raise DiffsolJaxError("diffsol_jax needs jax_enable_x64")
         if not callable(rhs):
             raise DiffsolJaxError("rhs must be a function rhs(y, p, t) -> y-like")
         if mass is not None and algebraic is not None:
@@ -98,6 +87,8 @@ class ODEProblem:
         self.solver, self.linear_solver = solver, linear_solver
         self.matrix_type, self.max_checkpoints = matrix_type, max_checkpoints
         self.dtype = solver_dtype(dtype)
+        if self.dtype == F64 and not jax.config.read("jax_enable_x64"):
+            raise DiffsolJaxError("dtype=float64 needs jax_enable_x64")
 
         self.state = Layout(state, "state", self.dtype, constants=False)
         self.params = Layout(params, "params", self.dtype)
@@ -136,7 +127,9 @@ class ODEProblem:
             mass, "mass", self.state, self.params, self.state
         )
         if flat_mass is not None:
-            _equations.check_mass_is_linear(flat_mass, self.nstates, self.nparams)
+            _equations.check_mass_is_linear(
+                flat_mass, self.nstates, self.nparams, self.dtype
+            )
         return flat_mass
 
     def __repr__(self):
@@ -144,19 +137,16 @@ class ODEProblem:
         if self.solution is not self.state:
             parts.append(repr(self.solution))
         parts.append(f"solver={self.solver!r}")
-        if self.dtype != F64:
+        if self.dtype != F32:
             parts.append(f"dtype={self.dtype.name}")
         return f"ODEProblem({', '.join(parts)})"
 
     def replace(self, **changes) -> "ODEProblem":
-        """A problem with the given arguments replaced, and so with its own diffsol solver:
-        `problem.replace(solver="tsit45")`."""
+        """A problem with the given arguments replaced, and so with its own diffsol solver."""
         unknown = set(changes) - set(self._declared)
         if unknown:
             raise DiffsolJaxError(f"replace got unknown arguments: {sorted(unknown)}")
         return ODEProblem(**{**self._declared, **changes})
-
-    # ---- the solve arguments ------------------------------------------------------------------
 
     def _pack(self, y0, params) -> jax.Array:
         """The internal parameter vector `[params, y0]` of one lane. A `jax.vmap` over either
@@ -173,23 +163,14 @@ class ODEProblem:
         """`ys [..., nt, nsolution]` as the solution pytree, each leaf `[..., nt, *shape]`."""
         return self.solution.unpack(ys)
 
-    # ---- counters ----------------------------------------------------------------------------
-
     def clear_checkpoints(self):
-        """Free the adjoint checkpoints kept for pending backward solves."""
         self._model.clear_checkpoints()
 
     def num_checkpoints(self) -> int:
-        """How many adjoint checkpoints are alive."""
         return self._model.num_checkpoints()
 
     def num_recomputes(self) -> int:
-        """The number of backward solves that ran the forward solve again, because the
-        registry had freed their checkpoint."""
         return self._model.num_recomputes()
 
     def callback_stats(self, nbatch: int, reset: bool = False):
-        """`(ncalls, nstaged, nviews)` for the solver with `nbatch` lanes: the number of callback
-        calls, of inputs copied because they were not 64-byte aligned, and of PJRT views made
-        (the misses of the view cache)."""
         return self._model.callback_stats(nbatch, reset)

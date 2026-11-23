@@ -16,8 +16,7 @@ std::unordered_map<int64_t, std::shared_ptr<Model>> g_models;
 std::atomic<int64_t> g_next_model{1};
 std::atomic<uint64_t> g_next_checkpoint{1};
 
-// A random value for each process, so that two processes do not make the same
-// handles.
+// A random value for each process
 uint64_t ProcessSalt() {
   static const uint64_t salt = [] {
     std::random_device rd;
@@ -26,8 +25,6 @@ uint64_t ProcessSalt() {
   return salt;
 }
 
-// Make the diffsol ODE of `instance` for the scalar type of `Desc`. The two
-// descriptor structs have the same field names, so one template builds either.
 template <typename Desc>
 OdeWrapper *MakeOde(Instance *instance, const ModelConfig &config,
                     size_t nbatch) {
@@ -47,8 +44,6 @@ OdeWrapper *MakeOde(Instance *instance, const ModelConfig &config,
   }
 }
 
-// splitmix64: a bijection, so different counters in one process give different
-// handles.
 uint64_t Mix(uint64_t x) {
   x += 0x9e3779b97f4a7c15ULL;
   x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -96,11 +91,6 @@ bool Model::AddVariant(size_t nbatch, int id, size_t p, const std::string &code,
     instance = slot.get();
   }
   std::lock_guard<std::mutex> guard(instance->mutex);
-  // The set of callbacks is fixed when the `OdeWrapper` is made, so a callback
-  // that diffsol has not been told about cannot be added later. The lowering
-  // compiles every available callback at `P = 1` before the first solve
-  // (`_ensure_callbacks`), and only ever adds further `P` variants of those, so
-  // this is unreachable from the Python package.
   if (instance->ode != nullptr && !instance->callbacks.Provides(id)) {
     backend_->Destroy(exe);
     *err = std::string("cannot add the callback '") + CallbackName(id) +
@@ -153,11 +143,10 @@ Instance *Model::Acquire(size_t nbatch, std::unique_lock<std::mutex> *lock,
   }
   *lock = std::unique_lock<std::mutex>(instance->mutex);
   if (instance->ode == nullptr) {
-    instance->ode = config_.dtype == Dtype::kF32
-                        ? MakeOde<OdeCallbacksDesc_f32>(instance, config_,
-                                                        nbatch)
-                        : MakeOde<OdeCallbacksDesc_f64>(instance, config_,
-                                                        nbatch);
+    instance->ode =
+        config_.dtype == Dtype::kF32
+            ? MakeOde<OdeCallbacksDesc_f32>(instance, config_, nbatch)
+            : MakeOde<OdeCallbacksDesc_f64>(instance, config_, nbatch);
     if (instance->ode == nullptr) {
       *err = "cannot make the diffsol ODE: " + DiffsolError(instance);
       lock->unlock();
@@ -170,7 +159,6 @@ Instance *Model::Acquire(size_t nbatch, std::unique_lock<std::mutex> *lock,
 bool CheckpointKey::Matches(const double *p, size_t np, const double *t,
                             size_t nt, double rt, double at, double start,
                             int64_t steps) const {
-  // compare bits, not values: NaN params must not match, and -0.0 is not 0.0
   return np == params.size() && nt == t_eval.size() && steps == max_steps &&
          std::memcmp(&rt, &rtol, sizeof(double)) == 0 &&
          std::memcmp(&at, &atol, sizeof(double)) == 0 &&
@@ -255,7 +243,6 @@ void FreeModel(int64_t id) {
     model = std::move(it->second);
     g_models.erase(it);
   }
-  // the model is freed here, or when the last running solve releases it
 }
 
 std::string DiffsolError(Instance *instance) {

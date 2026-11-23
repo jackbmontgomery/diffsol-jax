@@ -1,5 +1,5 @@
-"""`dtype=float32`: the solver, its callbacks and everything the user sees work in f32, and the
-times stay f64."""
+"""`dtype=float32`, the default: the solver, its callbacks and everything the user sees --
+including the times -- work in f32, and `jax_enable_x64` is not needed at all."""
 
 import jax
 import jax.numpy as jnp
@@ -23,7 +23,7 @@ def logistic(y, p, t):
 
 P32, Y032 = jnp.array([1.0, 2.0], F32), jnp.array([0.1], F32)
 LOGISTIC32 = ODEProblem(logistic, state=1, params=2, dtype=F32)
-LOGISTIC64 = ODEProblem(logistic, state=1, params=2)
+LOGISTIC64 = ODEProblem(logistic, state=1, params=2, dtype=jnp.float64)
 REFERENCE = {"rtol": 1e-12, "atol": 1e-12}
 
 
@@ -175,13 +175,41 @@ def test_f64_inputs_are_cast_to_the_problem_dtype():
     assert np.allclose(np.asarray(ys), np.asarray(run(LOGISTIC32, Y032, P32, **TOL)))
 
 
-def test_the_times_stay_f64():
-    """`dtype` is the solver's precision, not a JAX x64 switch: diffsol-c takes the times as
-    f64, and an f32 time would lose resolution at a large t."""
+def test_the_times_follow_the_dtype():
+    """`t0`, `t1` and `saveat` are cast to the problem's dtype like everything else: diffsol
+    narrows them to its own scalar type before using them regardless, so there is nothing to
+    gain by giving it f64 times for an f32 problem."""
     ys = solve(
         LOGISTIC32, Y032, P32, 0.0, 4.0, saveat=jnp.array([4.0], jnp.float64), **TOL
     )
     assert ys.dtype == F32
+
+
+def test_f32_works_without_jax_enable_x64():
+    """The point of letting the times follow `dtype`: an f32 problem needs no global JAX
+    config at all, forward or backward."""
+    was_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", False)
+    try:
+        problem = ODEProblem(logistic, state=1, params=2, dtype=F32)
+        ys = solve(problem, Y032, P32, 0.0, 4.0, saveat=T_EVAL, **TOL)
+        assert ys.dtype == F32
+        g = jax.grad(
+            lambda p: solve(problem, Y032, p, 0.0, 4.0, saveat=T_EVAL, **TOL).sum()
+        )(P32)
+        assert g.dtype == F32 and np.all(np.isfinite(np.asarray(g)))
+    finally:
+        jax.config.update("jax_enable_x64", was_x64)
+
+
+def test_f64_still_needs_jax_enable_x64():
+    was_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", False)
+    try:
+        with pytest.raises(DiffsolJaxError, match="dtype=float64 needs jax_enable_x64"):
+            ODEProblem(logistic, state=1, params=2, dtype=jnp.float64)
+    finally:
+        jax.config.update("jax_enable_x64", was_x64)
 
 
 def test_the_default_tolerance_follows_the_dtype():
@@ -204,8 +232,9 @@ def test_an_f32_and_an_f64_problem_are_independent():
 
 
 def test_the_dtype_shows_up_in_repr():
-    assert "dtype=float32" in repr(LOGISTIC32)
-    assert "dtype" not in repr(LOGISTIC64)
+    """`f32` is the default, so it stays implicit; the non-default `f64` is spelled out."""
+    assert "dtype" not in repr(LOGISTIC32)
+    assert "dtype=float64" in repr(LOGISTIC64)
 
 
 def test_replace_keeps_the_dtype():

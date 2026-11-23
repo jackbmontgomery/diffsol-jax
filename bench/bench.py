@@ -11,6 +11,8 @@ import numpy as np
 
 from diffsol_jax import ODEProblem, solve
 
+jax.config.update("jax_enable_x64", True)
+
 RTOL, ATOL = 1e-6, 1e-8
 SOLVER_IDS = {"bdf": 0, "esdirk34": 1, "tr_bdf2": 2, "tsit45": 3}
 
@@ -338,6 +340,8 @@ def run_model(name, m, lanes, dc, max_tape_gib, out):
         solver=m["solver"],
         # one checkpoint: the registry is cleared after each gradient timing anyway
         max_checkpoints=1,
+        # the native C, diffsl and diffrax comparisons below are all f64
+        dtype=jnp.float64,
     )
 
     def diffsol_solve(p, t):

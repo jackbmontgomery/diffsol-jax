@@ -279,15 +279,17 @@ respect to the times, no `vmap` over them.
 
 ## Dtypes
 
-`ODEProblem(..., dtype=...)` takes `float64` (the default) or `float32`.
+`ODEProblem(..., dtype=...)` takes `float32` (the default, matching JAX's own
+default) or `float64`.
 
-**`dtype` is a solver-precision knob, not a JAX x64 switch.**
-`jax_enable_x64` is required either way: the times are f64 (diffsol-c takes them
-as f64, and the precision of a time is not what `dtype` is for) and so is the
-`int64` adjoint checkpoint handle. What the dtype does set is the scalar type of
-the diffsol solver, of the compiled callbacks, and of `y0`, `params`, `ys` and
-the gradients. Inside a callback `t` is in the model's dtype, while `t_eval` at
-the solve boundary is f64.
+**`dtype` is a solver-precision knob, not a JAX x64 switch, but `float64` needs
+one anyway.** `jax_enable_x64` is required only when `dtype=jnp.float64` is
+given explicitly; `float32` needs nothing extra and runs under JAX's default
+config. The dtype sets the scalar type of the diffsol solver, of the compiled
+callbacks, and of `y0`, `params`, `ys`, `t0`, `t1`, `saveat` and the gradients
+-- inside a callback `t` is in the model's dtype too, same as everything else.
+The `int64` adjoint checkpoint handle is the one thing that stays fixed-width
+regardless of `dtype`, since it is never a float.
 
 Where it reaches:
 
@@ -300,28 +302,36 @@ Where it reaches:
   overload for each descriptor struct, and `MakeOde` picks
   `diffsol_ode_new_callbacks_f32` or `_f64`.
 - in Python the dtype lives on `Layout` and on `Equations`, so the lowered
-  callbacks get it from `eq.dtype` and `Layout.ravel` casts into it. The
-  primitives need no separate channel: every float operand and result of a solve
-  has the dtype of `params`, which `ODEProblem._pack` ravels into.
-- the FFI handlers bind `params`, `ys`, `sens`, `dgdu` and `grad` as
-  `ffi::AnyBuffer` and check them against the model's dtype at run time, so
-  there are still four registered symbols rather than eight.
+  callbacks get it from `eq.dtype` and `Layout.ravel` casts into it. `solve`
+  casts `t0`, `t1` and `saveat` into `problem.dtype` the same way. The
+  primitives need no separate channel: every float operand and result of a
+  solve has the dtype of `params`, which `ODEProblem._pack` ravels into.
+- the FFI handlers bind `params`, `t0`, `t_eval`, `ys`, `sens`, `dgdu` and
+  `grad` as `ffi::AnyBuffer` and check them against the model's dtype at run
+  time, so there are still four registered symbols rather than eight.
 
-**The solve boundary is f64 whatever the solver's dtype is.**
-`diffsol_ode_solve_dense` and friends take `params`, `t_eval` and `dgdu` as
-`const double *` even for an f32 ODE (diffsol-c converts internally), so
-`ffi_ops.cc` widens an f32 `params` and `dgdu` into a scratch buffer per call
-(`AsF64`; an f64 operand is passed through with no copy). The tensors diffsol
-returns are already in the model's dtype, so copying them out into `ys`, `sens`
-and `grad` needs no conversion. Dtype-generic solve entry points in diffsol-c
-would remove the widening; the `dgdu` one is the only sizeable copy
-(`[B, D, nt, nout]`).
+**diffsol-c's own solve entry points take `params`, `t_eval` and `dgdu` as
+`const double *` whatever the solver's dtype is**, and narrow them straight
+back to the model's scalar type internally (`M::T::from_f64`, `read_times`) --
+so an f64 pointer at that boundary buys no extra precision for an f32 problem;
+it is purely a marshalling convention. `ffi_ops.cc` widens an f32 operand into a
+scratch buffer per call (`AsF64`; an f64 operand is passed through with no
+copy) for `params`, `t0`, `t_eval` and `dgdu` alike. The tensors diffsol
+returns (`ys`, `sens`, `grad`) are already in the model's dtype -- diffsol's
+own state/output vectors are `M::V`, not widened like the inputs -- so copying
+them out needs no conversion. Dtype-generic solve entry points in diffsol-c
+would remove the widening; `dgdu` is the only sizeable copy (`[B, D, nt,
+nout]`), the widening of `t0`/`t_eval` costs a few nanoseconds per element
+(negligible next to a solve).
 
 Tolerances follow the dtype, because f32 has an eps of 1.2e-7: `solve` defaults
 `rtol` and `atol` to `1e-6` for an f64 problem and `1e-4` for f32. At `1e-6` an
 f32 forward solve still works but the adjoint's Newton iteration diverges, so an
 f32 default of `1e-6` would make `jax.grad` fail out of the box. About `1e-5` is
-as tight as f32 goes.
+as tight as f32 goes. In exchange, f32 solves and gradients run roughly 2-5x
+faster than f64 at the same problem (fewer steps at the looser default
+tolerance, and half the memory traffic per element) -- see
+[Benchmarks](benchmarks.md).
 
 ## GPU (not done)
 

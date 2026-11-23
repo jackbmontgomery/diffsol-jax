@@ -13,10 +13,11 @@ jax.config.update("jax_enable_x64", True)
 TOL = {"rtol": 1e-11, "atol": 1e-11}
 Y0 = jnp.array([1.0])
 P = jnp.array([1.0])
+F64 = jnp.float64
 # y' = p y, so y(t) = y0 exp(p (t - t0))
-EXPONENTIAL = ODEProblem(lambda y, p, t: p[0] * y, state=1, params=1)
+EXPONENTIAL = ODEProblem(lambda y, p, t: p[0] * y, state=1, params=1, dtype=F64)
 # y' = t, so y(t) = y0 + (t^2 - t0^2) / 2: an rhs that reads `t` itself
-RAMP = ODEProblem(lambda y, p, t: 0.0 * y + t, state=1, params=None)
+RAMP = ODEProblem(lambda y, p, t: 0.0 * y + t, state=1, params=None, dtype=F64)
 
 
 def exponential(t0, t1, **kw):

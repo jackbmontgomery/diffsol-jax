@@ -34,8 +34,7 @@ bool Backend::Check(PJRT_Error *error, const char *what, std::string *err) {
   return false;
 }
 
-void Backend::AwaitAndDestroy(PJRT_Event *event, std::string *err,
-                                  bool *ok) {
+void Backend::AwaitAndDestroy(PJRT_Event *event, std::string *err, bool *ok) {
   if (event == nullptr)
     return;
   auto await = Args<PJRT_Event_Await_Args>();
@@ -55,8 +54,7 @@ void Backend::DestroyBuffer(PJRT_Buffer *buffer) {
   Check(api_->PJRT_Buffer_Destroy(&destroy), "PJRT_Buffer_Destroy", nullptr);
 }
 
-Backend *Backend::Create(const std::string &plugin_path,
-                                 std::string *err) {
+Backend *Backend::Create(const std::string &plugin_path, std::string *err) {
   void *lib = dlopen(plugin_path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (lib == nullptr) {
     *err = std::string("cannot load the PJRT plugin: ") + dlerror();
@@ -107,8 +105,8 @@ Backend *Backend::Create(const std::string &plugin_path,
 }
 
 PJRT_LoadedExecutable *Backend::Compile(const std::string &code,
-                                            const std::string &options,
-                                            std::string *err) {
+                                        const std::string &options,
+                                        std::string *err) {
   auto program = Args<PJRT_Program>();
   program.code = const_cast<char *>(code.data());
   program.code_size = code.size();
@@ -141,8 +139,7 @@ PJRT_Buffer *Backend::MakeView(const ArgView &arg, std::string *err) {
   view.num_dims = static_cast<size_t>(arg.ndim);
   view.element_type = PjrtType(arg.dtype);
   view.device = device_;
-  // the memory belongs to diffsol; some client paths call this callback without
-  // a null check
+  // Some client paths call this callback without a null check
   view.on_delete_callback = [](void *, void *) {};
   if (!Check(api_->PJRT_Client_CreateViewOfDeviceBuffer(&view),
              "PJRT_Client_CreateViewOfDeviceBuffer", err)) {
@@ -152,10 +149,8 @@ PJRT_Buffer *Backend::MakeView(const ArgView &arg, std::string *err) {
 }
 
 bool Backend::Execute(PJRT_LoadedExecutable *exe, PJRT_Buffer *const *args,
-                          int nargs, void *out, size_t out_bytes,
-                          std::string *err) {
-  // all the argument structs are on the stack: no allocation here
-  // the inputs are views of diffsol memory: never donate them
+                      int nargs, void *out, size_t out_bytes,
+                      std::string *err) {
   int64_t non_donatable[kMaxArgs];
   for (int i = 0; i < nargs; i++)
     non_donatable[i] = i;
@@ -185,10 +180,6 @@ bool Backend::Execute(PJRT_LoadedExecutable *exe, PJRT_Buffer *const *args,
 
 bool Backend::CopyOut(PJRT_Buffer *output, void *out, size_t out_bytes,
                       std::string *err) {
-  // Host: the output buffer is host memory and the execute event has completed,
-  // so copy it directly. This is about 0.1 us; `PJRT_Buffer_ToHostBuffer` is
-  // about 9 us for a small output (it goes through the async work queue of the
-  // client), so it is only the fallback.
   // TODO(GPU): `out` is then device memory and the unsafe pointer is a device
   // pointer, so this becomes a device-to-device copy on the XLA stream.
   auto pointer = Args<PJRT_Buffer_UnsafePointer_Args>();

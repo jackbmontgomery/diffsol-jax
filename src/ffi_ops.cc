@@ -1,30 +1,3 @@
-// The diffsol-c solve functions as XLA FFI custom calls (CPU).
-//
-// Layouts (row-major, as JAX gives them; the leading axes `[*B]` are the lanes,
-// `B` is their product). A row-major `[B, n]` array is a column-major `[n, B]`
-// array: the diffsol-c layout, with no copy.
-//
-//   diffsol_solve_dense     params [*B, np], t0 f64[], t_eval [nt]
-//                                                  -> ys [*B, nt, nout]
-//   diffsol_solve_fwd_sens  params [*B, np], t0 f64[], t_eval [nt]
-//                                             -> ys, sens [*B, np, nt, nout]
-//   diffsol_solve_vjp_fwd   params [*B, np], t0 f64[], t_eval [nt]
-//                                                  -> ys, handle s64[*B]
-//   diffsol_solve_vjp_bkwd  handle s64[*B], params [*B, np], t0 f64[],
-//                           t_eval [nt], dgdu [*B, *D, nt, nout]
-//                                                  -> grad [*B, *D, np]
-//
-// `nout` is the number of outputs of `out`, or `nstates` if the model has no
-// `out`.
-//
-// `t0` is the time of the initial state: the solve starts there, and `t_eval`
-// are the times it returns, all at or after it.
-//
-// Dtypes: `params`, `ys`, `sens`, `dgdu` and `grad` are in the model's dtype,
-// and the times are always f64. diffsol-c's solve entry points take `params`,
-// `t_eval` and `dgdu` as `const double *` whatever the solver's dtype is, so an
-// f32 operand is widened here (`AsF64`); the tensors it returns are already in
-// the model's dtype, so copying them out needs no conversion.
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -52,8 +25,6 @@ constexpr ffi::DataType FfiType(Dtype dtype) {
   return dtype == Dtype::kF32 ? ffi::F32 : ffi::F64;
 }
 
-// Every float operand and result of a solve is in the model's dtype, except the
-// times, which are always f64.
 ffi::Error CheckDtype(const char *what, const ffi::AnyBuffer &buf,
                       Dtype dtype) {
   if (buf.element_type() != FfiType(dtype)) {
@@ -64,9 +35,6 @@ ffi::Error CheckDtype(const char *what, const ffi::AnyBuffer &buf,
   return ffi::Error::Success();
 }
 
-// `buf` as f64, which is what diffsol-c takes whatever the solver's dtype is: a
-// view of the operand when it is f64 already, else a widened copy in `scratch`.
-// The caller must have checked that the dtype is one of the two.
 const double *AsF64(const ffi::AnyBuffer &buf, std::vector<double> *scratch) {
   if (buf.element_type() == ffi::F64)
     return reinterpret_cast<const double *>(buf.untyped_data());
@@ -78,12 +46,6 @@ const double *AsF64(const ffi::AnyBuffer &buf, std::vector<double> *scratch) {
   return scratch->data();
 }
 
-// Copy a diffsol tensor into `dst` as a contiguous column-major array (which is
-// the row-major array with the axes in the opposite order). Free the tensor.
-//
-// `dtype` is the model's, which is the dtype diffsol gives its tensors in and
-// the dtype of the result `dst` points into, so the values are copied as they
-// are.
 ffi::Error CopyTensor(Tensor *tensor, Dtype dtype, void *dst, size_t expected) {
   const size_t width = ElementSize(dtype);
   size_t ndim = diffsol_tensor_ndim(tensor);
@@ -100,16 +62,15 @@ ffi::Error CopyTensor(Tensor *tensor, Dtype dtype, void *dst, size_t expected) {
   }
   const uint8_t *src = diffsol_tensor_ptr(tensor);
   auto *out = static_cast<uint8_t *>(dst);
-  if (strides[0] == width &&
-      (dims[1] == 1 || strides[1] == dims[0] * width) &&
+  if (strides[0] == width && (dims[1] == 1 || strides[1] == dims[0] * width) &&
       (dims[2] == 1 || strides[2] == dims[0] * dims[1] * width)) {
     std::memcpy(out, src, expected * width);
   } else {
     for (size_t c = 0; c < dims[2]; c++)
       for (size_t b = 0; b < dims[1]; b++)
         for (size_t a = 0; a < dims[0]; a++) {
-          std::memcpy(out, src + a * strides[0] + b * strides[1] +
-                               c * strides[2],
+          std::memcpy(out,
+                      src + a * strides[0] + b * strides[1] + c * strides[2],
                       width);
           out += width;
         }
@@ -125,35 +86,31 @@ struct Solver {
   Instance *instance = nullptr;
   size_t nbatch = 0;
   size_t nparams = 0;
-  // the `params` operand as f64, and its element count
   const double *params_f64 = nullptr;
   size_t params_count = 0;
   std::vector<double> params_scratch;
+  const double *t_eval_f64 = nullptr;
+  size_t t_eval_count = 0;
+  std::vector<double> t_eval_scratch;
 
   Dtype dtype() const { return model->config().dtype; }
 };
 
-// The time of the initial state, from the scalar `t0` operand. `t_eval` must
-// have at least one time, and start at or after it.
-ffi::ErrorOr<double> StartTime(ffi::Buffer<ffi::F64> &t0,
-                               ffi::Buffer<ffi::F64> &t_eval) {
-  if (t0.element_count() != 1)
+ffi::ErrorOr<double> StartTime(const double *t0, size_t t0_count,
+                               const double *t_eval, size_t t_eval_count) {
+  if (t0_count != 1)
     return ffi::Error::InvalidArgument("t0 must be a scalar");
-  if (t_eval.element_count() == 0)
+  if (t_eval_count == 0)
     return ffi::Error::InvalidArgument("t_eval must have at least one time");
-  double start = t0.typed_data()[0];
-  if (t_eval.typed_data()[0] < start) {
+  double start = t0[0];
+  if (t_eval[0] < start) {
     return ffi::Error::InvalidArgument(
         "t_eval must start at or after t0, got t_eval[0] = " +
-        std::to_string(t_eval.typed_data()[0]) +
-        " and t0 = " + std::to_string(start));
+        std::to_string(t_eval[0]) + " and t0 = " + std::to_string(start));
   }
   return start;
 }
 
-// Set the step budget on `ode`. `diffsol_ode_get_options` hands back an owned
-// handle onto the same ODE, so a set through it reaches the solver; it must be
-// freed either way.
 ffi::Error SetMaxSteps(Instance *instance, int64_t max_steps) {
   if (max_steps < 1)
     return ffi::Error::InvalidArgument("max_steps must be at least 1");
@@ -217,15 +174,25 @@ ffi::Error Lanes(const std::shared_ptr<Model> &model,
 // Run a solve that returns a solution, and copy its values into `ys`.
 template <typename SolveFn>
 ffi::Error SolveAndCopyYs(int64_t model_id, double rtol, double atol,
-                          int64_t max_steps, ffi::Buffer<ffi::F64> &t0,
-                          ffi::AnyBuffer &params,
-                          ffi::Buffer<ffi::F64> &t_eval, ffi::AnyBuffer &ys,
-                          Solver *s, double *t0_used,
+                          int64_t max_steps, ffi::AnyBuffer &t0,
+                          ffi::AnyBuffer &params, ffi::AnyBuffer &t_eval,
+                          ffi::AnyBuffer &ys, Solver *s, double *t0_used,
                           SolutionWrapper **solution, SolveFn solve) {
   size_t nbatch = 0;
-  if (auto e = Lanes(FindModel(model_id), params, &nbatch); e.failure())
+  auto model = FindModel(model_id);
+  if (auto e = Lanes(model, params, &nbatch); e.failure())
     return e;
-  auto start = StartTime(t0, t_eval);
+  const Dtype dtype = model->config().dtype;
+  if (auto e = CheckDtype("t0", t0, dtype); e.failure())
+    return e;
+  if (auto e = CheckDtype("t_eval", t_eval, dtype); e.failure())
+    return e;
+  std::vector<double> t0_scratch;
+  const double *t0_f64 = AsF64(t0, &t0_scratch);
+  s->t_eval_f64 = AsF64(t_eval, &s->t_eval_scratch);
+  s->t_eval_count = t_eval.element_count();
+  auto start =
+      StartTime(t0_f64, t0.element_count(), s->t_eval_f64, s->t_eval_count);
   if (!start.has_value())
     return std::move(start.error());
   *t0_used = start.value();
@@ -236,9 +203,8 @@ ffi::Error SolveAndCopyYs(int64_t model_id, double rtol, double atol,
     return e;
   s->params_f64 = AsF64(params, &s->params_scratch);
   s->params_count = params.element_count();
-  size_t nt = t_eval.element_count();
-  if (solve(s->instance->ode, s->params_f64, s->nparams, nbatch,
-            t_eval.typed_data(), nt, solution) != DIFFSOL_OK) {
+  if (solve(s->instance->ode, s->params_f64, s->nparams, nbatch, s->t_eval_f64,
+            s->t_eval_count, solution) != DIFFSOL_OK) {
     return ffi::Error::Internal(DiffsolError(s->instance));
   }
   Tensor *tensor = nullptr;
@@ -246,35 +212,34 @@ ffi::Error SolveAndCopyYs(int64_t model_id, double rtol, double atol,
     return ffi::Error::Internal(DiffsolError(s->instance));
   }
   return CopyTensor(tensor, s->dtype(), ys.untyped_data(),
-                    s->model->nsolution() * nt * nbatch);
+                    s->model->nsolution() * s->t_eval_count * nbatch);
 }
 
-ffi::Error SolveDenseImpl(ffi::AnyBuffer params, ffi::Buffer<ffi::F64> t0,
-                          ffi::Buffer<ffi::F64> t_eval,
-                          ffi::Result<ffi::AnyBuffer> ys, int64_t model_id,
-                          double rtol, double atol, int64_t max_steps) {
+ffi::Error SolveDenseImpl(ffi::AnyBuffer params, ffi::AnyBuffer t0,
+                          ffi::AnyBuffer t_eval, ffi::Result<ffi::AnyBuffer> ys,
+                          int64_t model_id, double rtol, double atol,
+                          int64_t max_steps) {
   Solver s;
   SolutionWrapper *solution = nullptr;
   double start = 0.0;
   auto e = SolveAndCopyYs(model_id, rtol, atol, max_steps, t0, params, t_eval,
-                          *ys, &s, &start, &solution,
-                          diffsol_ode_solve_dense);
+                          *ys, &s, &start, &solution, diffsol_ode_solve_dense);
   if (solution)
     diffsol_solution_wrapper_free(solution);
   return e;
 }
 
-ffi::Error SolveFwdSensImpl(ffi::AnyBuffer params, ffi::Buffer<ffi::F64> t0,
-                            ffi::Buffer<ffi::F64> t_eval,
+ffi::Error SolveFwdSensImpl(ffi::AnyBuffer params, ffi::AnyBuffer t0,
+                            ffi::AnyBuffer t_eval,
                             ffi::Result<ffi::AnyBuffer> ys,
                             ffi::Result<ffi::AnyBuffer> sens, int64_t model_id,
                             double rtol, double atol, int64_t max_steps) {
   Solver s;
   SolutionWrapper *solution = nullptr;
   double start = 0.0;
-  auto e = SolveAndCopyYs(model_id, rtol, atol, max_steps, t0, params, t_eval,
-                          *ys, &s, &start, &solution,
-                          diffsol_ode_solve_fwd_sens);
+  auto e =
+      SolveAndCopyYs(model_id, rtol, atol, max_steps, t0, params, t_eval, *ys,
+                     &s, &start, &solution, diffsol_ode_solve_fwd_sens);
   if (e.success())
     e = CheckDtype("sens", *sens, s.dtype());
   if (e.success()) {
@@ -289,7 +254,7 @@ ffi::Error SolveFwdSensImpl(ffi::AnyBuffer params, ffi::Buffer<ffi::F64> t0,
     } else {
       // sens j is a column-major [nout, nt, B] array; the result is row-major
       // [B, np, nt, nout]
-      size_t block = s.model->nsolution() * t_eval.element_count();
+      size_t block = s.model->nsolution() * s.t_eval_count;
       const size_t width = ElementSize(s.dtype());
       auto tmp = std::make_unique<uint8_t[]>(block * s.nbatch * width);
       auto *out = static_cast<uint8_t *>(sens->untyped_data());
@@ -309,8 +274,8 @@ ffi::Error SolveFwdSensImpl(ffi::AnyBuffer params, ffi::Buffer<ffi::F64> t0,
   return e;
 }
 
-ffi::Error SolveVjpFwdImpl(ffi::AnyBuffer params, ffi::Buffer<ffi::F64> t0,
-                           ffi::Buffer<ffi::F64> t_eval,
+ffi::Error SolveVjpFwdImpl(ffi::AnyBuffer params, ffi::AnyBuffer t0,
+                           ffi::AnyBuffer t_eval,
                            ffi::Result<ffi::AnyBuffer> ys,
                            ffi::ResultBuffer<ffi::S64> handle, int64_t model_id,
                            double rtol, double atol, int64_t max_steps) {
@@ -335,8 +300,7 @@ ffi::Error SolveVjpFwdImpl(ffi::AnyBuffer params, ffi::Buffer<ffi::F64> t0,
   }
   CheckpointKey key;
   key.params.assign(s.params_f64, s.params_f64 + s.params_count);
-  key.t_eval.assign(t_eval.typed_data(),
-                    t_eval.typed_data() + t_eval.element_count());
+  key.t_eval.assign(s.t_eval_f64, s.t_eval_f64 + s.t_eval_count);
   key.rtol = rtol;
   key.atol = atol;
   key.t0 = start;
@@ -347,15 +311,9 @@ ffi::Error SolveVjpFwdImpl(ffi::AnyBuffer params, ffi::Buffer<ffi::F64> t0,
   return e;
 }
 
-// The backward solve. It uses the checkpoint of `handle` only if the registry
-// still has it, all the lanes of `handle` have the same id, and the checkpoint
-// was made from exactly the same `params`, `t_eval`, `rtol`, `atol` and
-// `max_steps`. If not (for example the registry freed it, or the handle comes
-// from a different process), it runs the forward solve again into a temporary
-// checkpoint. Thus the gradient never depends on what the registry holds.
 ffi::Error SolveVjpBkwdImpl(ffi::Buffer<ffi::S64> handle, ffi::AnyBuffer params,
-                            ffi::Buffer<ffi::F64> t0,
-                            ffi::Buffer<ffi::F64> t_eval, ffi::AnyBuffer dgdu,
+                            ffi::AnyBuffer t0, ffi::AnyBuffer t_eval,
+                            ffi::AnyBuffer dgdu,
                             ffi::Result<ffi::AnyBuffer> grad, int64_t model_id,
                             double rtol, double atol, int64_t max_steps) {
   auto model = FindModel(model_id);
@@ -369,7 +327,15 @@ ffi::Error SolveVjpBkwdImpl(ffi::Buffer<ffi::S64> handle, ffi::AnyBuffer params,
     return e;
   if (auto e = CheckDtype("grad", *grad, dtype); e.failure())
     return e;
-  auto start = StartTime(t0, t_eval);
+  if (auto e = CheckDtype("t0", t0, dtype); e.failure())
+    return e;
+  if (auto e = CheckDtype("t_eval", t_eval, dtype); e.failure())
+    return e;
+  std::vector<double> t0_scratch, t_eval_scratch;
+  const double *t0_f64 = AsF64(t0, &t0_scratch);
+  const double *t_eval_f64 = AsF64(t_eval, &t_eval_scratch);
+  auto start =
+      StartTime(t0_f64, t0.element_count(), t_eval_f64, t_eval.element_count());
   if (!start.has_value())
     return std::move(start.error());
   if (handle.element_count() != nbatch) {
@@ -402,9 +368,8 @@ ffi::Error SolveVjpBkwdImpl(ffi::Buffer<ffi::S64> handle, ffi::AnyBuffer params,
   auto checkpoint = same_ids ? model->FindCheckpoint(ids[0]) : nullptr;
   if (checkpoint &&
       (checkpoint->instance->callbacks.nbatch != nbatch ||
-       !checkpoint->key.Matches(params_f64, params.element_count(),
-                                t_eval.typed_data(), nt, rtol, atol,
-                                start.value(), max_steps))) {
+       !checkpoint->key.Matches(params_f64, params.element_count(), t_eval_f64,
+                                nt, rtol, atol, start.value(), max_steps))) {
     checkpoint = nullptr;
   }
 
@@ -424,9 +389,9 @@ ffi::Error SolveVjpBkwdImpl(ffi::Buffer<ffi::S64> handle, ffi::AnyBuffer params,
         e.failure())
       return e;
     SolutionWrapper *solution = nullptr;
-    int rc = diffsol_ode_solve_vjp_fwd(s.instance->ode, params_f64, s.nparams,
-                                       nbatch, t_eval.typed_data(), nt,
-                                       &solution, &fresh);
+    int rc =
+        diffsol_ode_solve_vjp_fwd(s.instance->ode, params_f64, s.nparams,
+                                  nbatch, t_eval_f64, nt, &solution, &fresh);
     if (solution)
       diffsol_solution_wrapper_free(solution);
     if (rc != DIFFSOL_OK)
@@ -448,14 +413,11 @@ ffi::Error SolveVjpBkwdImpl(ffi::Buffer<ffi::S64> handle, ffi::AnyBuffer params,
 } // namespace
 } // namespace diffsol_jax
 
-// `params`, `ys`, `sens`, `dgdu` and `grad` are bound as `AnyBuffer` and
-// checked against the model's dtype at run time, so one handler serves both
-// dtypes. The times and the checkpoint handle have fixed types.
 XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveDense, diffsol_jax::SolveDenseImpl,
                               ffi::Ffi::Bind()
                                   .Arg<ffi::AnyBuffer>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
+                                  .Arg<ffi::AnyBuffer>()
+                                  .Arg<ffi::AnyBuffer>()
                                   .Ret<ffi::AnyBuffer>()
                                   .Attr<int64_t>("model_id")
                                   .Attr<double>("rtol")
@@ -466,8 +428,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveFwdSens,
                               diffsol_jax::SolveFwdSensImpl,
                               ffi::Ffi::Bind()
                                   .Arg<ffi::AnyBuffer>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
+                                  .Arg<ffi::AnyBuffer>()
+                                  .Arg<ffi::AnyBuffer>()
                                   .Ret<ffi::AnyBuffer>()
                                   .Ret<ffi::AnyBuffer>()
                                   .Attr<int64_t>("model_id")
@@ -478,8 +440,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveFwdSens,
 XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveVjpFwd, diffsol_jax::SolveVjpFwdImpl,
                               ffi::Ffi::Bind()
                                   .Arg<ffi::AnyBuffer>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
+                                  .Arg<ffi::AnyBuffer>()
+                                  .Arg<ffi::AnyBuffer>()
                                   .Ret<ffi::AnyBuffer>()
                                   .Ret<ffi::Buffer<ffi::S64>>()
                                   .Attr<int64_t>("model_id")
@@ -492,8 +454,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DiffsolSolveVjpBkwd,
                               ffi::Ffi::Bind()
                                   .Arg<ffi::Buffer<ffi::S64>>()
                                   .Arg<ffi::AnyBuffer>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
+                                  .Arg<ffi::AnyBuffer>()
+                                  .Arg<ffi::AnyBuffer>()
                                   .Arg<ffi::AnyBuffer>()
                                   .Ret<ffi::AnyBuffer>()
                                   .Attr<int64_t>("model_id")

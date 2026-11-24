@@ -85,9 +85,9 @@ jobs:
         working-directory: diffsol
         run: cargo build -p diffsol-c --release
       - name: Build wheel
-        env:
-          CMAKE_ARGS: -DDIFFSOL_C_DIR=${{ github.workspace }}/diffsol/target/release
-        run: uv build --wheel --out-dir wheelhouse
+        # github.workspace is a host-side path, not remapped into the container's filesystem
+        # view like $GITHUB_WORKSPACE is, so it must be expanded by the shell instead
+        run: CMAKE_ARGS="-DDIFFSOL_C_DIR=$GITHUB_WORKSPACE/diffsol/target/release" uv build --wheel --out-dir wheelhouse
       - name: Repair wheel for manylinux
         run: uvx auditwheel repair wheelhouse/*.whl -w dist
       - name: Test wheel

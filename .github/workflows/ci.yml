@@ -62,13 +62,52 @@ jobs:
       - name: Run tests
         run: .venv/bin/python -m pytest tests -q
 
-  wheels:
-    name: Wheel (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-15]
+  wheels-linux:
+    name: Wheel (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    # built inside the manylinux container so the bundled libdiffsol_c/libdiffsol_jax only
+    # reference glibc/libstdc++ symbols old enough for PyPI's manylinux_2_28 policy
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout diffsol
+        uses: actions/checkout@v4
+        with:
+          repository: martinjrobins/diffsol
+          ref: ${{ env.DIFFSOL_REF }}
+          path: diffsol
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: diffsol
+      - name: Build diffsol-c
+        working-directory: diffsol
+        run: cargo build -p diffsol-c --release
+      - name: Build wheel
+        # github.workspace is a host-side path, not remapped into the container's filesystem
+        # view like $GITHUB_WORKSPACE is, so it must be expanded by the shell instead
+        run: CMAKE_ARGS="-DDIFFSOL_C_DIR=$GITHUB_WORKSPACE/diffsol/target/release" uv build --wheel --out-dir wheelhouse
+      - name: Repair wheel for manylinux
+        run: uvx auditwheel repair wheelhouse/*.whl -w dist
+      - name: Test wheel
+        # the tests run from outside the repository, so that `import diffsol_jax` resolves to
+        # the installed wheel (with its bundled libdiffsol_jax and libdiffsol_c), not to python/
+        run: |
+          uv venv wheel-venv --python 3.13
+          whl=(dist/*.whl)
+          uv pip install --python wheel-venv/bin/python "${whl}[cpu]" pytest
+          cp -r tests "$RUNNER_TEMP/tests"
+          "$GITHUB_WORKSPACE/wheel-venv/bin/python" -m pytest "$RUNNER_TEMP/tests" -q
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-ubuntu-22.04
+          path: dist/*.whl
+
+  wheels-macos:
+    name: Wheel (macos-15)
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -101,7 +140,7 @@ jobs:
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-macos-15
           path: dist/*.whl
 
   sdist:
@@ -119,12 +158,10 @@ jobs:
           path: dist
 
   release:
-    # TODO before the first PyPI release: build the linux wheel in a manylinux container
-    # (PyPI rejects plain linux_x86_64 wheels) and audit the bundled libraries.
     name: Release
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [lint, test, wheels, sdist]
+    needs: [lint, test, wheels-linux, wheels-macos, sdist]
     environment: pypi
     permissions:
       id-token: write

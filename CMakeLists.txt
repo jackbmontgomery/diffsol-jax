@@ -5,12 +5,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# diffsol-c: `cargo build -p diffsol-c --release` makes the library and the header in
-# `target/release` and `target/release/include`.
 set(DIFFSOL_C_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../target/release"
     CACHE PATH "Directory with libdiffsol_c and include/diffsol.h")
 
-# The XLA FFI header comes with jax: `python -c "import jax.ffi; print(jax.ffi.include_dir())"`.
 if(NOT XLA_FFI_INCLUDE_DIR)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   execute_process(
@@ -34,13 +31,10 @@ target_include_directories(diffsol_jax PRIVATE
   "${DIFFSOL_C_DIR}/include")
 target_link_libraries(diffsol_jax PRIVATE "${DIFFSOL_C_LIB}" ${CMAKE_DL_LIBS})
 target_compile_options(diffsol_jax PRIVATE -Wall -Wextra)
-# find libdiffsol_c next to libdiffsol_jax, or in DIFFSOL_C_DIR
 set_target_properties(diffsol_jax PROPERTIES
   BUILD_RPATH "${DIFFSOL_C_DIR}"
   INSTALL_RPATH "$<IF:$<PLATFORM_ID:Darwin>,@loader_path,$ORIGIN>")
 
-# A wheel build (scikit-build-core) bundles libdiffsol_jax and libdiffsol_c in the package,
-# next to the Python modules that load them.
 if(SKBUILD)
   install(TARGETS diffsol_jax LIBRARY DESTINATION diffsol_jax)
   file(GLOB DIFFSOL_C_SHARED "${DIFFSOL_C_DIR}/libdiffsol_c.*")

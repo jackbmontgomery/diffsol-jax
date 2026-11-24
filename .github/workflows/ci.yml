@@ -13,7 +13,6 @@ permissions:
   contents: read
 
 env:
-  # diffsol main with diffsol_ode_options_set_max_number_timesteps (#460); the diffsol-c 0.9.0 API
   DIFFSOL_REF: fc0c409e8af196d474d7326348429d90145704fe
 
 jobs:
@@ -65,8 +64,6 @@ jobs:
   wheels-linux:
     name: Wheel (ubuntu-22.04)
     runs-on: ubuntu-22.04
-    # built inside the manylinux container so the bundled libdiffsol_c/libdiffsol_jax only
-    # reference glibc/libstdc++ symbols old enough for PyPI's manylinux_2_28 policy
     container: quay.io/pypa/manylinux_2_28_x86_64
     steps:
       - uses: actions/checkout@v4
@@ -85,14 +82,10 @@ jobs:
         working-directory: diffsol
         run: cargo build -p diffsol-c --release
       - name: Build wheel
-        # github.workspace is a host-side path, not remapped into the container's filesystem
-        # view like $GITHUB_WORKSPACE is, so it must be expanded by the shell instead
         run: CMAKE_ARGS="-DDIFFSOL_C_DIR=$GITHUB_WORKSPACE/diffsol/target/release" uv build --wheel --out-dir wheelhouse
       - name: Repair wheel for manylinux
         run: uvx auditwheel repair wheelhouse/*.whl -w dist
       - name: Test wheel
-        # the tests run from outside the repository, so that `import diffsol_jax` resolves to
-        # the installed wheel (with its bundled libdiffsol_jax and libdiffsol_c), not to python/
         run: |
           uv venv wheel-venv --python 3.13
           whl=(dist/*.whl)
@@ -129,8 +122,6 @@ jobs:
           CMAKE_ARGS: -DDIFFSOL_C_DIR=${{ github.workspace }}/diffsol/target/release
         run: uv build --wheel --out-dir dist
       - name: Test wheel
-        # the tests run from outside the repository, so that `import diffsol_jax` resolves to
-        # the installed wheel (with its bundled libdiffsol_jax and libdiffsol_c), not to python/
         run: |
           uv venv wheel-venv --python 3.13
           whl=(dist/*.whl)

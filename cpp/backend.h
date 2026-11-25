@@ -23,7 +23,6 @@ struct ArgView {
   Dtype dtype;
 };
 
-// One PJRT client (one process, one platform), and its first device.
 class Backend {
 public:
   static Backend *Create(const std::string &plugin_path, std::string *err);

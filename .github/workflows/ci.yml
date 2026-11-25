@@ -12,9 +12,6 @@ on:
 permissions:
   contents: read
 
-env:
-  DIFFSOL_REF: fc0c409e8af196d474d7326348429d90145704fe
-
 jobs:
   lint:
     name: Lint
@@ -38,26 +35,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Checkout diffsol
-        uses: actions/checkout@v4
-        with:
-          repository: martinjrobins/diffsol
-          ref: ${{ env.DIFFSOL_REF }}
-          path: diffsol
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: diffsol
-      - name: Build diffsol-c
-        working-directory: diffsol
-        run: cargo build -p diffsol-c --release
       - name: Install Python environment
         run: uv sync --no-default-groups --group test --extra cpu
       - name: Build libdiffsol_jax
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DDIFFSOL_C_DIR="$GITHUB_WORKSPACE/diffsol/target/release" \
-            -DXLA_FFI_INCLUDE_DIR="$(.venv/bin/python -c 'import jax.ffi; print(jax.ffi.include_dir())')"
-          cmake --build build -j4
+        run: cargo build --release
       - name: Run tests
         run: .venv/bin/python -m pytest tests -q
 
@@ -69,29 +51,20 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Checkout diffsol
-        uses: actions/checkout@v4
-        with:
-          repository: martinjrobins/diffsol
-          ref: ${{ env.DIFFSOL_REF }}
-          path: diffsol
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: diffsol
-      - name: Build diffsol-c
-        working-directory: diffsol
-        run: cargo build -p diffsol-c --release
       - name: Build wheel
-        run: CMAKE_ARGS="-DDIFFSOL_C_DIR=$GITHUB_WORKSPACE/diffsol/target/release" uv build --wheel --out-dir wheelhouse
+        run: uv build --wheel --out-dir wheelhouse
       - name: Repair wheel for manylinux
         run: uvx auditwheel repair wheelhouse/*.whl -w dist
-      - name: Test wheel
+      - name: Test wheel on each supported Python (the py3-none wheel has no CPython ABI)
         run: |
-          uv venv wheel-venv --python 3.13
           whl=(dist/*.whl)
-          uv pip install --python wheel-venv/bin/python "${whl}[cpu]" pytest
-          cp -r tests "$RUNNER_TEMP/tests"
-          "$GITHUB_WORKSPACE/wheel-venv/bin/python" -m pytest "$RUNNER_TEMP/tests" -q
+          for py in 3.12 3.13; do
+            uv venv "wheel-venv-$py" --python "$py"
+            uv pip install --python "wheel-venv-$py/bin/python" "${whl}[cpu]" pytest
+            cp -r tests "$RUNNER_TEMP/tests-$py"
+            "$GITHUB_WORKSPACE/wheel-venv-$py/bin/python" -m pytest "$RUNNER_TEMP/tests-$py" -q
+          done
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
@@ -101,33 +74,24 @@ jobs:
   wheels-macos:
     name: Wheel (macos-15)
     runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Checkout diffsol
-        uses: actions/checkout@v4
-        with:
-          repository: martinjrobins/diffsol
-          ref: ${{ env.DIFFSOL_REF }}
-          path: diffsol
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: diffsol
-      - name: Build diffsol-c
-        working-directory: diffsol
-        run: cargo build -p diffsol-c --release
       - name: Build wheel
-        env:
-          CMAKE_ARGS: -DDIFFSOL_C_DIR=${{ github.workspace }}/diffsol/target/release
         run: uv build --wheel --out-dir dist
-      - name: Test wheel
+      - name: Test wheel on each supported Python (the py3-none wheel has no CPython ABI)
         run: |
-          uv venv wheel-venv --python 3.13
           whl=(dist/*.whl)
-          uv pip install --python wheel-venv/bin/python "${whl}[cpu]" pytest
-          cp -r tests "$RUNNER_TEMP/tests"
-          "$GITHUB_WORKSPACE/wheel-venv/bin/python" -m pytest "$RUNNER_TEMP/tests" -q
+          for py in 3.12 3.13; do
+            uv venv "wheel-venv-$py" --python "$py"
+            uv pip install --python "wheel-venv-$py/bin/python" "${whl}[cpu]" pytest
+            cp -r tests "$RUNNER_TEMP/tests-$py"
+            "$GITHUB_WORKSPACE/wheel-venv-$py/bin/python" -m pytest "$RUNNER_TEMP/tests-$py" -q
+          done
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:

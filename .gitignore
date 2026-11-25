@@ -11,6 +11,9 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 
+# Rust
+/target
+
 # C++
 *.o
 *.a

@@ -1,9 +1,9 @@
 from typing import Literal
 
+import jax
 import numpy as np
 from jax.typing import ArrayLike, DTypeLike
 from jaxtyping import PyTree
-import jax
 
 Solver = Literal["bdf", "esdirk34", "tr_bdf2", "tsit45"]
 LinearSolver = Literal["default", "lu", "klu"]

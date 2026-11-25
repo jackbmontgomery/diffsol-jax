@@ -1,51 +1,39 @@
-# Getting started
+# Getting Started
+
+This page should take you through basic usage of `diffsol-jax`. See "Examples"
+on the left for in-depth usage of the wrapper.
 
 ## Installation
 
 ```bash
-pip install diffsol-jax
+pip install diffsol-jax[cpu]
 ```
 
 or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv add diffsol-jax
+uv add diffsol-jax[cpu]
 ```
 
 Requires Python $\geq$ 3.12 and JAX $\geq$ 0.12.
 
-## The PJRT plugin
-
-The equation callbacks are compiled and executed through the
-[PJRT C API](https://openxla.org/xla/pjrt), so diffsol-jax needs a CPU PJRT
-plugin. jaxlib does not ship one as a loadable library, so the `cpu` extra
-installs the plugin from its own wheel,
-[diffsol-jax-pjrt-cpu](https://github.com/jackbmontgomery/diffsol-jax-pjrt-cpu):
-
-```bash
-pip install "diffsol-jax[cpu]"
-```
-
-To use another plugin instead — for example one you built yourself from
-[openxla/xla](https://github.com/openxla/xla), or a prebuilt
-`pjrt_c_api_cpu_plugin.so` from [gopjrt](https://github.com/gomlx/gopjrt)'s
-release assets — point the environment variable at it, which wins over the
-installed package:
+> [!NOTE]
+> The "cpu" extra is not strictly needed. It is included to download a
+> [PJRT C API](https://openxla.org/xla/pjrt) as well as the wrapper. To use
+> another plugin instead, one you built yourself from
+> [openxla/xla](https://github.com/openxla/xla) for example, or a prebuilt
+> `pjrt_c_api_cpu_plugin.so` from [gopjrt](https://github.com/gomlx/gopjrt)'s,
+> point the environment variable at it:
 
 ```bash
 export DIFFSOL_JAX_PJRT_PLUGIN=/path/to/pjrt_c_api_cpu_plugin.so
+
 ```
 
-A plugin in `~/.local/share/pjrt/` is also found automatically when neither of
-the above is present.
+## Problem Definition
 
-!!! tip "Building from source"
-
-```text
-Working against the development version needs a Rust toolchain (for
-[diffsol-c](https://crates.io/crates/diffsol-c)), cmake, and a C++20 compiler. See the
-README's *Building (development)* section for the exact commands.
-```
+`diffsol-jax` calls `diffsol` over the
+[JAX foreign function interface (FFI)](https://docs.jax.dev/en/latest/401/ffi.html).
 
 ## First forward solve
 
@@ -156,8 +144,8 @@ The maths, the `ad=` option, and checkpointing are described in
 
 ## Pytrees: the state and the parameters
 
-`state=` and `params=` each take an int — one flat `[n]` array, as above — or
-a **template** pytree whose float-array leaves give the shapes and dtypes. The
+`state=` and `params=` each take an int — one flat `[n]` array, as above — or a
+**template** pytree whose float-array leaves give the shapes and dtypes. The
 equations act on one lane of those pytrees.
 
 For the state, every leaf must be a float array, since every leaf is integrated.
@@ -290,12 +278,13 @@ problem = ODEProblem(rhs, state=1, params=2, dtype=jnp.float64)
 ys = solve(problem, y0, p, t0, t1, saveat=ts)  # f64 in, f64 out
 ```
 
-Building a `float64` problem without `jax_enable_x64` raises `DiffsolJaxError:
-dtype=float64 needs jax_enable_x64` -- the two must agree, since there is no
-other way to get a value a JAX array can actually hold at that precision.
+Building a `float64` problem without `jax_enable_x64` raises
+`DiffsolJaxError: dtype=float64 needs jax_enable_x64` -- the two must agree,
+since there is no other way to get a value a JAX array can actually hold at that
+precision.
 
-A value you pass in is cast to the problem's dtype regardless of its own, so
-an `f64` array is accepted by an `f32` problem and narrowed (and vice versa).
+A value you pass in is cast to the problem's dtype regardless of its own, so an
+`f64` array is accepted by an `f32` problem and narrowed (and vice versa).
 
 `f32` has an eps of 1.2e-7, so `rtol` and `atol` default to `1e-4` for an `f32`
 problem rather than `1e-6`. Around `1e-5` is as tight as `f32` goes: below that

@@ -46,8 +46,9 @@ class ODEProblem:
         linear_solver: `default`, `lu`, or `klu`.
         matrix_type: `nalgebra_dense`, `faer_dense`, or `faer_sparse`.
         max_checkpoints: how many adjoint checkpoints to keep alive at once.
-        dtype: the scalar type the solver works in, `float32`or `float64`. `float64` needs
-            both `jax_enable_x64` and `dtype=jnp.float64` given explicitly."""
+        dtype: the scalar type the solver works in, defaults to float32 if jax_enable_x64 is false
+            float64 otherwise. Only supports `float32`or `float64`.
+    """
 
     def __init__(
         self,
@@ -62,7 +63,7 @@ class ODEProblem:
         linear_solver: LinearSolver = "default",
         matrix_type: MatrixType = "nalgebra_dense",
         max_checkpoints: int = 8,
-        dtype: DTypeLike = jnp.float32,
+        dtype: DTypeLike | None = None,
     ):
         if not callable(rhs):
             raise DiffsolJaxError("rhs must be a function rhs(y, p, t) -> y-like")
@@ -86,6 +87,7 @@ class ODEProblem:
         }
         self.solver, self.linear_solver = solver, linear_solver
         self.matrix_type, self.max_checkpoints = matrix_type, max_checkpoints
+
         self.dtype = solver_dtype(dtype)
         if self.dtype == F64 and not jax.config.read("jax_enable_x64"):
             raise DiffsolJaxError("dtype=float64 needs jax_enable_x64")

@@ -279,13 +279,14 @@ respect to the times, no `vmap` over them.
 
 ## Dtypes
 
-`ODEProblem(..., dtype=...)` takes `float32` (the default, matching JAX's own
-default) or `float64`.
+`ODEProblem(..., dtype=...)` takes `float32` or `float64`. Left unset, it
+defaults to `float32` while `jax_enable_x64` is off and `float64` once it's
+on; pass `dtype=jnp.float32` explicitly to keep `float32` under x64.
 
 **`dtype` is a solver-precision knob, not a JAX x64 switch, but `float64` needs
-one anyway.** `jax_enable_x64` is required only when `dtype=jnp.float64` is
-given explicitly; `float32` needs nothing extra and runs under JAX's default
-config. The dtype sets the scalar type of the diffsol solver, of the compiled
+one anyway.** `jax_enable_x64` is required whenever `dtype` is (or resolves
+to) `float64`; `float32` needs nothing extra. The dtype sets the scalar type
+of the diffsol solver, of the compiled
 callbacks, and of `y0`, `params`, `ys`, `t0`, `t1`, `saveat` and the gradients
 -- inside a callback `t` is in the model's dtype too, same as everything else.
 The `int64` adjoint checkpoint handle is the one thing that stays fixed-width

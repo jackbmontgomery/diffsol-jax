@@ -3,6 +3,7 @@ from typing import Literal
 import numpy as np
 from jax.typing import ArrayLike, DTypeLike
 from jaxtyping import PyTree
+import jax
 
 Solver = Literal["bdf", "esdirk34", "tr_bdf2", "tsit45"]
 LinearSolver = Literal["default", "lu", "klu"]
@@ -18,7 +19,9 @@ class DiffsolJaxError(RuntimeError):
     pass
 
 
-def solver_dtype(spec: DTypeLike) -> np.dtype:
+def solver_dtype(spec: DTypeLike | None) -> np.dtype:
+    if spec is None:
+        spec = np.float64 if jax.config.read("jax_enable_x64") else np.float32
     try:
         dtype = np.dtype(spec)
     except TypeError as e:

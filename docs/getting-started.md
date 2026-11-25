@@ -46,9 +46,9 @@ from diffsol_jax import ODEProblem, solve
 A problem is the right-hand side `rhs(y, p, t)` — a plain `jax.numpy` function
 of one lane — together with the layouts of the state and the parameters and the
 solver options it is built with. The initial state is not part of it: that is an
-argument of each solve. By default a problem runs in `float32`, matching JAX's
-own default -- nothing else to configure; see [Precision](#precision) for
-`float64`.
+argument of each solve. By default a problem's dtype follows JAX's own
+`jax_enable_x64` config -- `float32` if it's off, `float64` if it's on --
+nothing else to configure; see [Precision](#precision).
 
 ```python
 def lotka_volterra(y, p, t):
@@ -240,7 +240,7 @@ The four options the diffsol solver is built with belong to the problem:
 | Argument          | Default            | Description                                                           |
 | ----------------- | ------------------ | --------------------------------------------------------------------- |
 | `solver`          | `"bdf"`            | `"bdf"`, `"esdirk34"`, `"tr_bdf2"` (implicit), `"tsit45"` (explicit). |
-| `dtype`           | `jnp.float32`      | `jnp.float64` runs the solver in double precision -- see [Precision](#precision). |
+| `dtype`           | follows `jax_enable_x64` | `jnp.float32` or `jnp.float64`, explicit either way -- see [Precision](#precision). |
 | `max_checkpoints` | `8`                | Adjoint checkpoints kept.                                             |
 | `linear_solver`   | `"default"`        | `"lu"` or `"klu"` (with `matrix_type="faer_sparse"`).                 |
 | `matrix_type`     | `"nalgebra_dense"` | `"faer_dense"` or `"faer_sparse"` for larger systems.                 |
@@ -259,29 +259,23 @@ is a second diffsol solver.
 
 ## Precision
 
-A problem is `float32` by default, matching JAX's own default config, and runs
-the solver, its callbacks, and `y0`, `params`, `ys`, `t0`, `t1`, `saveat` and
-the gradients all in `f32` -- no JAX config needed at all:
+A problem's dtype defaults to `float32` if `jax_enable_x64` is off, or
+`float64` once it's on, and runs the solver, its callbacks, and `y0`,
+`params`, `ys`, `t0`, `t1`, `saveat` and the gradients all in that dtype:
 
 ```python
 problem = ODEProblem(rhs, state=1, params=2)  # dtype=jnp.float32, implicitly
 ys = solve(problem, y0, p, t0, t1, saveat=ts)  # f32 in, f32 out
-```
 
-For `float64`, give it explicitly *and* enable JAX's x64 config -- both are
-required, since `float64` is an opt-in on both sides:
-
-```python
 jax.config.update("jax_enable_x64", True)
 
-problem = ODEProblem(rhs, state=1, params=2, dtype=jnp.float64)
+problem = ODEProblem(rhs, state=1, params=2)  # dtype=jnp.float64, implicitly
 ys = solve(problem, y0, p, t0, t1, saveat=ts)  # f64 in, f64 out
 ```
 
-Building a `float64` problem without `jax_enable_x64` raises
-`DiffsolJaxError: dtype=float64 needs jax_enable_x64` -- the two must agree,
-since there is no other way to get a value a JAX array can actually hold at that
-precision.
+To use `float32` with `jax_enable_x64` on, pass `dtype=jnp.float32`
+explicitly. Passing `dtype=jnp.float64` without `jax_enable_x64` raises
+`DiffsolJaxError: dtype=float64 needs jax_enable_x64`.
 
 A value you pass in is cast to the problem's dtype regardless of its own, so an
 `f64` array is accepted by an `f32` problem and narrowed (and vice versa).

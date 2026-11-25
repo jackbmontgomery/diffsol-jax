@@ -30,7 +30,7 @@ Python, each module with one job:
 | `_layout.py` | `Layout`: one pytree flattened into one vector, and back |
 | `_equations.py` | the user functions over flat vectors, the dtype they work in, and the 15 diffsol callbacks derived from them by AD |
 | `_lower.py` | one callback for all the lanes, lowered to StableHLO for a `(B, P)` |
-| `_native.py` | `libdiffsol_jax` and the PJRT plugin, and `Model`: the diffsol solver of one equation set with its cache of compiled callbacks |
+| `_native.py` | the ctypes binding of `libdiffsol_jax` and the PJRT plugin, and `Model`: the diffsol solver of one equation set with its cache of compiled callbacks |
 | `_problem.py` | `ODEProblem`: what the user declares, validated and wired together |
 | `_primitives.py` | the hijax primitives, with their batching and AD rules |
 | `_solve.py` | `solve` |
@@ -44,7 +44,21 @@ C++:
 | `callbacks.{h,cc}` | the diffsol callback trampolines, the view cache and the staging buffers |
 | `registry.{h,cc}` | `Model` (one per problem), `Instance` (one per `B`), the adjoint checkpoints, and the process-wide model table |
 | `ffi_ops.cc` | the four diffsol solves as XLA FFI custom calls |
-| `c_api.cc` | the C functions the Python package calls with ctypes |
+| `c_api.cc` | the complete C API, as one struct of function pointers (`DiffsolJaxApi`), mirrored field for field by `_native.py`'s ctypes `_Api` |
+
+Rust (no Rust API — Cargo is the native build system, because `diffsol-c` is a
+Cargo-only crate and the `cc` crate can compile the C++ too):
+
+| file | what it owns |
+|---|---|
+| `Cargo.toml` | pulls `diffsol-c` and names the one artifact: the `libdiffsol_jax` cdylib |
+| `build.rs` | compiles `cpp/*.cc` (via the `cc` crate) against the vendored XLA headers (`third_party/`) and the `diffsol.h` that `diffsol-c`'s own build script generates |
+| `src/lib.rs` | ~10 lines: re-exports `c_api.cc`'s `diffsol_jax_c_api` as the cdylib's one dynamic symbol (`diffsol_jax_get_api`), since a Rust cdylib exports only Rust `#[no_mangle]` symbols |
+
+Packaging (`hatch_build.py`, a hatchling build hook): runs `cargo build
+--release` and puts the library in the wheel, tagged `py3-none-<platform>` —
+the library has no CPython ABI, so one wheel per platform covers every Python
+version.
 
 The callback inputs go to PJRT with no copy: PJRT gets views of the diffsol
 memory. The XLA CPU client accepts a view only of 64-byte aligned memory. An
@@ -247,35 +261,40 @@ respect to the times, no `vmap` over them.
    `third_party/xla/pjrt/c/pjrt_c_api.h` comes from the same commit (see
    `third_party/README`).
 
-2. diffsol-c: `cargo build -p diffsol-c --release` (from the repository root).
-
-3. libdiffsol_jax (needs `jax` in the active Python, for the XLA FFI header):
+2. diffsol-jax (needs only a Rust toolchain and a C++ compiler: the XLA
+   headers are vendored in `third_party/`, and `diffsol-c` is a normal Cargo
+   dependency pinned in `Cargo.toml`, so one cargo invocation builds
+   everything):
 
    ```sh
-   cmake -S . -B ./build -DCMAKE_BUILD_TYPE=Release
-   cmake --build ./build
+   cargo build --release     # the dev loop; _native.py finds target/release
+   pip install -e .          # or install the package (editable installs also
+                             # load from target/release)
    ```
 
-4. Run the tests:
+3. Run the tests:
 
    ```sh
    export DIFFSOL_JAX_PJRT_PLUGIN=/path/to/xla/bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so
    python -m pytest ./tests
    ```
 
-5. Run the benchmark (needs `pip install diffrax`, and diffsol-c built with the
-   LLVM diffsl backend:
+4. Run the benchmark (needs `pip install diffrax`, and a *standalone* diffsol-c
+   build with the LLVM diffsl backend, from a checkout of the
+   [diffsol](https://github.com/martinjrobins/diffsol) repository:
    `LLVM_SYS_170_PREFIX=/opt/homebrew/opt/llvm@17 cargo build -p diffsol-c --release --features diffsl-llvm17`):
 
    ```sh
    clang -O3 -shared -fPIC -I target/release/include ./bench/models_native.c \
      -o ./build/libmodels_native.dylib
-   python ./bench/bench.py target/release/deps/libdiffsol_c.dylib \
+   python ./bench/bench.py /path/to/diffsol/target/release/libdiffsol_c.dylib \
      ./build/libmodels_native.dylib [--models robertson,lotka_volterra,oscillators]
    ```
 
-   Load `target/release/deps/libdiffsol_c.dylib`: it is the path that
-   `libdiffsol_jax` links to, so only one copy of diffsol-c is in the process.
+   This is a separate diffsol-c build from the one Cargo resolves for
+   diffsol-jax itself (a different checkout, likely a different version and
+   feature set), loaded explicitly by path -- so the comparison is only
+   apples-to-apples if both are built from the same diffsol-c commit.
 
 ## Dtypes
 

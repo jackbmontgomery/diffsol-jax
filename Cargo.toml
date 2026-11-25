@@ -1,0 +1,17 @@
+[package]
+name = "diffsol-jax"
+version = "0.1.0"
+edition = "2021"
+description = "diffsol solves as JAX operations: write the ODE equations as JAX functions, use them in jax.jit, jax.vmap and jax.grad."
+license = "MIT"
+repository = "https://github.com/jackbmontgomery/diffsol-jax"
+
+[lib]
+name = "diffsol_jax"
+crate-type = ["cdylib"]
+
+[dependencies]
+diffsol-c = "0.10"
+
+[build-dependencies]
+cc = "1"
